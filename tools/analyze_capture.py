@@ -8,7 +8,7 @@ import struct, sys, collections
 KINDS = {0: "indexed", 1: "rect", 2: "rect'", 3: "swap"}
 
 
-OBJECT_COUNT, OBJECT_SIZE = 26, 0x80  # kObjectOffsets / kObjectSnapshot
+OBJECT_COUNT, OBJECT_SIZE, CODE_SIZE = 26, 0x80, 0x400  # frame_capture.cpp constants
 
 
 def load(path, with_objects=False):
@@ -26,11 +26,16 @@ def load(path, with_objects=False):
                 offset, pointer = struct.unpack_from("<2I", data, i)
                 objects[offset] = (pointer, data[i + 8:i + 8 + OBJECT_SIZE])
                 i += 8 + OBJECT_SIZE
-            # Then the vertex and pixel shader microcode heads.
-            for key in ("vs_code", "ps_code"):
+            # Then the pixel and vertex shader microcode heads (+0x328C is the pixel shader).
+            for key in ("ps_code", "vs_code"):
                 _, pointer = struct.unpack_from("<2I", data, i)
-                objects[key] = (pointer, data[i + 8:i + 8 + OBJECT_SIZE])
-                i += 8 + OBJECT_SIZE
+                objects[key] = (pointer, data[i + 8:i + 8 + CODE_SIZE])
+                i += 8 + CODE_SIZE
+            # Then the command bytes the draw wrote (frame_capture.cpp RecordCommands).
+            if data[i:i + 4] == b"BCDF":
+                length = struct.unpack_from("<I", data, i + 4)[0]
+                objects["commands"] = data[i + 8:i + 8 + length]
+                i += 8 + length
         records.append((header, snapshot, objects) if with_objects else (header, snapshot))
     return records
 

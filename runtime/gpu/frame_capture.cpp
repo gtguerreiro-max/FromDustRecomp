@@ -6,7 +6,8 @@
 //
 // Record: u32 magic 'FDRW', u32 kind (0 indexed, 1 rect, 2 rect', 3 swap),
 // u32 lr, u32 r3..r10, u32 snapshot size, then that many bytes of guest memory
-// at r3; draws (not the swap) are followed by the referenced objects.
+// at r3; draws (not the swap) are followed by the referenced objects and by
+// an 'FDCB' block with the command bytes the draw wrote.
 // All header words are host (little-endian) order; snapshots are guest bytes.
 
 #include <atomic>
@@ -23,6 +24,7 @@ namespace
 {
 constexpr uint32_t kDeviceSnapshot = 0x8000;
 constexpr uint32_t kObjectSnapshot = 0x80;
+constexpr uint32_t kCodeSnapshot = 0x400;
 constexpr uint32_t kObjectOffsets[] = {0x328C, 0x3290, 0x2F58, 0x318C, 0x3190, 0x3194, 0x3198, 0x319C, 0x31A0, 0x31A4,
     0x31F8, 0x31FC, 0x3200, 0x3204, 0x3208, 0x320C, 0x3210, 0x3214, 0x3218, 0x321C, 0x3220, 0x3224, 0x3228, 0x322C,
     0x3230, 0x3234};
@@ -53,7 +55,7 @@ void Record(uint32_t kind, PPCContext& ctx)
         ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32, kDeviceSnapshot};
     fwrite(header, sizeof(header), 1, g_file);
     fwrite(mem::Translate(ctx.r3.u32), kDeviceSnapshot, 1, g_file);
-    // Objects referenced by the device: shaders (+328C, +3290), index buffer
+    // Objects referenced by the device: pixel shader (+328C), vertex shader (+3290), index buffer
     // (+2F58), render targets (+318C..+31A4) and textures (+31F8..+3234).
     // Each: u32 device offset, u32 pointer, kObjectSnapshot bytes (zero if null).
     for (uint32_t offset : kObjectOffsets)
@@ -64,17 +66,33 @@ void Record(uint32_t kind, PPCContext& ctx)
         fwrite(head, sizeof(head), 1, g_file);
         fwrite(pointer >= 0x40000000 && pointer < 0xC0000000 ? mem::Translate(pointer) : zero, kObjectSnapshot, 1, g_file);
     }
-    // Shader microcode heads: vertex shader object +0x18, pixel shader object +0x20.
+    // Shader microcode heads: pixel shader object +0x18, vertex shader object +0x20
+    // (IM_LOAD packets confirm the types). Written in that order.
     for (auto [offset, field] : {std::pair{0x328Cu, 0x18u}, std::pair{0x3290u, 0x20u}})
     {
         const uint32_t object = mem::Read32(ctx.r3.u32 + offset);
         const uint32_t code = object ? mem::Read32(object + field) : 0;
-        static const uint8_t zero[kObjectSnapshot] = {};
+        static const uint8_t zero[kCodeSnapshot] = {};
         const uint32_t head[2] = {offset, code};
         fwrite(head, sizeof(head), 1, g_file);
-        fwrite(code >= 0xA0000000 && code < 0xC0000000 ? mem::Translate(code) : zero, kObjectSnapshot, 1, g_file);
+        fwrite(code >= 0xA0000000 && code < 0xC0000000 ? mem::Translate(code) : zero, kCodeSnapshot, 1, g_file);
     }
     ++g_draws;
+}
+
+// After the original draw: the command bytes it wrote (state flush + draw
+// packets), from the cursor at device+0x30 before the call to after it.
+// Block: u32 'FDCB', u32 length, guest bytes (length 0 if the buffer wrapped).
+void RecordCommands(uint32_t device, uint32_t before)
+{
+    if (g_state.load() != State::Capturing) return;
+    std::lock_guard lock(g_mutex);
+    if (!g_file) return;
+    const uint32_t after = mem::Read32(device + 0x30);
+    const uint32_t length = after > before && after - before < 0x40000 ? after - before : 0;
+    const uint32_t head[2] = {0x46444342, length};
+    fwrite(head, sizeof(head), 1, g_file);
+    if (length) fwrite(mem::Translate(before), length, 1, g_file);
 }
 
 // Frame boundary: arm at the first swap after the delay, capture until the next.
@@ -106,23 +124,29 @@ void OnSwap(PPCContext& ctx)
 PPC_FUNC_IMPL(__imp__sub_8250DDA0);
 PPC_FUNC(sub_8250DDA0)
 {
+    const uint32_t device = ctx.r3.u32, cursor = mem::Read32(device + 0x30);
     Record(0, ctx);
     __imp__sub_8250DDA0(ctx, base);
+    RecordCommands(device, cursor);
 }
 
 // DrawVertices with rect lists (full-screen passes).
 PPC_FUNC_IMPL(__imp__sub_8250D988);
 PPC_FUNC(sub_8250D988)
 {
+    const uint32_t device = ctx.r3.u32, cursor = mem::Read32(device + 0x30);
     Record(1, ctx);
     __imp__sub_8250D988(ctx, base);
+    RecordCommands(device, cursor);
 }
 
 PPC_FUNC_IMPL(__imp__sub_8250D480);
 PPC_FUNC(sub_8250D480)
 {
+    const uint32_t device = ctx.r3.u32, cursor = mem::Read32(device + 0x30);
     Record(2, ctx);
     __imp__sub_8250D480(ctx, base);
+    RecordCommands(device, cursor);
 }
 
 // Swap (calls VdSwap).

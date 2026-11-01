@@ -121,17 +121,27 @@ One gameplay frame: 634 draws (590 indexed, 44 rect lists).
 | +0x2F58 | index buffer object | equals the draw's r8 |
 | +0x318C..+0x31A4 | render target / depth surfaces | SetRenderTarget offsets 0x3194/0x3198 |
 | +0x31F8..+0x3234 | 16 texture objects (samplers) | type-3 objects with fetch constants |
-| +0x328C | vertex shader object | type 7, microcode at object+0x18, container header 0x102A1100 at +0x28 |
-| +0x3290 | pixel shader object | type 6, microcode at object+0x20 |
+| +0x328C | pixel shader object | type 7, microcode at object+0x18, container header 0x102A1100 at +0x28 |
+| +0x3290 | vertex shader object | type 6, microcode at object+0x20 (IM_LOAD loads it from +0x40: header skipped) |
 
 Resources are standard Xbox D3D objects (type at +0: 3 texture, 4 surface,
-5 index buffer, 6 pixel shader, 7 vertex shader); a texture's Xenos fetch
+5 index buffer, 6 vertex shader, 7 pixel shader). The shader roles are
+confirmed by the IM_LOAD packets each draw writes (type bits: 0 vertex, 1 pixel); a texture's Xenos fetch
 constant (format, physical address, size) is at object+0x1C.
 
-The microcode of every shader used in the captured frame (36 vertex, 32 pixel)
-is found in the shaders extracted from fxlist_360.fxl, so all of them have
-converted DXIL. Some 32-byte heads match several files; the runtime lookup
-should hash the full container.
+Every draw also records the command bytes it wrote (`tools/pm4_decode.py`;
+the cursor at device+0x30 points at the last written word). Shader identity
+comes from those packets and the microcode:
+- Pixel shaders: the microcode (size from IM_LOAD) is found byte for byte in
+  one extracted container.
+- Vertex shaders: the D3D patches the vertex fetch instructions in memory, so
+  they are matched by the most identical dwords (typically all but 2, e.g.
+  58/60). VS/PS pairs come out as consecutive containers (141/142, 145/146,
+  149/150...), as the game stores them.
+- One group of 68 draws (pixel shader 140) has no good vertex match yet
+  (11/39 dwords).
+A live renderer should map objects to containers when the shaders are
+created instead (hook the D3D create functions, as UnleashedRecomp does).
 
 ### Fetch constants and the frame inventory
 
@@ -147,20 +157,20 @@ The captured gameplay frame starts with deferred lighting passes (rect lists
 reading the G-buffer and the 1024x600 24_8_FLOAT depth as textures), then
 draws meshes (the terrain: 5451 indices).
 
-Open questions:
-- 380 of the 590 mesh draws have no vertex shader object at device +0x328C.
-  They probably run precompiled command buffers (Xbox D3D command buffer
-  replay) that bind the shader themselves; device +0x3B58 (47 distinct
-  physical addresses per frame) is a candidate pointer.
-- Many shaders share their first 32 microcode bytes ("004/005+" in the
-  inventory). Match on the whole microcode or the container hash instead.
+Findings:
+- The 380 mesh draws with a null +0x328C have no *pixel* shader.
+  Their commands load only a vertex shader (one IM_LOAD): depth-only passes
+  (shadow maps into 512x512 targets, depth prepass).
+- 145/146/147 are the terrain shaders (heightfield vertex fetch), used for
+  the depth pass and the colour pass.
 
 ## Next steps
 
-0. Resolve the open questions above (command buffer replay, full shader match).
+0. Find the D3D create functions (CreateVertexShader / CreatePixelShader /
+   CreateTexture) to map objects to containers exactly.
 1. Prototype: at each captured draw, resolve shaders (container hash →
    XenosRecomp output), textures (fetch constants) and buffers, and replay one
    frame offline with plume; compare with the Xenia image.
-2. Find the vertex stream setup (vertex fetch constants, probably in the
-   device range +0x0480..+0x05EC that changes per draw).
+2. Decode the vertex layouts (vertex fetch instructions in each VS) and the
+   render state registers the draws write (0x2000-0x2380).
 3. Then hook the engine draws live and draw natively instead of the PM4 path.
