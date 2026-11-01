@@ -133,8 +133,31 @@ is found in the shaders extracted from fxlist_360.fxl, so all of them have
 converted DXIL. Some 32-byte heads match several files; the runtime lookup
 should hash the full container.
 
+### Fetch constants and the frame inventory
+
+Device +0x0480..+0x0780 is a copy of the fetch constant registers
+0x4800-0x48BF: slots 0-15 are the 16 textures (type 2), and vertex fetch 95
+(registers 0x48BE/0x48BF, device +0x0778) is the vertex buffer of stream 0.
+`tools/xenos_fetch.py` decodes texture and vertex fetch constants (written by
+the local Qwen model from Xenia's xenos.h; dwords 3-5 corrected by hand, as
+its excerpt was cut short). `tools/frame_inventory.py` lists every captured
+draw: primitive, count, shaders, decoded textures and vertex buffer.
+
+The captured gameplay frame starts with deferred lighting passes (rect lists
+reading the G-buffer and the 1024x600 24_8_FLOAT depth as textures), then
+draws meshes (the terrain: 5451 indices).
+
+Open questions:
+- 380 of the 590 mesh draws have no vertex shader object at device +0x328C.
+  They probably run precompiled command buffers (Xbox D3D command buffer
+  replay) that bind the shader themselves; device +0x3B58 (47 distinct
+  physical addresses per frame) is a candidate pointer.
+- Many shaders share their first 32 microcode bytes ("004/005+" in the
+  inventory). Match on the whole microcode or the container hash instead.
+
 ## Next steps
 
+0. Resolve the open questions above (command buffer replay, full shader match).
 1. Prototype: at each captured draw, resolve shaders (container hash →
    XenosRecomp output), textures (fetch constants) and buffers, and replay one
    frame offline with plume; compare with the Xenia image.
