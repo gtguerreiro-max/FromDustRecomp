@@ -96,10 +96,48 @@ callers at 8221C354 (indexed draws), 8221C25C and 8221C080 (rect lists) and
 8221D708 (swap), around 0x8221B000-0x8221D800. 82499890 (752 per frame) is a
 higher-level engine render-item function, not a draw.
 
+## Engine backend
+
+`tools/callgraph.py 8221A000 8221E000` (rates from func_counts.txt): 8221C270
+(505/frame) draws meshes through DrawIndexedVertices; 8221C170 / 8221C0F8 /
+8221C000 draw rect lists; 8221D630 presents (Swap). 8221B6E0 (299/frame),
+8221CB48 (109) and 8221C7D0 (35) set per-index and render states. Texture and
+shader setters are not calls: Xbox D3D inlines them as writes to the device.
+
+## Frame capture: the device layout
+
+`FD_FRAME_CAPTURE=<s>` (runtime/gpu/frame_capture.cpp) hooks the draws and Swap
+and writes one frame to `build/frame_capture.bin`: each draw's arguments, a
+32 KB snapshot of the device and the objects it points to.
+`tools/analyze_capture.py` lists the device dwords that change between draws.
+One gameplay frame: 634 draws (590 indexed, 44 rect lists).
+
+| Device offset | Content | Evidence |
+|---|---|---|
+| +0x0000 | dirty mask (64-bit at +0x08) | ORed by setters |
+| +0x0030 | command buffer cursor | new value at every draw |
+| +0x0780 | vertex shader constants c0.. | SetVertexShaderConstantF target |
+| +0x1780 | pixel shader constants c0.. | SetPixelShaderConstantF target |
+| +0x2F58 | index buffer object | equals the draw's r8 |
+| +0x318C..+0x31A4 | render target / depth surfaces | SetRenderTarget offsets 0x3194/0x3198 |
+| +0x31F8..+0x3234 | 16 texture objects (samplers) | type-3 objects with fetch constants |
+| +0x328C | vertex shader object | type 7, microcode at object+0x18, container header 0x102A1100 at +0x28 |
+| +0x3290 | pixel shader object | type 6, microcode at object+0x20 |
+
+Resources are standard Xbox D3D objects (type at +0: 3 texture, 4 surface,
+5 index buffer, 6 pixel shader, 7 vertex shader); a texture's Xenos fetch
+constant (format, physical address, size) is at object+0x1C.
+
+The microcode of every shader used in the captured frame (36 vertex, 32 pixel)
+is found in the shaders extracted from fxlist_360.fxl, so all of them have
+converted DXIL. Some 32-byte heads match several files; the runtime lookup
+should hash the full container.
+
 ## Next steps
 
-1. Map the engine backend around 0x8221B000-0x8221D800 (its SetTexture,
-   SetStreamSource, SetShader wrappers and the draw wrappers above): hooking
-   at this level gives whole draws with their state.
-2. Hook those functions and record one frame's calls, without drawing.
-3. Draw that frame with plume and the converted shaders; compare with Xenia.
+1. Prototype: at each captured draw, resolve shaders (container hash →
+   XenosRecomp output), textures (fetch constants) and buffers, and replay one
+   frame offline with plume; compare with the Xenia image.
+2. Find the vertex stream setup (vertex fetch constants, probably in the
+   device range +0x0480..+0x05EC that changes per draw).
+3. Then hook the engine draws live and draw natively instead of the PM4 path.
