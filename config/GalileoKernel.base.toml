@@ -1,0 +1,8 @@
+﻿[main]
+file_path = "../game/GalileoKernel.xex"
+out_directory_path = "../ppc/GalileoKernel"
+switch_table_file_path = "GalileoKernel_switch_tables.toml"
+
+# Found by tools/xex_dump.py byte-pattern scan
+restgprlr_14_address = 0x88114440
+savegprlr_14_address = 0x881143F0

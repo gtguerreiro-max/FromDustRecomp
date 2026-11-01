@@ -1,0 +1,23 @@
+[main]
+file_path = "../game/Default.xex"
+out_directory_path = "../ppc/Default"
+switch_table_file_path = "Default_switch_tables.toml"
+
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Found by tools/xex_dump.py byte-pattern scan
+restgprlr_14_address = 0x8243A260
+savegprlr_14_address = 0x8243A210
+restfpr_14_address = 0x8243AB2C
+savefpr_14_address = 0x8243AAE0
+restvmx_14_address = 0x8243F158
+savevmx_14_address = 0x8243EEC0
+restvmx_64_address = 0x8243F1EC
+savevmx_64_address = 0x8243EF54

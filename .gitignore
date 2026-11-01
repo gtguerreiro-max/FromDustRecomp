@@ -1,0 +1,13 @@
+# Copyrighted game data and everything derived from it: never commit.
+game/
+dump/
+ppc/
+
+# Build outputs and logs.
+build/
+*.log
+__pycache__/
+
+# Upstream clones (pinned commits + local patches are in patches/).
+XenonRecomp/
+third_party/xenia/

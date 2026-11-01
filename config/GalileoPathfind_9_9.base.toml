@@ -1,0 +1,12 @@
+﻿[main]
+file_path = "../game/GalileoPathfind_9_9.xex"
+out_directory_path = "../ppc/GalileoPathfind_9_9"
+switch_table_file_path = "GalileoPathfind_9_9_switch_tables.toml"
+
+# Found by tools/xex_dump.py byte-pattern scan
+restgprlr_14_address = 0x884951D0
+restvmx_14_address = 0x88498DB8
+restvmx_64_address = 0x88498E4C
+savegprlr_14_address = 0x88495180
+savevmx_14_address = 0x88498B20
+savevmx_64_address = 0x88498BB4

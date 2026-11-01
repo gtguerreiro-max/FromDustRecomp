@@ -1,0 +1,8 @@
+﻿[main]
+file_path = "../game/GalileoTexture.xex"
+out_directory_path = "../ppc/GalileoTexture"
+switch_table_file_path = "GalileoTexture_switch_tables.toml"
+
+# Found by tools/xex_dump.py byte-pattern scan
+restgprlr_14_address = 0x88317D80
+savegprlr_14_address = 0x88317D30

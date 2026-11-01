@@ -1,0 +1,117 @@
+diff --git a/src/xenia/base/filesystem_win.cc b/src/xenia/base/filesystem_win.cc
+index 7a50d8b..2866ac4 100644
+--- a/src/xenia/base/filesystem_win.cc
++++ b/src/xenia/base/filesystem_win.cc
+@@ -40,9 +40,12 @@ std::filesystem::path to_path(const std::u16string_view source) {
+ namespace filesystem {
+ 
+ std::filesystem::path GetExecutablePath() {
+-  wchar_t* path;
+-  auto error = _get_wpgmptr(&path);
+-  return !error ? std::filesystem::path(path) : std::filesystem::path();
++  // The embedded runtime uses narrow main, which doesn't initialize _wpgmptr.
++  std::wstring path(32768, L'\0');
++  const DWORD length = GetModuleFileNameW(nullptr, path.data(), DWORD(path.size()));
++  if (!length || length == path.size()) return {};
++  path.resize(length);
++  return std::filesystem::path(path);
+ }
+ 
+ std::filesystem::path GetExecutableFolder() {
+diff --git a/src/xenia/base/mapped_memory_win.cc b/src/xenia/base/mapped_memory_win.cc
+index 9c1e52b..11f34a2 100644
+--- a/src/xenia/base/mapped_memory_win.cc
++++ b/src/xenia/base/mapped_memory_win.cc
+@@ -27,7 +27,7 @@ class Win32MappedMemory : public MappedMemory {
+  public:
+   // CreateFile returns INVALID_HANDLE_VALUE in case of failure.
+   // chrispy: made inline const to get around clang error
+-  static inline constexpr HANDLE kFileHandleInvalid = INVALID_HANDLE_VALUE;
++  static inline const HANDLE kFileHandleInvalid = INVALID_HANDLE_VALUE;
+   // CreateFileMapping returns nullptr in case of failure.
+   static constexpr HANDLE kMappingHandleInvalid = nullptr;
+ 
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index 82076bc..f62fe7a 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -2246,6 +2246,9 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+                                       uint32_t frontbuffer_width,
+                                       uint32_t frontbuffer_height) {
++#if defined(FROMDUST_GPU_SHIM)
++  memory_->OnGpuSwap();
++#endif
+   SCOPE_profile_cpu_f("gpu");
+   EndZPDFrame();
+ 
+@@ -2617,6 +2620,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+                                       uint32_t index_count,
+                                       IndexBufferInfo* index_buffer_info,
+                                       bool major_mode_explicit) {
++#if defined(FROMDUST_GPU_SHIM)
++  memory_->OnGpuDraw();
++#endif
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+diff --git a/src/xenia/gpu/d3d12/d3d12_graphics_system.cc b/src/xenia/gpu/d3d12/d3d12_graphics_system.cc
+index 3e851ef..b70bd3d 100644
+--- a/src/xenia/gpu/d3d12/d3d12_graphics_system.cc
++++ b/src/xenia/gpu/d3d12/d3d12_graphics_system.cc
+@@ -42,6 +42,7 @@ X_STATUS D3D12GraphicsSystem::Setup(cpu::Processor* processor,
+                                     ui::WindowedAppContext* app_context,
+                                     bool with_presentation) {
+   provider_ = xe::ui::d3d12::D3D12Provider::Create();
++  if (!provider_) return X_STATUS_UNSUCCESSFUL;
+   return GraphicsSystem::Setup(processor, kernel_state, app_context,
+                                with_presentation);
+ }
+diff --git a/src/xenia/gpu/draw_util.cc b/src/xenia/gpu/draw_util.cc
+index 2be7329..0d6855d 100644
+--- a/src/xenia/gpu/draw_util.cc
++++ b/src/xenia/gpu/draw_util.cc
+@@ -765,7 +765,7 @@ static inline void GetScissorTmpl(const RegisterFile& XE_RESTRICT regs,
+       pa_sc_screen_scissor_tl_tl_x, pa_sc_screen_scissor_tl_tl_y,
+       pa_sc_screen_scissor_br_br_x, pa_sc_screen_scissor_br_br_y);
+ #if XE_PLATFORM_WIN32
+-  __m128i xyoffsetadd = _mm_cvtsi64x_si128(
++  __m128i xyoffsetadd = _mm_cvtsi64_si128(
+       static_cast<unsigned long long>(pa_sc_window_offset_window_x_offset) |
+       (static_cast<unsigned long long>(pa_sc_window_offset_window_y_offset)
+        << 32));
+diff --git a/src/xenia/ui/d3d12/d3d12_presenter.cc b/src/xenia/ui/d3d12/d3d12_presenter.cc
+index 554e901..c3065aa 100644
+--- a/src/xenia/ui/d3d12/d3d12_presenter.cc
++++ b/src/xenia/ui/d3d12/d3d12_presenter.cc
+@@ -22,6 +22,10 @@
+ #include "xenia/ui/d3d12/d3d12_util.h"
+ #include "xenia/ui/surface_win.h"
+ 
++#if defined(FD_XENIA_GPU)
++DECLARE_bool(vsync);
++#endif
++
+ DEFINE_bool(
+     d3d12_allow_variable_refresh_rate_and_tearing, true,
+     "In fullscreen, allow using variable refresh rate on displays supporting "
+@@ -1083,10 +1087,19 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+   // fullscreen is ever used in, the allow tearing flag must not be passed in
+   // fullscreen, but DXGI fullscreen is largely unneeded with the flip
+   // presentation model used in Direct3D 12).
++#if defined(FD_XENIA_GPU)
++  // The PC settings panel applies this before workers start. Disable tearing
++  // flags when synchronizing presentation to the monitor's vertical blank.
++  HRESULT present_result = paint_context_.swap_chain->Present(
++      cvars::vsync ? 1 : 0,
++      cvars::vsync ? 0 : (DXGI_PRESENT_RESTART |
++          (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0)));
++#else
+   HRESULT present_result = paint_context_.swap_chain->Present(
+       0, DXGI_PRESENT_RESTART | (paint_context_.swap_chain_allows_tearing
+                                      ? DXGI_PRESENT_ALLOW_TEARING
+                                      : 0));
++#endif
+   // Even if presentation has failed, work might have been enqueued anyway
+   // internally before the failure according to Jesse Natalie from the DirectX
+   // Discord server.

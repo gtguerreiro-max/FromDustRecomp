@@ -1,0 +1,12 @@
+﻿[main]
+file_path = "../game/GalileoSimulatorWater.xex"
+out_directory_path = "../ppc/GalileoSimulatorWater"
+switch_table_file_path = "GalileoSimulatorWater_switch_tables.toml"
+
+# Found by tools/xex_dump.py byte-pattern scan
+restgprlr_14_address = 0x885143D0
+restvmx_14_address = 0x88523A48
+restvmx_64_address = 0x88523ADC
+savegprlr_14_address = 0x88514380
+savevmx_14_address = 0x885237B0
+savevmx_64_address = 0x88523844

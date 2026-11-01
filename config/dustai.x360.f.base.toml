@@ -1,0 +1,10 @@
+﻿[main]
+file_path = "../game/AInative/bin/dll/dustai.x360.f.xex"
+out_directory_path = "../ppc/dustai.x360.f"
+switch_table_file_path = "dustai.x360.f_switch_tables.toml"
+
+# Found by tools/xex_dump.py byte-pattern scan
+restfpr_14_address = 0x8A24150C
+restgprlr_14_address = 0x8A2411E0
+savefpr_14_address = 0x8A2414C0
+savegprlr_14_address = 0x8A241190

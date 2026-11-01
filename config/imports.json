@@ -1,0 +1,1967 @@
+{
+ "functions": {
+  "DbgBreakPoint": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 1
+  },
+  "DbgPrint": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 3
+  },
+  "ExAllocatePoolTypeWithTag": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 11
+  },
+  "ExCreateThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 13
+  },
+  "ExFreePool": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 15
+  },
+  "ExGetXConfigSetting": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 16
+  },
+  "ExRegisterTitleTerminateNotification": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 21
+  },
+  "ExTerminateThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 25
+  },
+  "HalReturnToFirmware": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 40
+  },
+  "IoCheckShareAccess": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 52
+  },
+  "IoCompleteRequest": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 53
+  },
+  "IoCreateDevice": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 55
+  },
+  "IoDeleteDevice": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 57
+  },
+  "IoDismountVolume": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 59
+  },
+  "IoDismountVolumeByFileHandle": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 60
+  },
+  "IoInvalidDeviceRequest": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 65
+  },
+  "IoRemoveShareAccess": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 69
+  },
+  "IoSetShareAccess": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 71
+  },
+  "KeAcquireSpinLockAtRaisedIrql": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 77
+  },
+  "KeBugCheck": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 82
+  },
+  "KeBugCheckEx": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 83
+  },
+  "KeDelayExecutionThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 90
+  },
+  "KeEnableFpuExceptions": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "dustai.x360.f"
+   ],
+   "ordinal": 93
+  },
+  "KeEnterCriticalRegion": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 95
+  },
+  "KeGetCurrentProcessType": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 102
+  },
+  "KeInitializeDpc": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 111
+  },
+  "KeInsertQueueDpc": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 123
+  },
+  "KeLeaveCriticalRegion": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 125
+  },
+  "KeLockL2": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 107
+  },
+  "KeQueryBasePriorityThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 129
+  },
+  "KeQueryPerformanceFrequency": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 131
+  },
+  "KeQuerySystemTime": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 132
+  },
+  "KeReleaseSpinLockFromRaisedIrql": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 137
+  },
+  "KeResetEvent": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 143
+  },
+  "KeSetAffinityThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 151
+  },
+  "KeSetBasePriorityThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 153
+  },
+  "KeSetCurrentProcessType": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 154
+  },
+  "KeSetDisableBoostThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 156
+  },
+  "KeSetEvent": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 157
+  },
+  "KeTlsAlloc": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 338
+  },
+  "KeTlsFree": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 339
+  },
+  "KeTlsGetValue": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 340
+  },
+  "KeTlsSetValue": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 341
+  },
+  "KeUnlockL2": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 108
+  },
+  "KeWaitForMultipleObjects": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 175
+  },
+  "KeWaitForSingleObject": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 176
+  },
+  "KfAcquireSpinLock": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 177
+  },
+  "KfReleaseSpinLock": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 180
+  },
+  "KiApcNormalRoutineNop": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 479
+  },
+  "LDICreateDecompression": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 182
+  },
+  "LDIDecompress": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 183
+  },
+  "LDIDestroyDecompression": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 184
+  },
+  "LDIResetDecompression": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 738
+  },
+  "MmAllocatePhysicalMemoryEx": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 186
+  },
+  "MmFreePhysicalMemory": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 189
+  },
+  "MmGetPhysicalAddress": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 190
+  },
+  "MmLockAndMapSegmentArray": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 192
+  },
+  "MmMapIoSpace": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 194
+  },
+  "MmQueryAddressProtect": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 196
+  },
+  "MmQueryAllocationSize": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel"
+   ],
+   "ordinal": 197
+  },
+  "MmQueryStatistics": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 198
+  },
+  "MmSetAddressProtect": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel"
+   ],
+   "ordinal": 199
+  },
+  "MmUnlockAndUnmapSegmentArray": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 201
+  },
+  "NetDll_WSACleanup": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 2
+  },
+  "NetDll_WSAGetLastError": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 27
+  },
+  "NetDll_WSAStartup": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 1
+  },
+  "NetDll_XNetGetDebugXnAddr": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 74
+  },
+  "NetDll_XNetStartup": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 51
+  },
+  "NtAllocateVirtualMemory": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 204
+  },
+  "NtClearEvent": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 206
+  },
+  "NtClose": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 207
+  },
+  "NtCreateEvent": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 209
+  },
+  "NtCreateFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 210
+  },
+  "NtCreateMutant": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 212
+  },
+  "NtCreateSemaphore": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 213
+  },
+  "NtDeviceIoControlFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 217
+  },
+  "NtDuplicateObject": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 218
+  },
+  "NtFlushBuffersFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 219
+  },
+  "NtFreeVirtualMemory": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 220
+  },
+  "NtOpenFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 223
+  },
+  "NtPulseEvent": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel"
+   ],
+   "ordinal": 226
+  },
+  "NtQueryDirectoryFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 228
+  },
+  "NtQueryFullAttributesFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 231
+  },
+  "NtQueryInformationFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 232
+  },
+  "NtQueryVirtualMemory": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 238
+  },
+  "NtQueryVolumeInformationFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 239
+  },
+  "NtQueueApcThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 227
+  },
+  "NtReadFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 240
+  },
+  "NtReadFileScatter": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 241
+  },
+  "NtReleaseMutant": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 242
+  },
+  "NtReleaseSemaphore": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 243
+  },
+  "NtResumeThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 245
+  },
+  "NtSetEvent": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 246
+  },
+  "NtSetInformationFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 247
+  },
+  "NtSignalAndWaitForSingleObjectEx": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel"
+   ],
+   "ordinal": 251
+  },
+  "NtSuspendThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 252
+  },
+  "NtWaitForMultipleObjectsEx": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 254
+  },
+  "NtWaitForSingleObjectEx": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 253
+  },
+  "NtWriteFile": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 255
+  },
+  "NtWriteFileGather": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 256
+  },
+  "NtYieldExecution": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 257
+  },
+  "ObCreateSymbolicLink": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 259
+  },
+  "ObDeleteSymbolicLink": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 260
+  },
+  "ObDereferenceObject": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 261
+  },
+  "ObIsTitleObject": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 265
+  },
+  "ObLookupThreadByThreadId": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 267
+  },
+  "ObOpenObjectByName": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel"
+   ],
+   "ordinal": 269
+  },
+  "ObOpenObjectByPointer": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 270
+  },
+  "ObReferenceObject": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 271
+  },
+  "ObReferenceObjectByHandle": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 272
+  },
+  "RtlCaptureContext": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 281
+  },
+  "RtlCompareMemory": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 282
+  },
+  "RtlCompareMemoryUlong": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 283
+  },
+  "RtlCompareStringN": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 285
+  },
+  "RtlEnterCriticalSection": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 293
+  },
+  "RtlFillMemoryUlong": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 294
+  },
+  "RtlFreeAnsiString": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 295
+  },
+  "RtlImageXexHeaderField": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 299
+  },
+  "RtlInitAnsiString": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 300
+  },
+  "RtlInitUnicodeString": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 301
+  },
+  "RtlInitializeCriticalSection": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 302
+  },
+  "RtlInitializeCriticalSectionAndSpinCount": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 303
+  },
+  "RtlLeaveCriticalSection": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 304
+  },
+  "RtlMultiByteToUnicodeN": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 307
+  },
+  "RtlNtStatusToDosError": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 309
+  },
+  "RtlRaiseException": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 310
+  },
+  "RtlTimeFieldsToTime": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 319
+  },
+  "RtlTimeToTimeFields": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 320
+  },
+  "RtlTryEnterCriticalSection": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 321
+  },
+  "RtlUnicodeStringToAnsiString": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 322
+  },
+  "RtlUnicodeToMultiByteN": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "dustai.x360.f"
+   ],
+   "ordinal": 323
+  },
+  "RtlUnwind": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "dustai.x360.f"
+   ],
+   "ordinal": 327
+  },
+  "RtlUpcaseUnicodeChar": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 329
+  },
+  "StfsControlDevice": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 602
+  },
+  "StfsCreateDevice": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 601
+  },
+  "VdCallGraphicsNotificationRoutines": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 433
+  },
+  "VdEnableDisableClockGating": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 436
+  },
+  "VdEnableRingBufferRPtrWriteBack": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 438
+  },
+  "VdGetCurrentDisplayGamma": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 441
+  },
+  "VdGetCurrentDisplayInformation": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 442
+  },
+  "VdGetSystemCommandBuffer": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 445
+  },
+  "VdInitializeEngines": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 450
+  },
+  "VdInitializeRingBuffer": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 451
+  },
+  "VdInitializeScalerCommandBuffer": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 453
+  },
+  "VdIsHSIOTrainingSucceeded": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 454
+  },
+  "VdPersistDisplay": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 455
+  },
+  "VdQueryVideoFlags": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 457
+  },
+  "VdQueryVideoMode": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 458
+  },
+  "VdRetrainEDRAM": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 617
+  },
+  "VdRetrainEDRAMWorker": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 618
+  },
+  "VdSetDisplayMode": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 467
+  },
+  "VdSetGraphicsInterruptCallback": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 469
+  },
+  "VdSetSystemCommandBufferGpuIdentifierAddress": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 473
+  },
+  "VdShutdownEngines": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 476
+  },
+  "VdSwap": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 603
+  },
+  "XAudioGetSpeakerConfig": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 511
+  },
+  "XAudioGetVoiceCategoryVolume": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 504
+  },
+  "XAudioRegisterRenderDriverClient": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 499
+  },
+  "XAudioSubmitRenderDriverFrame": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 501
+  },
+  "XAudioUnregisterRenderDriverClient": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 500
+  },
+  "XGetAVPack": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 971
+  },
+  "XGetGameRegion": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 972
+  },
+  "XGetLanguage": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 973
+  },
+  "XGetVideoMode": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 977
+  },
+  "XMACreateContext": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 548
+  },
+  "XMAReleaseContext": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 550
+  },
+  "XMsgCancelIORequest": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 504
+  },
+  "XMsgInProcessCall": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 500
+  },
+  "XMsgStartIORequest": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 503
+  },
+  "XMsgStartIORequestEx": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 508
+  },
+  "XNotifyGetNext": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 651
+  },
+  "XamAlloc": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 490
+  },
+  "XamAvatarInitialize": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 1500
+  },
+  "XamAvatarLoadAnimation": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 1511
+  },
+  "XamAvatarShutdown": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 1501
+  },
+  "XamContentClose": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 602
+  },
+  "XamContentCreateEx": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 601
+  },
+  "XamContentFlush": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 615
+  },
+  "XamContentGetCreator": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 610
+  },
+  "XamContentGetDeviceData": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 606
+  },
+  "XamContentGetLicenseMask": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 614
+  },
+  "XamContentSetThumbnail": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 608
+  },
+  "XamEnumerate": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 592
+  },
+  "XamFree": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 492
+  },
+  "XamGetExecutionId": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 640
+  },
+  "XamGetSystemVersion": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 642
+  },
+  "XamInputGetCapabilities": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 400
+  },
+  "XamInputGetKeystrokeEx": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 408
+  },
+  "XamInputGetState": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 401
+  },
+  "XamInputSetState": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 402
+  },
+  "XamLoaderLaunchTitle": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 420
+  },
+  "XamLoaderTerminateTitle": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 425
+  },
+  "XamNotifyCreateListener": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 650
+  },
+  "XamSessionCreateHandle": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 790
+  },
+  "XamSessionRefObjByHandle": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 791
+  },
+  "XamShowAchievementsUI": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 709
+  },
+  "XamShowDeviceSelectorUI": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 715
+  },
+  "XamShowGamerCardUIForXUID": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 725
+  },
+  "XamShowMarketplaceUI": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 711
+  },
+  "XamShowMessageBoxUIEx": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 732
+  },
+  "XamShowSigninUI": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 700
+  },
+  "XamTaskCloseHandle": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 433
+  },
+  "XamTaskSchedule": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 431
+  },
+  "XamTaskShouldExit": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 435
+  },
+  "XamUserCreateStatsEnumerator": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 759
+  },
+  "XamUserGetSigninInfo": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 551
+  },
+  "XamUserGetSigninState": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 528
+  },
+  "XamUserGetXUID": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 522
+  },
+  "XamUserReadProfileSettings": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 537
+  },
+  "XamUserWriteProfileSettings": {
+   "lib": "xam.xex",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 538
+  },
+  "XeCryptRandom": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 394
+  },
+  "XeCryptSha": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 402
+  },
+  "XeKeysConsolePrivateKeySign": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 598
+  },
+  "XeKeysConsoleSignatureVerification": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 599
+  },
+  "XexCheckExecutablePrivilege": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 404
+  },
+  "XexGetModuleHandle": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 405
+  },
+  "XexGetModuleSection": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel"
+   ],
+   "ordinal": 406
+  },
+  "XexGetProcedureAddress": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 407
+  },
+  "XexLoadImage": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 409
+  },
+  "XexLoadImageHeaders": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 411
+  },
+  "XexUnloadImage": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel"
+   ],
+   "ordinal": 417
+  },
+  "XexUnloadImageAndExitThread": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "GalileoKernel"
+   ],
+   "ordinal": 418
+  },
+  "__C_specific_handler": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default",
+    "GalileoKernel",
+    "GalileoPathfind_9_9",
+    "GalileoSimulatorWater",
+    "GalileoSimulatorWater_9_9",
+    "GalileoTexture",
+    "dustai.x360.f"
+   ],
+   "ordinal": 421
+  },
+  "_snprintf": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 314
+  },
+  "_vsnprintf": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 333
+  },
+  "sprintf": {
+   "lib": "xboxkrnl.exe",
+   "modules": [
+    "Default"
+   ],
+   "ordinal": 315
+  }
+ },
+ "variables": {
+  "ExEventObjectType": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 14,
+   "slots": [
+    "0x88100458"
+   ]
+  },
+  "ExLoadedCommandLine": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 430,
+   "slots": [
+    "0x8200082C"
+   ]
+  },
+  "ExSemaphoreObjectType": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 23,
+   "slots": [
+    "0x88100468"
+   ]
+  },
+  "ExThreadObjectType": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 27,
+   "slots": [
+    "0x820008AC",
+    "0x88100490",
+    "0x8A000464"
+   ]
+  },
+  "ExTimerObjectType": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 28,
+   "slots": [
+    "0x88100478"
+   ]
+  },
+  "KeCertMonitorData": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 614,
+   "slots": [
+    "0x8200098C"
+   ]
+  },
+  "KeDebugMonitorData": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 89,
+   "slots": [
+    "0x82000938",
+    "0x881004A8",
+    "0x8A00043C"
+   ]
+  },
+  "KeTimeStampBundle": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 173,
+   "slots": [
+    "0x8200079C"
+   ]
+  },
+  "VdGlobalDevice": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 446,
+   "slots": [
+    "0x82000984"
+   ]
+  },
+  "VdGlobalXamDevice": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 447,
+   "slots": [
+    "0x82000980"
+   ]
+  },
+  "VdGpuClockInMHz": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 448,
+   "slots": [
+    "0x820008A0"
+   ]
+  },
+  "VdHSIOCalibrationLock": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 449,
+   "slots": [
+    "0x82000878"
+   ]
+  },
+  "XboxHardwareInfo": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 342,
+   "slots": [
+    "0x820007F4",
+    "0x88100554",
+    "0x8848045C",
+    "0x8850045C",
+    "0x8918045C",
+    "0x8830045C",
+    "0x8A0004B0"
+   ]
+  },
+  "XboxKrnlVersion": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 344,
+   "slots": [
+    "0x82000944"
+   ]
+  },
+  "XexExecutableModuleHandle": {
+   "lib": "xboxkrnl.exe",
+   "ordinal": 403,
+   "slots": [
+    "0x82000824",
+    "0x881004E0",
+    "0x88480428",
+    "0x88500428",
+    "0x89180428",
+    "0x88300428",
+    "0x8A000438"
+   ]
+  }
+ }
+}
