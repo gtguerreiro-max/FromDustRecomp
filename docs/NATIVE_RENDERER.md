@@ -164,6 +164,24 @@ Findings:
 - 145/146/147 are the terrain shaders (heightfield vertex fetch), used for
   the depth pass and the colour pass.
 
+## Helper modules (written by the local Qwen model, validated)
+
+| Module | Content | Validation |
+|---|---|---|
+| tools/xenos_fetch.py | texture / vertex fetch constants | dwords 0-2 checked, 3-5 corrected by hand |
+| tools/xenos_vfetch.py | vertex fetch instructions, vertex layouts | every bit position matches ucode.h |
+| tools/xenos_state.py | render state registers → D3D12 summary | sample decode checked against registers.h |
+| tools/xenos_tiling.py | tiled texture addressing, untile_2d | 22058 coordinates identical to Xenia's C++ |
+
+## Shader creation
+
+Qwen identified the init functions: 820DB120 initialises a vertex shader
+object (r3 object, r4 microcode, stored at +0x20) and 820DA850 a pixel shader
+(stored at +0x18). frame_capture.cpp hooks both and writes each object and its
+unpatched microcode to build/shader_inits.bin. The game creates 557 shaders at
+startup (all of fxlist_360.fxl); 507 match one extracted container exactly by
+microcode, 50 by their longest identical prefix (32-256 bytes).
+
 ## Next steps
 
 0. Find the D3D create functions (CreateVertexShader / CreatePixelShader /

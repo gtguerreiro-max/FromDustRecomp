@@ -156,3 +156,39 @@ PPC_FUNC(sub_820E0AC8)
     OnSwap(ctx);
     __imp__sub_820E0AC8(ctx, base);
 }
+
+// Shader object initialisation (identified by the local Qwen model): r3 is the
+// new object, r4 the microcode, not yet patched with vertex fetch bindings.
+// With FD_FRAME_CAPTURE set, each one is appended to shader_inits.bin:
+// u32 'FDSI', u32 kind (0 vertex, 1 pixel), u32 object, u32 microcode,
+// kCodeSnapshot bytes of microcode.
+namespace
+{
+void RecordShaderInit(uint32_t kind, PPCContext& ctx)
+{
+    if (!Enabled()) return;
+    std::lock_guard lock(g_mutex);
+    static FILE* file = fopen("shader_inits.bin", "wb");
+    if (!file) return;
+    const uint32_t head[4] = {0x46445349, kind, ctx.r3.u32, ctx.r4.u32};
+    fwrite(head, sizeof(head), 1, file);
+    static const uint8_t zero[kCodeSnapshot] = {};
+    const uint32_t code = ctx.r4.u32;
+    fwrite(code >= 0x40000000 && code < 0xC0000000 ? mem::Translate(code) : zero, kCodeSnapshot, 1, file);
+    fflush(file);
+}
+}
+
+PPC_FUNC_IMPL(__imp__sub_820DB120);
+PPC_FUNC(sub_820DB120)
+{
+    RecordShaderInit(0, ctx);
+    __imp__sub_820DB120(ctx, base);
+}
+
+PPC_FUNC_IMPL(__imp__sub_820DA850);
+PPC_FUNC(sub_820DA850)
+{
+    RecordShaderInit(1, ctx);
+    __imp__sub_820DA850(ctx, base);
+}
