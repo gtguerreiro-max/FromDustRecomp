@@ -9,6 +9,11 @@ git -C XenonRecomp checkout ddd128bcca99fe8bfbb99bea583c972351fa6ace
 git -C XenonRecomp submodule update --init --recursive
 git -C XenonRecomp apply ../patches/xenonrecomp.patch
 
+git clone https://github.com/hedge-dev/XenosRecomp XenosRecomp
+git -C XenosRecomp checkout 990d03b28a27b50277ee5d8d942e1c5f873869d1
+git -C XenosRecomp submodule update --init --recursive
+git -C XenosRecomp apply ../patches/xenosrecomp.patch
+
 git clone https://github.com/xenia-canary/xenia-canary third_party/xenia
 git -C third_party/xenia checkout 96ce1ac47ee7646deac2a2c9c912351e8ff0edee
 git -C third_party/xenia submodule update --init --depth 1 \

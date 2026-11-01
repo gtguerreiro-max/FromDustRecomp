@@ -11,3 +11,4 @@ __pycache__/
 # Upstream clones (pinned commits + local patches are in patches/).
 XenonRecomp/
 third_party/xenia/
+XenosRecomp/

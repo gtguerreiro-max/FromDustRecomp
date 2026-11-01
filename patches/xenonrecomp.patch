@@ -550,10 +550,20 @@ index fa91527..f02a343 100644
      case PPC_INST_VSRAW128:
          // TODO: vectorize, ensure endianness is correct
 diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
-index 31a86cd..a8de0ee 100644
+index 31a86cd..529ea25 100644
 --- a/XenonUtils/ppc_context.h
 +++ b/XenonUtils/ppc_context.h
-@@ -107,7 +107,9 @@
+@@ -29,7 +29,9 @@
+ #define PPC_EXTERN_FUNC(x) extern PPC_FUNC(x)
+ #define PPC_WEAK_FUNC(x) __attribute__((weak,noinline)) PPC_FUNC(x)
+ 
++#ifndef PPC_FUNC_PROLOGUE
+ #define PPC_FUNC_PROLOGUE() __builtin_assume(((size_t)base & 0x1F) == 0)
++#endif
+ 
+ #ifndef PPC_LOAD_U8
+ #define PPC_LOAD_U8(x) *(volatile uint8_t*)(base + (x))
+@@ -107,7 +109,9 @@
  
  #define PPC_MEMORY_SIZE 0x100000000ull
  
@@ -563,7 +573,7 @@ index 31a86cd..a8de0ee 100644
  
  #ifndef PPC_CALL_INDIRECT_FUNC
  #define PPC_CALL_INDIRECT_FUNC(x) (PPC_LOOKUP_FUNC(base, x))(ctx, base)
-@@ -682,6 +684,26 @@ inline simde__m128i simde_mm_vctsxs(simde__m128 src1)
+@@ -682,6 +686,26 @@ inline simde__m128i simde_mm_vctsxs(simde__m128 src1)
      return simde_mm_andnot_si128(simde_mm_castps_si128(xmm2), simde_mm_castps_si128(dest));
  }
  

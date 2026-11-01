@@ -1,0 +1,183 @@
+diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index 1c74034..f3fc04a 100644
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -30,6 +30,7 @@ struct PushConstants
+ #define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
+ #define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264)
+ #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)
++#define g_LoopConstant(INDEX)      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 288 + (INDEX) * 4)
+ 
+ [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
+ 
+@@ -41,12 +42,21 @@ struct PushConstants
+     uint g_Booleans : packoffset(c16.x); \
+     uint g_SwappedTexcoords : packoffset(c16.y); \
+     float2 g_HalfPixelOffset : packoffset(c16.z); \
+-    float g_AlphaThreshold : packoffset(c17.x);
++    float g_AlphaThreshold : packoffset(c17.x); \
++    uint4 g_LoopConstants[8] : packoffset(c18);
++
++#define g_LoopConstant(INDEX) g_LoopConstants[(INDEX) / 4][(INDEX) % 4]
+ 
+ uint g_SpecConstants();
+ 
+ #endif
+ 
++#ifdef XENOS_VERTEX_SHADER
++#define XE_SAMPLE(texture, samplerState, coord) texture.SampleLevel(samplerState, coord, 0)
++#else
++#define XE_SAMPLE(texture, samplerState, coord) texture.Sample(samplerState, coord)
++#endif
++
+ Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
+ Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
+ TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
+@@ -59,10 +69,15 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+     return dimensions;
+ }
+ 
++float4 tfetch1D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float texCoord)
++{
++    return XE_SAMPLE(g_Texture2DDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], float2(texCoord, 0.5));
++}
++
+ float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
+ {
+     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+-    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
++    return XE_SAMPLE(texture, g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
+ }
+ 
+ float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
+@@ -135,17 +150,17 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+     float h1y = h1(fy);
+ 
+     float4 r =
+-        g0(fy) * (g0x * texture.Sample(samplerState, float2(px + h0x, py + h0y) / float2(dimensions)) +
+-            g1x * texture.Sample(samplerState, float2(px + h1x, py + h0y) / float2(dimensions))) +
+-        g1(fy) * (g0x * texture.Sample(samplerState, float2(px + h0x, py + h1y) / float2(dimensions)) +
+-            g1x * texture.Sample(samplerState, float2(px + h1x, py + h1y) / float2(dimensions)));
++        g0(fy) * (g0x * XE_SAMPLE(texture, samplerState, float2(px + h0x, py + h0y) / float2(dimensions)) +
++            g1x * XE_SAMPLE(texture, samplerState, float2(px + h1x, py + h0y) / float2(dimensions))) +
++        g1(fy) * (g0x * XE_SAMPLE(texture, samplerState, float2(px + h0x, py + h1y) / float2(dimensions)) +
++            g1x * XE_SAMPLE(texture, samplerState, float2(px + h1x, py + h1y) / float2(dimensions)));
+ 
+     return r;
+ }
+ 
+ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
+ {
+-    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
++    return XE_SAMPLE(g_Texture3DDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
+ }
+ 
+ struct CubeMapData
+@@ -156,7 +171,7 @@ struct CubeMapData
+ 
+ float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
+ {
+-    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
++    return XE_SAMPLE(g_TextureCubeDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
+ }
+ 
+ float4 tfetchR11G11B10(uint4 value)
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 698a418..8349855 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -253,6 +253,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+ #endif
+ 
+     auto findResult = samplers.find(instr.constIndex);
++    // Vertex texture fetch constants follow the 16 pixel samplers: s16 is vertex sampler 0.
++    if (findResult == samplers.end() && !isPixelShader && instr.constIndex >= 16)
++        findResult = samplers.find(instr.constIndex - 16);
+     if (findResult != samplers.end())
+     {
+         constNamePtr = findResult->second;
+@@ -331,7 +334,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+         out += "Bicubic";
+ #endif
+ 
+-    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
++    // 1D textures are bound as 2D textures of height 1 (no separate descriptor heap).
++    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr,
++        instr.dimension == TextureDimension::Texture1D ? std::string_view("2D") : dimension);
+     printSrcRegister(componentCount);
+ 
+     switch (instr.dimension)
+@@ -1105,11 +1110,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
+     assert(shaderContainer->constantTableOffset != NULL);
+ 
++    isPixelShader = (shaderContainer->flags & 0x1) == 0;
++
++    // Vertex shaders have no implicit derivatives: texture fetches use LOD 0.
++    if (!isPixelShader)
++        out += "#define XENOS_VERTEX_SHADER\n";
+     out += include;
+     out += '\n';
+ 
+-    isPixelShader = (shaderContainer->flags & 0x1) == 0;
+-
+     const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
+     constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
+ 
+@@ -1322,19 +1330,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             }
+         #endif
+ 
+-            out += '\t';
+-
+-            for (auto& usageLocation : USAGE_LOCATIONS)
++            // Several fetches (addresses) can share one input semantic: declare it once.
++            bool alreadyDeclared = false;
++            for (const auto& element : vertexElements)
+             {
+-                if (usageLocation.usage == vertexElement.usage && usageLocation.usageIndex == vertexElement.usageIndex)
++                if (element.second.usage == vertexElement.usage && element.second.usageIndex == vertexElement.usageIndex)
+                 {
+-                    print("[[vk::location({})]] ", usageLocation.location);
++                    alreadyDeclared = true;
+                     break;
+                 }
+             }
+ 
+-            println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
+-                uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
++            if (!alreadyDeclared)
++            {
++                out += '\t';
++
++                for (auto& usageLocation : USAGE_LOCATIONS)
++                {
++                    if (usageLocation.usage == vertexElement.usage && usageLocation.usageIndex == vertexElement.usageIndex)
++                    {
++                        print("[[vk::location({})]] ", usageLocation.location);
++                        break;
++                    }
++                }
++
++                println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
++                    uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
++            }
+ 
+             vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
+         }
+@@ -1418,6 +1440,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         out += "\n";
+     }
+ 
++    // Loop constants set at runtime (SetShaderConstantI) rather than defined in
++    // the shader: packed Xenos loop registers (count, start, signed step bytes)
++    // read from the shared constants.
++    for (uint32_t i = 0; i < 32; i++)
++    {
++        if (out.find(fmt::format("int4 i{} =", i)) == std::string::npos)
++            println("\tint4 i{0} = int4(g_LoopConstant({0}) & 0xFF, (g_LoopConstant({0}) >> 8) & 0xFF, int(g_LoopConstant({0}) << 8) >> 24, 0);", i);
++    }
++
+     bool printedRegisters[32]{};
+ 
+     uint32_t interpolatorCount = (shader->interpolatorInfo >> 5) & 0x1F;

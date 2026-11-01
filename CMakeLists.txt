@@ -25,6 +25,12 @@ function(add_ppc_module target dir)
 endfunction()
 
 add_ppc_module(DefaultPPC Default)
+# Diagnostic build: count calls to Default.xex functions in the D3D library
+# range (see FD_FUNC_COUNTS in runtime/kernel/debug.cpp). Rebuilds DefaultPPC.
+option(FD_FUNC_COUNTERS "Count calls to the guest D3D library functions" OFF)
+if(FD_FUNC_COUNTERS)
+    target_compile_definitions(DefaultPPC PRIVATE FD_FUNC_COUNTERS=1)
+endif()
 add_ppc_module(GalileoKernelPPC GalileoKernel)
 add_ppc_module(GalileoPathfindPPC GalileoPathfind_9_9)
 add_ppc_module(GalileoWaterPPC GalileoSimulatorWater)
