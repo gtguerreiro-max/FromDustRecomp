@@ -1,5 +1,5 @@
 diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
-index 1c74034..1f7fc07 100644
+index 1c74034..6efeeac 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
 @@ -15,6 +15,9 @@
@@ -12,7 +12,7 @@ index 1c74034..1f7fc07 100644
  #ifdef __spirv__
  
  struct PushConstants
-@@ -26,10 +29,11 @@ struct PushConstants
+@@ -26,10 +29,12 @@ struct PushConstants
  
  [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
  
@@ -25,10 +25,11 @@ index 1c74034..1f7fc07 100644
 +#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 520)
 +#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 528)
 +#define g_LoopConstant(INDEX)      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 544 + (INDEX) * 4)
++#define fdFetchScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1536 + (INDEX) * 4)
  
  [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
  
-@@ -38,15 +42,94 @@ struct PushConstants
+@@ -38,15 +43,95 @@ struct PushConstants
  #else
  
  #define DEFINE_SHARED_CONSTANTS() \
@@ -41,9 +42,10 @@ index 1c74034..1f7fc07 100644
 +    float2 g_HalfPixelOffset : packoffset(c32.z); \
 +    float g_AlphaThreshold : packoffset(c33.x); \
 +    uint4 g_LoopConstants[8] : packoffset(c34); \
-+    uint4 g_VertexFetch[32] : packoffset(c64);
++    uint4 g_VertexFetch[32] : packoffset(c64);     float4 g_FetchScales[8] : packoffset(c96);
 +
 +#define g_LoopConstant(INDEX) g_LoopConstants[(INDEX) / 4][(INDEX) % 4]
++#define fdFetchScale(INDEX) g_FetchScales[(INDEX) / 4][(INDEX) % 4]
  
  uint g_SpecConstants();
  
@@ -127,7 +129,7 @@ index 1c74034..1f7fc07 100644
  Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
  Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
  TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
-@@ -59,10 +142,15 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+@@ -59,10 +144,15 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
      return dimensions;
  }
  
@@ -144,7 +146,7 @@ index 1c74034..1f7fc07 100644
  }
  
  float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
-@@ -135,17 +223,17 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+@@ -135,17 +225,17 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
      float h1y = h1(fy);
  
      float4 r =
@@ -167,7 +169,7 @@ index 1c74034..1f7fc07 100644
  }
  
  struct CubeMapData
-@@ -156,7 +244,7 @@ struct CubeMapData
+@@ -156,7 +246,7 @@ struct CubeMapData
  
  float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
  {
@@ -177,7 +179,7 @@ index 1c74034..1f7fc07 100644
  
  float4 tfetchR11G11B10(uint4 value)
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 698a418..af572bf 100644
+index 698a418..d84f153 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -179,6 +179,20 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
@@ -221,7 +223,18 @@ index 698a418..af572bf 100644
      if (findResult != samplers.end())
      {
          constNamePtr = findResult->second;
-@@ -331,7 +351,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -282,6 +302,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+     printDstSwizzle(instr.dstSwizzle, false);
+ 
+     out += " = ";
++    // FromDust: per fetch constant scale (resolve exponent bias combined with
++    // the fetch's exp_adjust when the host reads a render target directly).
++    if (instr.opcode == FetchOpcode::TextureFetch)
++        out += '(';
+     switch (instr.opcode)
+     {
+     case FetchOpcode::TextureFetch:
+@@ -331,7 +355,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
          out += "Bicubic";
  #endif
  
@@ -232,7 +245,19 @@ index 698a418..af572bf 100644
      printSrcRegister(componentCount);
  
      switch (instr.dimension)
-@@ -1105,11 +1127,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -344,7 +370,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+         break;
+     }
+ 
+-    out += ").";
++    if (instr.opcode == FetchOpcode::TextureFetch)
++        print(") * fdFetchScale({})).", uint32_t(instr.constIndex));
++    else
++        out += ").";
+ 
+     printDstSwizzle(instr.dstSwizzle, true);
+ 
+@@ -1105,11 +1134,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
      assert(shaderContainer->constantTableOffset != NULL);
  
@@ -249,7 +274,7 @@ index 698a418..af572bf 100644
      const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
      constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
  
-@@ -1174,11 +1199,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1174,11 +1206,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
@@ -263,7 +288,7 @@ index 698a418..af572bf 100644
  
              samplers.emplace(constantInfo->registerIndex, constantName);
              break;
-@@ -1233,11 +1258,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1233,11 +1265,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",
@@ -277,7 +302,7 @@ index 698a418..af572bf 100644
          }
      }
  
-@@ -1322,19 +1347,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1322,19 +1354,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              }
          #endif
  
@@ -318,7 +343,7 @@ index 698a418..af572bf 100644
  
              vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
          }
-@@ -1347,6 +1386,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1347,6 +1393,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
      #endif
  
@@ -329,7 +354,7 @@ index 698a418..af572bf 100644
          out += "\tout float4 oPos : SV_Position";
  
          for (auto& [usage, usageIndex] : INTERPOLATORS)
-@@ -1418,6 +1461,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1418,6 +1468,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\n";
      }
  
@@ -345,7 +370,7 @@ index 698a418..af572bf 100644
      bool printedRegisters[32]{};
  
      uint32_t interpolatorCount = (shader->interpolatorInfo >> 5) & 0x1F;
-@@ -1471,6 +1523,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1471,6 +1530,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              {
                  out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
              }

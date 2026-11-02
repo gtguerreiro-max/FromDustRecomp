@@ -124,6 +124,7 @@ struct Draw
     uint32_t swizzles[32] = {};           // fetch swizzle per slot
     uint32_t boolLoop[40] = {};           // registers 0x4900-0x4927
     const uint8_t* vertexFetch = nullptr; // 32 uint4 g_VertexFetch descriptors (pulled vertex fetches)
+    int32_t expAdjust[32] = {};           // texture fetch constant exp_adjust per slot
     // "#resolve" records: EDRAM -> texture copy.
     bool resolve = false;
     uint32_t copyDest = 0, copyControl = 0, copySurface = 0, copyColor = 0, copyDepth = 0, copyDestInfo = 0;
@@ -133,6 +134,7 @@ struct Draw
 constexpr uint32_t kSharedTextureIndex = 0;   // + dimension * 128 + slot * 4
 constexpr uint32_t kSharedSamplerIndex = 384; // + slot * 4
 constexpr uint32_t kSharedVertexFetch = 1024; // 32 uint4
+constexpr uint32_t kSharedFetchScale = 1536; // 32 floats
 constexpr uint32_t kSharedSize = 2048;
 
 std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
@@ -182,6 +184,7 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         for (uint32_t& w : d.swizzles) w = u32();
         for (uint32_t& r : d.boolLoop) r = u32();
         d.vertexFetch = bytes(512);
+        for (int32_t& e : d.expAdjust) e = int32_t(u32());
         draws.push_back(d);
     }
     return draws;
@@ -667,6 +670,8 @@ int main(int argc, char** argv)
     size_t vertexAt = 0, indexAt = 0;
     const Target* current = nullptr;
     std::map<uint32_t, Surface*> resolved; // texture base address -> surface copied there
+    std::map<uint32_t, bool> resolvedSwap;  // texture base address -> copy swapped red/blue
+    std::map<uint32_t, int32_t> resolvedBias; // texture base address -> copy exponent bias
     std::map<uint64_t, std::pair<uint32_t, std::unique_ptr<RenderTextureView>>> tableViews; // (texture, swizzle) -> view
     uint32_t aliasHits = 0;
     uint32_t nextView = textureCount + 64; // first 64 slots: one plain view per target
@@ -681,6 +686,13 @@ int main(int argc, char** argv)
             for (auto& [key, t] : targets)
                 if (std::get<0>(key) == d.copySurface && std::get<1>(key) == d.copyColor && std::get<5>(key) == d.copyDepth)
                 {
+                    // RB_COPY_DEST_INFO bit 24: the copy swaps red and blue in memory.
+                    resolvedSwap[d.copyDest] = (d.copyDestInfo >> 24) & 1;
+                    // copy_dest_exp_bias (bits 16-21, signed): memory = value * 2^bias.
+                    resolvedBias[d.copyDest] = int32_t(d.copyDestInfo << 10) >> 26;
+                    if (getenv("FD_REPLAY_TRACE"))
+                        fprintf(stderr, "resolve %08X info %08X src %u bias %d count %u\n", d.copyDest, d.copyDestInfo,
+                            source, resolvedBias[d.copyDest], t.count);
                     if (source < t.count && t.rt[source].texture) resolved[d.copyDest] = &t.rt[source];
                     else if (source == 4 && t.ds.texture) resolved[d.copyDest] = &t.ds;
                 }
@@ -699,6 +711,13 @@ int main(int argc, char** argv)
         memcpy(shared + 512, &booleans, 4);
         memcpy(shared + 544, &d.boolLoop[8], 32 * 4);
         memcpy(shared + kSharedVertexFetch, d.vertexFetch, 512);
+        // fdFetchScale (1536 + slot * 4): 1, or for a render target read in
+        // place of its biased copy, 2^(copy bias + fetch exp_adjust).
+        for (uint32_t slot = 0; slot < 32; ++slot)
+        {
+            const float one = 1.0f;
+            memcpy(shared + kSharedFetchScale + slot * 4, &one, 4);
+        }
         for (uint32_t slot = 0; slot < 32; ++slot)
         {
             uint32_t index = d.slots[slot] >= 0 ? uint32_t(d.slots[slot]) : 0;
@@ -727,11 +746,17 @@ int main(int argc, char** argv)
                 // A resolved read sees the target through the fetch constant's
                 // swizzle (component i of the result = target channel swizzle[i]).
                 Surface& source = *alias->second;
-                auto view = source.views.find(d.swizzles[slot]);
+                uint32_t w = d.swizzles[slot];
+                if (resolvedSwap[alias->first]) // memory X/Z are target B/R
+                    for (uint32_t c = 0; c < 4; ++c)
+                    {
+                        const uint32_t sel = w >> (3 * c) & 7;
+                        if (sel == 0 || sel == 2) w ^= (sel ^ (2 - sel)) << (3 * c);
+                    }
+                auto view = source.views.find(w);
                 if (view == source.views.end() && nextView < textureCount + kMaxTargets)
                 {
                     RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(source.format);
-                    const uint32_t w = d.swizzles[slot];
                     viewDesc.componentMapping = SwizzleMapping(w);
                     auto textureView = source.texture->createTextureView(viewDesc);
                     sets[0]->setTexture(nextView, source.texture.get(), RenderTextureLayout::SHADER_READ, textureView.get());
@@ -739,6 +764,13 @@ int main(int argc, char** argv)
                 }
                 index = view != source.views.end() ? view->second.first : alias->second->descriptor;
                 ++aliasHits;
+                if (const int32_t bias = resolvedBias[alias->first])
+                {
+                    const float scale = std::ldexp(1.0f, bias + d.expAdjust[slot]);
+                    if (getenv("FD_REPLAY_TRACE"))
+                        fprintf(stderr, "scale draw %u slot %u vs %s ps %s = %g\n", i, slot, d.vs.c_str(), d.ps.c_str(), scale);
+                    memcpy(shared + kSharedFetchScale + slot * 4, &scale, 4);
+                }
                 if (!alias->second->shaderRead)
                 {
                     list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(alias->second->texture.get(), RenderTextureLayout::SHADER_READ));

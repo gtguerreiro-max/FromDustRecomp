@@ -251,6 +251,16 @@ def scan_draw(commands):
     return None
 
 
+def copy_dest_info(commands):
+    """RB_COPY_DEST_INFO of a resolve: D3D writes RB_COPY_CONTROL..DEST_INFO
+    (0x2318-0x231B) in one type-0 packet, then zeroes them after the copy."""
+    words = struct.unpack(">%dI" % (len(commands) // 4), commands[: len(commands) // 4 * 4])
+    for i, h in enumerate(words):
+        if h >> 30 == 0 and h & 0x7FFF == 0x2318 and ((h >> 16) & 0x3FFF) >= 3 and i + 4 < len(words):
+            return words[i + 4]
+    return 0
+
+
 def track_registers(regs, commands):
     """Apply a draw's type-0 register writes (commands start one word in)."""
     for name, payload in packets(commands[4:]):
@@ -311,7 +321,7 @@ def main():
                     name = "#resolve"
                     rec = struct.pack("<I", len(name)) + name.encode()
                     rec += struct.pack("<6I", dest, flags, regs.get(0x2000, 0), regs.get(0x2001, 0),
-                                       regs.get(0x2002, 0), 0)
+                                       regs.get(0x2002, 0), copy_dest_info(objs.get("commands", b"")[4:]))
                     records.append(rec)
                     skipped["resolves"] = skipped.get("resolves", 0) + 1
             continue
@@ -390,6 +400,9 @@ def main():
         # constants (0x4908-0x4927, vertex shader loops).
         rec += struct.pack("<40I", *(regs.get(r, 0) for r in range(0x4900, 0x4928)))
         rec += vertex_fetch_descriptors(pulls, device, buffers, streams, blob)
+        # Texture fetch constant exp_adjust per slot (dword 3 bits 13-18, signed).
+        rec += struct.pack("<32i", *((((struct.unpack_from(">6I", device, 0x480 + slot * 24)[3] >> 13) & 0x3F) ^ 32) - 32
+                                     for slot in range(32)))
         records.append(rec)
     open(os.path.join(OUT, "streams.bin"), "wb").write(blob)
     with open(os.path.join(OUT, "replay.bin"), "wb") as f:
