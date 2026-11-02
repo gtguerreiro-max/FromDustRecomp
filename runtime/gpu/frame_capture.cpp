@@ -21,6 +21,10 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#if __has_include("../../third_party/renderdoc_dl/RenderDoc_1.47_64/renderdoc_app.h")
+#include "../../third_party/renderdoc_dl/RenderDoc_1.47_64/renderdoc_app.h"
+#define FD_HAVE_RENDERDOC 1
+#endif
 
 // Called by Xenia's D3D12 command processor (FROMDUST_GPU_SHIM) at every draw and swap.
 extern "C" void (*fd_gpu_event_hook)(int event, const uint32_t* registers) = nullptr;
@@ -230,7 +234,23 @@ void OnGpuEvent(int event, const uint32_t* registers)
     {
         const uint32_t swap = ++g_gpuSwaps, start = g_gpuCaptureSwap.load();
         if (start && swap == start)
+        {
             g_gpuFile = fopen("xenia_regs.bin", "wb");
+#ifdef FD_HAVE_RENDERDOC
+            // Launched under RenderDoc (renderdoccmd capture): capture Xenia's
+            // D3D12 work for this same frame, which starts after this swap's present.
+            if (HMODULE rdoc = GetModuleHandleA("renderdoc.dll"))
+            {
+                auto getApi = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(rdoc, "RENDERDOC_GetAPI"));
+                RENDERDOC_API_1_1_2* api = nullptr;
+                if (getApi && getApi(eRENDERDOC_API_Version_1_1_2, reinterpret_cast<void**>(&api)) == 1 && api)
+                {
+                    api->TriggerCapture();
+                    kernel::Log("frame capture: RenderDoc capture triggered");
+                }
+            }
+#endif
+        }
         else if (start && swap == start + 1 && g_gpuFile)
         {
             fclose(g_gpuFile);

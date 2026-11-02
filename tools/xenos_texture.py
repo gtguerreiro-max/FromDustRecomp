@@ -284,8 +284,9 @@ def _decode_pixel(fmt, px, x, y, width, height, rgba):
         px = px + b"\x00" * (bpt - len(px))
 
     if fmt == "k_8_8_8_8":
-        # After endianness correction: A8 R8 G8 B8.
-        a, r, g, b = px[0], px[1], px[2], px[3]
+        # After the endian swap the texel is a little-endian dword with X in
+        # bits 0-7 ... W in bits 24-31 (Xenia's k_8_8_8_8): bytes X Y Z W.
+        r, g, b, a = px[0], px[1], px[2], px[3]
         _put_pixel(rgba, width, height, x, y, r, g, b, a)
 
     elif fmt == "k_16_16":

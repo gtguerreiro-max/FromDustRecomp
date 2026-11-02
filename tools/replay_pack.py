@@ -79,9 +79,30 @@ def shader_objects(path, bins):
 
 def live_vfetches(code):
     """Vertex fetch instructions in live microcode (D3D patches format, offset,
-    stride and fetch constant into them at bind time), in address order."""
+    stride and fetch constant into them at bind time), in program order: the
+    control flow's exec instructions give each instruction slot and whether it
+    is a fetch (like Xenia's shader translator); falls back to a word scan."""
     words = struct.unpack(">%dI" % (len(code) // 4), code[: len(code) // 4 * 4])
-    out = []
+    out, bound, slots = [], len(words) // 3, []
+    i = 0
+    while i < bound:
+        w0, w1, w2 = words[i * 3:i * 3 + 3]
+        for d0, d1 in ((w0, w1 & 0xFFFF), ((w1 >> 16) | ((w2 << 16) & 0xFFFFFFFF), w2 >> 16)):
+            if (d1 >> 12) & 0xF in (1, 2, 3, 4, 5, 6, 13, 14):  # exec variants
+                address, count, sequence = d0 & 0xFFF, (d0 >> 12) & 7, (d0 >> 16) & 0xFFF
+                bound = min(bound, address)
+                for k in range(count):
+                    if (sequence >> (2 * k)) & 1:
+                        slots.append(address + k)
+        i += 1
+    for slot in slots:
+        w = list(words[slot * 3:slot * 3 + 3])
+        if len(w) == 3 and w[0] & 0x1F == 0:  # FetchOpcode::kVertexFetch
+            v = decode_vfetch(w)
+            if v["format"] in COMPONENTS:
+                out.append(v)
+    if out:
+        return out
     for i in range(len(words) - 2):
         w = list(words[i:i + 3])
         if w[0] & 0x1F or not (w[0] >> 19) & 1:
@@ -100,6 +121,16 @@ def hlsl_vfetches(name):
 
 
 def vertex_layout(code, name):
+    """Tries the live microcode at the object's +0x40 (the usual place) and at
+    +0 (some shaders), keeping the one whose fetches pair with the HLSL's."""
+    for start in (0x40, 0):
+        result = vertex_layout_at(code[start:], name)
+        if result[0] or result[1]:
+            return result
+    return 0, [], []
+
+
+def vertex_layout_at(code, name):
     """(stride bytes, [(offset bytes, vfetch, semantic)], [(ordinal, vfetch)]):
     the input layout of stream fetch 95 and the fetches of other streams, which
     the shader pulls from g_VertexStreams (their input elements get offset None,
@@ -326,6 +357,9 @@ def load_textures(path):
     return out
 
 
+FIXED16_ORDER = int(os.environ.get("FD_FIXED16_ORDER", "0"))
+
+
 def decode_fixed16(raw, fetch):
     """k_16_16 / k_16_16_16_16 (fixed point, not float) as RGBA float32, with the
     value a shader fetch returns: sign per component (fetch dword 0 bits 2-9),
@@ -346,7 +380,9 @@ def decode_fixed16(raw, fetch):
     for y in range(height):
         row = data[y * stride * 2 * n:(y * stride + width) * 2 * n]
         row += bytes(width * 2 * n - len(row))
-        values = struct.unpack("<%dH" % (width * n), row)
+        values = struct.unpack((">" if FIXED16_ORDER & 2 else "<") + "%dH" % (width * n), row)
+        if FIXED16_ORDER & 1:  # components in memory order: swap each pair
+            values = [values[i ^ 1] for i in range(len(values))]
         texels = []
         for x in range(width):
             px = []
@@ -462,7 +498,7 @@ def main():
         indices = buffers.get(draw[1][2] & 0x1FFFFFFF) if source == 0 else b""
         vfetch = struct.unpack_from(">2I", device, 0x480 + 190 * 4)
         vertices = buffers.get(vfetch[0] & 0x1FFFFFFC)
-        stride, layout, pulls = vertex_layout(objs["vs_code"][1][0x40:], name)
+        stride, layout, pulls = vertex_layout(objs["vs_code"][1], name)
         elements = [(off, v) for off, v, _ in layout]
         if indices is None or vertices is None or not stride or not elements or prim not in (4, 8):
             skipped["missing data/layout"] = skipped.get("missing data/layout", 0) + 1

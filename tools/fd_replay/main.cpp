@@ -762,8 +762,21 @@ int main(int argc, char** argv)
             // Copy source: the target configured when the copy runs. Only
             // color copies (copy_src_select 0-3) are aliased for now.
             const uint32_t source = d.copyControl & 7; // copy_src_select: 0-3 color RT, 4 depth
+            // Source target: the exact configuration, else the one with the same
+            // surface and colour (EDRAM base and format; depth may differ, e.g.
+            // when the draws' state comes from Xenia and the copy's from our
+            // command parsing), else the same colour info; most draws wins.
+            const Target* best = nullptr;
+            for (int pass = 0; pass < 3 && !best; ++pass)
+                for (auto& [key, t] : targets)
+                {
+                    const bool match = pass == 0 ? std::get<0>(key) == d.copySurface && std::get<1>(key) == d.copyColor && std::get<5>(key) == d.copyDepth
+                        : pass == 1 ? std::get<0>(key) == d.copySurface && std::get<1>(key) == d.copyColor
+                        : std::get<1>(key) == d.copyColor;
+                    if (match && (source == 4 || t.draws) && (!best || t.draws > best->draws)) best = &t;
+                }
             for (auto& [key, t] : targets)
-                if (std::get<0>(key) == d.copySurface && std::get<1>(key) == d.copyColor && std::get<5>(key) == d.copyDepth)
+                if (&t == best)
                 {
                     // RB_COPY_DEST_INFO bit 24: the copy swaps red and blue in memory.
                     resolvedSwap[d.copyDest] = (d.copyDestInfo >> 24) & 1;
