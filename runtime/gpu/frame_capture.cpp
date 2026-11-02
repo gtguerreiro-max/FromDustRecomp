@@ -10,10 +10,12 @@
 // an 'FDCB' block with the command bytes the draw wrote.
 // All header words are host (little-endian) order; snapshots are guest bytes.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <vector>
 
 #include "../kernel/kernel.h"
 
@@ -46,6 +48,8 @@ bool Enabled()
     return true;
 }
 
+void RecordTextures(uint32_t device);
+
 void Record(uint32_t kind, PPCContext& ctx)
 {
     if (g_state.load() != State::Capturing) return;
@@ -77,7 +81,58 @@ void Record(uint32_t kind, PPCContext& ctx)
         fwrite(head, sizeof(head), 1, g_file);
         fwrite(code >= 0xA0000000 && code < 0xC0000000 ? mem::Translate(code) : zero, kCodeSnapshot, 1, g_file);
     }
+    RecordTextures(ctx.r3.u32);
     ++g_draws;
+}
+
+// Texture contents, once per base address per frame, to textures.bin:
+// u32 'FDTX', 6 fetch constant dwords (host order), u32 length, guest bytes.
+// The length covers mip 0 with dimensions aligned to 32 (tiling granularity).
+std::vector<uint32_t> g_dumpedTextures;
+FILE* g_textureFile = nullptr;
+
+uint32_t BitsPerTexel(uint32_t format)
+{
+    switch (format)
+    {
+    // xenos::TextureFormat numbers.
+    case 2: return 8;                            // k_8
+    case 18: return 4;                           // DXT1
+    case 19: case 20: case 49: return 8;         // DXT2_3, DXT4_5, DXN
+    case 3: case 4: case 5: case 10: case 15: return 16;
+    case 26: case 32: case 34: case 37: return 64; // 16_16_16_16 (+float), 32_32 (+float)
+    case 35: case 38: return 128;                // 32_32_32_32 (+float)
+    default: return 32;
+    }
+}
+
+void RecordTextures(uint32_t device)
+{
+    if (!g_textureFile) g_textureFile = fopen("textures.bin", "wb");
+    if (!g_textureFile) return;
+    for (uint32_t slot = 0; slot < 16; ++slot)
+    {
+        uint32_t fetch[6];
+        for (uint32_t i = 0; i < 6; ++i) fetch[i] = mem::Read32(device + 0x480 + slot * 24 + i * 4);
+        if ((fetch[0] & 3) != 2 || !(fetch[1] >> 12)) continue;
+        const uint32_t base = fetch[1] & 0xFFFFF000;
+        if (std::find(g_dumpedTextures.begin(), g_dumpedTextures.end(), base) != g_dumpedTextures.end()) continue;
+        g_dumpedTextures.push_back(base);
+        const uint32_t dimension = (fetch[5] >> 9) & 3;
+        uint32_t width = 1, height = 1;
+        if (dimension == 1 || dimension == 3) { width = (fetch[2] & 0x1FFF) + 1; height = ((fetch[2] >> 13) & 0x1FFF) + 1; }
+        else if (dimension == 0) width = (fetch[2] & 0xFFFFFF) + 1;
+        else { width = (fetch[2] & 0x7FF) + 1; height = ((fetch[2] >> 11) & 0x7FF) + 1; }
+        const uint32_t pitch = std::max(width, ((fetch[0] >> 22) & 0x1FF) << 5);
+        const uint64_t bytes = uint64_t((pitch + 31) & ~31u) * ((height + 31) & ~31u) * BitsPerTexel(fetch[1] & 0x3F) / 8;
+        const uint32_t length = uint32_t(std::min<uint64_t>(bytes, 16u << 20));
+        const uint32_t guest = mem::kPhysicalBase | (base & 0x1FFFFFFF);
+        const uint32_t head[1] = {0x46445458};
+        fwrite(head, sizeof(head), 1, g_textureFile);
+        fwrite(fetch, sizeof(fetch), 1, g_textureFile);
+        fwrite(&length, sizeof(length), 1, g_textureFile);
+        fwrite(mem::Translate(guest), length, 1, g_textureFile);
+    }
 }
 
 // After the original draw: the command bytes it wrote (state flush + draw
@@ -114,6 +169,7 @@ void OnSwap(PPCContext& ctx)
         fwrite(mem::Translate(ctx.r3.u32), kDeviceSnapshot, 1, g_file);
         fclose(g_file);
         g_file = nullptr;
+        if (g_textureFile) fclose(g_textureFile), g_textureFile = nullptr;
         g_state = State::Done;
         kernel::Log("frame capture: %u draws written to frame_capture.bin", g_draws);
     }

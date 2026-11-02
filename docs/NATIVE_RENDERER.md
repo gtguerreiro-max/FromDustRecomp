@@ -172,6 +172,7 @@ Findings:
 | tools/xenos_vfetch.py | vertex fetch instructions, vertex layouts | every bit position matches ucode.h |
 | tools/xenos_state.py | render state registers → D3D12 summary | sample decode checked against registers.h |
 | tools/xenos_tiling.py | tiled texture addressing, untile_2d | 22058 coordinates identical to Xenia's C++ |
+| tools/xenos_texture.py | texture data → RGBA / PNG (DXT1/3/5, 8888, 16_16, 8...) | 41 of 58 textures of a captured frame decode; the level's terrain texture (DXT1 1024²) is correct. Missing: 24_8_FLOAT, 16_16_16_16, 8_8; DXT4_5 fails |
 
 ## Shader creation
 
