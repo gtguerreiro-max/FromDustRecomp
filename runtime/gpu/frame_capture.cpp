@@ -4,7 +4,7 @@
 // call's arguments and a snapshot of the D3D device object taken just before
 // the draw (the device shadows all GPU state the draw will flush).
 //
-// Record: u32 magic 'FDRW', u32 kind (0 indexed, 1 rect, 2 rect', 3 swap),
+// Record: u32 magic 'FDRW', u32 kind (0 indexed, 1 rect, 2 rect', 3 swap, 4 resolve/clear),
 // u32 lr, u32 r3..r10, u32 snapshot size, then that many bytes of guest memory
 // at r3; draws (not the swap) are followed by the referenced objects and by
 // an 'FDCB' block with the command bytes the draw wrote.
@@ -312,4 +312,29 @@ PPC_FUNC(sub_820DA850)
 {
     RecordShaderInit(1, ctx);
     __imp__sub_820DA850(ctx, base);
+}
+
+// D3DDevice_Resolve (820EE9D0, ~50 per frame; writes RB_COPY_* in 820ED880;
+// 820EFD40 is D3DDevice_Clear). r6 is the destination texture object.
+PPC_FUNC_IMPL(__imp__sub_820EE9D0);
+PPC_FUNC(sub_820EE9D0)
+{
+    const uint32_t device = ctx.r3.u32, cursor = mem::Read32(device + 0x30);
+    const uint32_t flags = ctx.r4.u32, texture = ctx.r6.u32;
+    Record(4, ctx);
+    __imp__sub_820EE9D0(ctx, base);
+    RecordCommands(device, cursor);
+    // Block: u32 'FDRS', u32 flags (r4), u32 destination texture object (r6),
+    // 0x40 bytes of that object (fetch constant at +0x1C).
+    if (g_state.load() == State::Capturing)
+    {
+        std::lock_guard lock(g_mutex);
+        if (g_file)
+        {
+            static const uint8_t zero[0x40] = {};
+            const uint32_t head[3] = {0x46445253, flags, texture};
+            fwrite(head, sizeof(head), 1, g_file);
+            fwrite(texture >= 0x40000000 && texture < 0xC0000000 ? mem::Translate(texture) : zero, 0x40, 1, g_file);
+        }
+    }
 }

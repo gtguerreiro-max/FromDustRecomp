@@ -22,6 +22,17 @@ _BYTES_PER_TEXEL = {
     "k_16_16": 4,
     "k_8": 1,
     "k_5_6_5": 2,
+    "k_8_8": 2,
+    "k_16_16_16_16": 8,
+    "k_16_16_FLOAT": 4,
+    "k_16_16_16_16_FLOAT": 8,
+    "k_32_FLOAT": 4,
+    "k_2_10_10_10": 4,
+    "k_10_11_11": 4,
+    "k_11_11_10": 4,
+    "k_24_8": 4,
+    "k_24_8_FLOAT": 4,
+    "k_8_8_8_8_A": 4,
 }
 
 
@@ -79,6 +90,70 @@ def _fields_to_rgb(r5, g6, b5):
 def _unorm16_to_8(value):
     """Convert an unsigned 16-bit normalised value to 8 bits."""
     return (value * 255 + 0x8000) >> 16
+
+
+def _unorm_n_to_8(value, bits):
+    """Convert an unsigned n-bit normalised value to 8 bits."""
+    max_value = (1 << bits) - 1
+    if max_value == 0:
+        return 0
+    return (value * 255 + max_value // 2) // max_value
+
+
+def _half_to_float(value):
+    """Decode an IEEE 754 half float to a Python float."""
+    sign = value >> 15
+    exp = (value >> 10) & 0x1F
+    mant = value & 0x3FF
+
+    if exp == 0x1F:
+        if mant == 0:
+            return float("inf") if sign == 0 else float("-inf")
+        return float("nan")
+
+    if exp == 0:
+        v = float(mant) * 2.0 ** -24
+    else:
+        v = float(1.0 + mant / 1024.0) * 2.0 ** (exp - 15)
+
+    return -v if sign else v
+
+
+def _clamp01(value):
+    """Clamp a float to 0.0-1.0, treating NaN as 0.0."""
+    if value != value:
+        return 0.0
+    if value <= 0.0:
+        return 0.0
+    if value >= 1.0:
+        return 1.0
+    return value
+
+
+def _clamp01_to_8(value):
+    """Clamp a float to 0.0-1.0 and scale it to 0-255."""
+    return int(_clamp01(value) * 255.0 + 0.5)
+
+
+def _float16_to_8(value):
+    """Convert a half float to 8 bits with 0-1 clamping."""
+    return _clamp01_to_8(_half_to_float(value))
+
+
+def _float32_to_8(value_bytes):
+    """Convert a 32-bit float to 8 bits with 0-1 clamping."""
+    value = struct.unpack("<f", value_bytes)[0]
+    return _clamp01_to_8(value)
+
+
+def _float20e4_to_float(value24):
+    """Decode a Xenos 20e4 float stored in 24 bits to a Python float."""
+    e = (value24 >> 20) & 0xF
+    m = value24 & 0xFFFFF
+
+    if e == 0:
+        return float(m) * 2.0 ** -34
+    return float(1.0 + m / 1048576.0) * 2.0 ** (e - 15)
 
 
 def _put_pixel(rgba, width, height, x, y, r, g, b, a):
@@ -236,6 +311,92 @@ def _decode_pixel(fmt, px, x, y, width, height, rgba):
         v = int.from_bytes(px[0:2], "little")
         r, g, b = _expand_565(v)
         _put_pixel(rgba, width, height, x, y, r, g, b, 255)
+
+    elif fmt == "k_8_8":
+        r, g = px[0], px[1]
+        _put_pixel(rgba, width, height, x, y, r, g, 0, 255)
+
+    elif fmt == "k_16_16_16_16":
+        v0 = int.from_bytes(px[0:2], "little")
+        v1 = int.from_bytes(px[2:4], "little")
+        v2 = int.from_bytes(px[4:6], "little")
+        v3 = int.from_bytes(px[6:8], "little")
+        _put_pixel(
+            rgba,
+            width,
+            height,
+            x,
+            y,
+            _unorm16_to_8(v0),
+            _unorm16_to_8(v1),
+            _unorm16_to_8(v2),
+            _unorm16_to_8(v3),
+        )
+
+    elif fmt == "k_16_16_FLOAT":
+        h0 = int.from_bytes(px[0:2], "little")
+        h1 = int.from_bytes(px[2:4], "little")
+        _put_pixel(rgba, width, height, x, y, _float16_to_8(h0), _float16_to_8(h1), 0, 255)
+
+    elif fmt == "k_16_16_16_16_FLOAT":
+        h0 = int.from_bytes(px[0:2], "little")
+        h1 = int.from_bytes(px[2:4], "little")
+        h2 = int.from_bytes(px[4:6], "little")
+        h3 = int.from_bytes(px[6:8], "little")
+        _put_pixel(
+            rgba,
+            width,
+            height,
+            x,
+            y,
+            _float16_to_8(h0),
+            _float16_to_8(h1),
+            _float16_to_8(h2),
+            _float16_to_8(h3),
+        )
+
+    elif fmt == "k_32_FLOAT":
+        v = _float32_to_8(px[0:4])
+        _put_pixel(rgba, width, height, x, y, v, v, v, 255)
+
+    elif fmt == "k_2_10_10_10":
+        v = int.from_bytes(px[0:4], "little")
+        r = _unorm_n_to_8(v & 0x3FF, 10)
+        g = _unorm_n_to_8((v >> 10) & 0x3FF, 10)
+        b = _unorm_n_to_8((v >> 20) & 0x3FF, 10)
+        a = _unorm_n_to_8((v >> 30) & 0x3, 2)
+        _put_pixel(rgba, width, height, x, y, r, g, b, a)
+
+    elif fmt == "k_10_11_11":
+        v = int.from_bytes(px[0:4], "little")
+        r = _unorm_n_to_8(v & 0x3FF, 10)
+        g = _unorm_n_to_8((v >> 10) & 0x7FF, 11)
+        b = _unorm_n_to_8((v >> 21) & 0x7FF, 11)
+        _put_pixel(rgba, width, height, x, y, r, g, b, 255)
+
+    elif fmt == "k_11_11_10":
+        v = int.from_bytes(px[0:4], "little")
+        r = _unorm_n_to_8(v & 0x7FF, 11)
+        g = _unorm_n_to_8((v >> 11) & 0x7FF, 11)
+        b = _unorm_n_to_8((v >> 22) & 0x3FF, 10)
+        _put_pixel(rgba, width, height, x, y, r, g, b, 255)
+
+    elif fmt == "k_24_8":
+        v = int.from_bytes(px[0:4], "little")
+        depth = (v >> 8) & 0xFFFFFF
+        grey = _unorm_n_to_8(depth, 24)
+        _put_pixel(rgba, width, height, x, y, grey, grey, grey, 255)
+
+    elif fmt == "k_24_8_FLOAT":
+        v = int.from_bytes(px[0:4], "little")
+        depth = (v >> 8) & 0xFFFFFF
+        grey = _clamp01_to_8(_float20e4_to_float(depth))
+        _put_pixel(rgba, width, height, x, y, grey, grey, grey, 255)
+
+    elif fmt == "k_8_8_8_8_A":
+        # After endianness correction: R8 G8 B8 A8.
+        r, g, b, a = px[0], px[1], px[2], px[3]
+        _put_pixel(rgba, width, height, x, y, r, g, b, a)
 
 
 def _choose_stride_blocks(length, height_blocks, width_blocks, pitch_blocks, bytes_per_block):
@@ -450,6 +611,87 @@ def _self_test():
         for x in range(width):
             expected = red + (255,) if x < 4 else green + (255,)
             assert pixel(x, y) == expected, (x, y, pixel(x, y), expected)
+
+    # Single-pixel checks for the added non-block formats.
+    cases = [
+        (
+            "k_8_8",
+            bytes([255, 0]),
+            (255, 0, 0, 255),
+        ),
+        (
+            "k_16_16_16_16",
+            (65535).to_bytes(2, "little")
+            + (0).to_bytes(2, "little")
+            + (0).to_bytes(2, "little")
+            + (65535).to_bytes(2, "little"),
+            (255, 0, 0, 255),
+        ),
+        (
+            "k_16_16_FLOAT",
+            (0x3C00).to_bytes(2, "little") + (0x3800).to_bytes(2, "little"),
+            (255, 128, 0, 255),
+        ),
+        (
+            "k_16_16_16_16_FLOAT",
+            (0x3C00).to_bytes(2, "little")
+            + (0x3800).to_bytes(2, "little")
+            + (0).to_bytes(2, "little")
+            + (0x3C00).to_bytes(2, "little"),
+            (255, 128, 0, 255),
+        ),
+        (
+            "k_32_FLOAT",
+            struct.pack("<f", 0.5),
+            (128, 128, 128, 255),
+        ),
+        (
+            "k_2_10_10_10",
+            (0xC00003FF).to_bytes(4, "little"),
+            (255, 0, 0, 255),
+        ),
+        (
+            "k_10_11_11",
+            (0x001FFFFF).to_bytes(4, "little"),
+            (255, 255, 0, 255),
+        ),
+        (
+            "k_11_11_10",
+            (0xFFC007FF).to_bytes(4, "little"),
+            (255, 0, 255, 255),
+        ),
+        (
+            "k_24_8",
+            (0xFFFFFF00).to_bytes(4, "little"),
+            (255, 255, 255, 255),
+        ),
+        (
+            "k_24_8_FLOAT",
+            (0xE0000000).to_bytes(4, "little"),
+            (128, 128, 128, 255),
+        ),
+        (
+            "k_8_8_8_8_A",
+            bytes([255, 0, 0, 255]),
+            (255, 0, 0, 255),
+        ),
+    ]
+
+    for fmt, raw, expected in cases:
+        w, h, rgba = decode_texture(
+            raw,
+            {
+                "format_name": fmt,
+                "width": 1,
+                "height": 1,
+                "pitch": 1,
+                "tiled": 0,
+                "endianness": 0,
+            },
+        )
+        assert w == 1
+        assert h == 1
+        assert tuple(rgba[0:4]) == expected, (fmt, tuple(rgba[0:4]), expected)
 
     print("xenos_texture self-test ok")
 

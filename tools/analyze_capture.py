@@ -1,11 +1,11 @@
-"""Summarize build/frame_capture.bin (runtime/gpu/frame_capture.cpp): which
+﻿"""Summarize build/frame_capture.bin (runtime/gpu/frame_capture.cpp): which
 dwords of the D3D device object change between the draws of one frame.
 
 Usage: python tools/analyze_capture.py [capture] [--ranges] [--offset HEX...]
 """
 import struct, sys, collections
 
-KINDS = {0: "indexed", 1: "rect", 2: "rect'", 3: "swap"}
+KINDS = {0: "indexed", 1: "rect", 2: "rect'", 3: "swap", 4: "resolve"}
 
 
 OBJECT_COUNT, OBJECT_SIZE, CODE_SIZE = 26, 0x80, 0x400  # frame_capture.cpp constants
@@ -36,6 +36,11 @@ def load(path, with_objects=False):
                 length = struct.unpack_from("<I", data, i + 4)[0]
                 objects["commands"] = data[i + 8:i + 8 + length]
                 i += 8 + length
+            # Resolves: flags, destination texture object and its first 0x40 bytes.
+            if data[i:i + 4] == b"SRDF":
+                flags, texture = struct.unpack_from("<2I", data, i + 4)
+                objects["resolve"] = (flags, texture, data[i + 12:i + 12 + 0x40])
+                i += 12 + 0x40
         records.append((header, snapshot, objects) if with_objects else (header, snapshot))
     return records
 

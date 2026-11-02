@@ -18,7 +18,12 @@ replay.bin (little-endian):
   then i32 x 32: texture table index per fetch slot (0-15 pixel, 16-31
   vertex samplers), -1 if none,
   then u32 ps name length, name (empty: no pixel shader, depth only),
-  4096 bytes pixel shader constants (c0..c223, swapped, zero padded).
+  4096 bytes pixel shader constants (c0..c223, swapped, zero padded),
+  then u32 x 32: texture base address per fetch slot (0 if none),
+  then u32 x 40: registers 0x4900-0x4927 (boolean and loop constants).
+A record whose vs name is "#resolve" is an EDRAM -> texture copy instead:
+  u32 RB_COPY_DEST_BASE, RB_COPY_CONTROL, RB_SURFACE_INFO, RB_COLOR_INFO,
+  RB_DEPTH_INFO, RB_COPY_DEST_INFO.
 
 textures.rgba: u32 count, per texture u32 width, u32 height, RGBA8 pixels
 (decoded by xenos_texture.py; unsupported formats become 1x1 white).
@@ -218,6 +223,20 @@ def main():
     regs = {}
     for header, device, objs in draws:
         track_registers(regs, objs.get("commands", b""))
+        if header[1] == 4:  # resolve / clear (D3D internal draw)
+            # D3DDevice_Resolve(device, flags, rect, dest texture, ...): the
+            # destination fetch constant (object + 0x1C) gives the address.
+            if "resolve" in objs:
+                flags, texture, obj = objs["resolve"]
+                dest = struct.unpack_from(">I", obj, 0x1C + 4)[0] & 0x1FFFF000 if texture else 0
+                if dest:
+                    name = "#resolve"
+                    rec = struct.pack("<I", len(name)) + name.encode()
+                    rec += struct.pack("<6I", dest, flags, regs.get(0x2000, 0), regs.get(0x2001, 0),
+                                       regs.get(0x2002, 0), 0)
+                    records.append(rec)
+                    skipped["resolves"] = skipped.get("resolves", 0) + 1
+            continue
         vs_obj = objs[0x3290][0]
         name = objects.get(vs_obj, (0, None))[1]
         draw = next(((n, p) for n, p in packets(objs.get("commands", b"")[4:]) if n.startswith("DRAW_INDX") and not n.startswith("DRAW_INDX_")), None)
@@ -275,6 +294,14 @@ def main():
             ps_name = ""
         rec += struct.pack("<I", len(ps_name)) + ps_name.encode()
         rec += swap32(device[0x1780:0x1780 + 3584]) + bytes(512)
+        bases = []
+        for slot in range(32):
+            fetch = struct.unpack_from(">6I", device, 0x480 + slot * 24)
+            bases.append(fetch[1] & 0x1FFFF000 if fetch[0] & 3 == 2 else 0)
+        rec += struct.pack("<32I", *bases)
+        # Boolean (0x4900-0x4907: vertex 0x4900+, pixel 0x4904+) and loop
+        # constants (0x4908-0x4927, vertex shader loops).
+        rec += struct.pack("<40I", *(regs.get(r, 0) for r in range(0x4900, 0x4928)))
         records.append(rec)
     with open(os.path.join(OUT, "replay.bin"), "wb") as f:
         f.write(struct.pack("<2I", 0x50524446, len(records)))

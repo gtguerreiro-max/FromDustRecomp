@@ -119,6 +119,11 @@ struct Draw
     int32_t slots[32] = {}; // texture table index per fetch slot, -1 if none
     std::string ps;                       // empty: depth only
     const uint8_t* psConstants = nullptr; // 4096 bytes
+    uint32_t bases[32] = {};              // texture base address per fetch slot
+    uint32_t boolLoop[40] = {};           // registers 0x4900-0x4927
+    // "#resolve" records: EDRAM -> texture copy.
+    bool resolve = false;
+    uint32_t copyDest = 0, copyControl = 0, copySurface = 0, copyColor = 0, copyDepth = 0, copyDestInfo = 0;
 };
 
 // Shared constants layout of the patched XenosRecomp (shader_common.h).
@@ -138,6 +143,18 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         Draw d;
         const uint32_t nameLength = u32();
         d.vs.assign(reinterpret_cast<const char*>(bytes(nameLength)), nameLength);
+        if (d.vs == "#resolve")
+        {
+            d.resolve = true;
+            d.copyDest = u32();
+            d.copyControl = u32();
+            d.copySurface = u32();
+            d.copyColor = u32();
+            d.copyDepth = u32();
+            d.copyDestInfo = u32();
+            draws.push_back(d);
+            continue;
+        }
         d.primitive = u32();
         d.indexCount = u32();
         d.indexBytes = u32();
@@ -157,6 +174,8 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         const uint32_t psLength = u32();
         d.ps.assign(reinterpret_cast<const char*>(bytes(psLength)), psLength);
         d.psConstants = bytes(4096);
+        for (uint32_t& b : d.bases) b = u32();
+        for (uint32_t& r : d.boolLoop) r = u32();
         draws.push_back(d);
     }
     return draws;
@@ -226,6 +245,8 @@ struct Target
     std::unique_ptr<RenderFramebuffer> framebuffer;
     std::unique_ptr<RenderBuffer> readback;
     uint32_t rowPitch = 0, draws = 0;
+    uint32_t descriptor = 0;      // index in the Texture2D heap (resolved reads)
+    bool shaderRead = false;      // color texture currently in SHADER_READ
 };
 }
 
@@ -266,11 +287,12 @@ int main(int argc, char** argv)
     uint32_t textureCount = 0;
     if (textureFile.size() >= 4) memcpy(&textureCount, textureFile.data(), 4);
     // RenderDescriptorRange(type, binding, count).
-    const RenderDescriptorRange textureRange(RenderDescriptorRangeType::TEXTURE, 0, (std::max)(textureCount, 1u));
+    constexpr uint32_t kMaxTargets = 64; // heap slots after the table for resolved targets
+    const RenderDescriptorRange textureRange(RenderDescriptorRangeType::TEXTURE, 0, textureCount + kMaxTargets);
     const RenderDescriptorRange emptyRange(RenderDescriptorRangeType::TEXTURE, 0, 1);
     const RenderDescriptorRange samplerRange(RenderDescriptorRangeType::SAMPLER, 0, 1);
     const RenderDescriptorSetDesc setDescs[] = {
-        RenderDescriptorSetDesc(&textureRange, 1, true, (std::max)(textureCount, 1u)),
+        RenderDescriptorSetDesc(&textureRange, 1, true, textureCount + kMaxTargets),
         RenderDescriptorSetDesc(&emptyRange, 1, true, 1),
         RenderDescriptorSetDesc(&emptyRange, 1, true, 1),
         RenderDescriptorSetDesc(&samplerRange, 1, true, 1),
@@ -390,6 +412,8 @@ int main(int argc, char** argv)
         t.width = (std::clamp)(t.width, 1u, 4096u);
         t.height = (std::clamp)(t.height, 1u, 4096u);
         t.color = device->createTexture(RenderTextureDesc::ColorTarget(t.width, t.height, RenderFormat::R8G8B8A8_UNORM));
+        t.descriptor = textureCount + uint32_t((std::min)(targets.size() - 1, size_t(kMaxTargets - 1)));
+        sets[0]->setTexture(t.descriptor, t.color.get(), RenderTextureLayout::SHADER_READ);
         t.depth = device->createTexture(RenderTextureDesc::DepthTarget(t.width, t.height, RenderFormat::D32_FLOAT));
         const RenderTexture* color = t.color.get();
         RenderFramebufferDesc fb;
@@ -472,9 +496,20 @@ int main(int argc, char** argv)
     list->begin();
     size_t vertexAt = 0, indexAt = 0;
     const Target* current = nullptr;
+    std::map<uint32_t, Target*> resolved; // texture base address -> render target copied there
+    uint32_t aliasHits = 0;
     for (size_t i = 0; i < draws.size(); ++i)
     {
         const Draw& d = draws[i];
+        if (d.resolve)
+        {
+            // Copy source: the target configured when the copy runs. Only
+            // color copies (copy_src_select 0-3) are aliased for now.
+            auto key = std::make_tuple(d.copySurface, d.copyColor, d.copyDepth);
+            auto found = targets.find(key);
+            if (found != targets.end() && (d.copyControl & 7) < 4) resolved[d.copyDest] = &found->second;
+            continue;
+        }
         memcpy(vertexMap + vertexAt, d.vertices, d.vertexBytes);
         memcpy(indexMap + indexAt, d.indices, d.indexBytes);
         uint8_t* drawConstants = constantMap + kPerDraw * (i + 1);
@@ -482,15 +517,36 @@ int main(int argc, char** argv)
         memcpy(drawConstants + 4096, d.psConstants, 4096);
         uint8_t* shared = drawConstants + 8192;
         memset(shared, 0, kSharedSize);
+        // g_Booleans (512): vertex bools in bits 0-15, pixel bools (Xenos bool
+        // 128+, register 0x4904) in bits 16-31; loop constants at 544.
+        const uint32_t booleans = (d.boolLoop[0] & 0xFFFF) | ((d.boolLoop[4] & 0xFFFF) << 16);
+        memcpy(shared + 512, &booleans, 4);
+        memcpy(shared + 544, &d.boolLoop[8], 32 * 4);
         for (uint32_t slot = 0; slot < 32; ++slot)
         {
-            const uint32_t index = d.slots[slot] >= 0 ? uint32_t(d.slots[slot]) : 0;
+            uint32_t index = d.slots[slot] >= 0 ? uint32_t(d.slots[slot]) : 0;
+            auto alias = d.bases[slot] ? resolved.find(d.bases[slot]) : resolved.end();
+            if (alias != resolved.end() && alias->second != &targetFor(d))
+            {
+                index = alias->second->descriptor;
+                ++aliasHits;
+                if (!alias->second->shaderRead)
+                {
+                    list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(alias->second->color.get(), RenderTextureLayout::SHADER_READ));
+                    alias->second->shaderRead = true;
+                }
+            }
             memcpy(shared + kSharedTextureIndex + slot * 4, &index, 4); // 2D heap; sampler index stays 0
         }
         Target& target = targetFor(d);
         RenderPipeline* pipeline = pipelineFor(d);
         if (pipeline && d.primitive == 4)
         {
+            if (target.shaderRead)
+            {
+                list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.color.get(), RenderTextureLayout::COLOR_WRITE));
+                target.shaderRead = false;
+            }
             if (current != &target)
             {
                 list->setFramebuffer(target.framebuffer.get());
@@ -527,6 +583,7 @@ int main(int argc, char** argv)
     for (auto& [key, t] : targets)
     {
         list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(t.color.get(), RenderTextureLayout::COPY_SOURCE));
+        t.shaderRead = false;
         list->copyTextureRegion(
             RenderTextureCopyLocation::PlacedFootprint(t.readback.get(), RenderFormat::R8G8B8A8_UNORM, t.width, t.height, 1, t.rowPitch / 4),
             RenderTextureCopyLocation::Subresource(t.color.get()));
@@ -549,6 +606,7 @@ int main(int argc, char** argv)
         printf("%s: %ux%u, %u draws (surface %08X color %08X depth %08X)\n", path.c_str(), t.width, t.height, t.draws,
             std::get<0>(key), std::get<1>(key), std::get<2>(key));
     }
-    printf("fd_replay: %zu draws, %zu pipelines, %zu targets\n", draws.size(), pipelines.size(), targets.size());
+    printf("fd_replay: %zu draws, %zu pipelines, %zu targets, %zu resolves mapped, %u resolved reads\n", draws.size(),
+        pipelines.size(), targets.size(), resolved.size(), aliasHits);
     return 0;
 }
