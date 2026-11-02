@@ -81,6 +81,7 @@ enum Reg
     RB_SURFACE_INFO, RB_COLOR_INFO, RB_DEPTH_INFO, PA_SC_WINDOW_SCISSOR_TL, PA_SC_WINDOW_SCISSOR_BR,
     RB_COLOR_MASK, RB_DEPTHCONTROL, RB_BLENDCONTROL0, PA_SU_SC_MODE_CNTL, VGT_INDX_OFFSET,
     VPORT_XSCALE, VPORT_XOFFSET, VPORT_YSCALE, VPORT_YOFFSET, VPORT_ZSCALE, VPORT_ZOFFSET, PA_CL_VTE_CNTL,
+    RB_COLOR1_INFO, RB_COLOR2_INFO, RB_COLOR3_INFO, RB_BLENDCONTROL1, RB_BLENDCONTROL2, RB_BLENDCONTROL3,
     kRegCount
 };
 
@@ -300,19 +301,51 @@ void ToRgba8(RenderFormat f, const uint8_t* src, uint8_t* dst)
     }
 }
 
+// RB_COLOR_INFO of RT k (0-3).
+uint32_t ColorInfo(const uint32_t* regs, uint32_t k)
+{
+    static const int index[] = {RB_COLOR_INFO, RB_COLOR1_INFO, RB_COLOR2_INFO, RB_COLOR3_INFO};
+    return regs[index[k]];
+}
+
+uint32_t BlendControl(const uint32_t* regs, uint32_t k)
+{
+    static const int index[] = {RB_BLENDCONTROL0, RB_BLENDCONTROL1, RB_BLENDCONTROL2, RB_BLENDCONTROL3};
+    return regs[index[k]];
+}
+
+// Fetch constant swizzle (4 x 3 bits: 0-3 XYZW, 4 zero, 5 one) as a view mapping.
+RenderComponentMapping SwizzleMapping(uint32_t w)
+{
+    static const RenderSwizzle channel[] = {RenderSwizzle::R, RenderSwizzle::G, RenderSwizzle::B,
+        RenderSwizzle::A, RenderSwizzle::ZERO, RenderSwizzle::ONE, RenderSwizzle::ZERO, RenderSwizzle::ZERO};
+    return RenderComponentMapping(channel[w & 7], channel[(w >> 3) & 7], channel[(w >> 6) & 7], channel[(w >> 9) & 7]);
+}
+
+constexpr uint32_t kIdentitySwizzle = 0 | 1 << 3 | 2 << 6 | 3 << 9;
+
+// One color render target (MRT slot) of a target configuration.
+struct Surface
+{
+    RenderFormat format = RenderFormat::R8G8B8A8_UNORM;
+    std::unique_ptr<RenderTexture> texture;
+    std::unique_ptr<RenderBuffer> readback;
+    uint32_t rowPitch = 0;
+    uint32_t descriptor = 0;      // index in the Texture2D heap (resolved reads)
+    std::map<uint32_t, std::pair<uint32_t, std::unique_ptr<RenderTextureView>>> views; // swizzle -> heap index, view
+    bool shaderRead = false;      // texture currently in SHADER_READ
+};
+
 // A render target configuration of the frame (EDRAM color/depth bases + pitch).
 struct Target
 {
-    uint32_t width = 0, height = 0;
-    RenderFormat format = RenderFormat::R8G8B8A8_UNORM;
-    std::unique_ptr<RenderTexture> color, depth;
+    uint32_t width = 0, height = 0, count = 1, draws = 0;
+    Surface rt[4];
+    std::unique_ptr<RenderTexture> depth;
     std::unique_ptr<RenderFramebuffer> framebuffer;
-    std::unique_ptr<RenderBuffer> readback;
-    uint32_t rowPitch = 0, draws = 0;
-    uint32_t descriptor = 0;      // index in the Texture2D heap (resolved reads)
-    std::map<uint32_t, std::pair<uint32_t, std::unique_ptr<RenderTextureView>>> views; // swizzle -> heap index, view
-    bool shaderRead = false;      // color texture currently in SHADER_READ
 };
+
+using TargetKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>;
 }
 
 int main(int argc, char** argv)
@@ -352,7 +385,7 @@ int main(int argc, char** argv)
     uint32_t textureCount = 0;
     if (textureFile.size() >= 4) memcpy(&textureCount, textureFile.data(), 4);
     // RenderDescriptorRange(type, binding, count).
-    constexpr uint32_t kMaxTargets = 512; // heap slots after the table for resolved target views
+    constexpr uint32_t kMaxTargets = 2048; // heap slots after the table for target and swizzled views
     const RenderDescriptorRange textureRange(RenderDescriptorRangeType::TEXTURE, 0, textureCount + kMaxTargets);
     const RenderDescriptorRange emptyRange(RenderDescriptorRangeType::TEXTURE, 0, 1);
     const RenderDescriptorRange samplerRange(RenderDescriptorRangeType::SAMPLER, 0, 1);
@@ -460,19 +493,49 @@ int main(int argc, char** argv)
 
     // Targets keyed by (surface info, color info, depth info), sized to the
     // largest viewport any draw of the frame uses with them.
-    std::map<std::tuple<uint32_t, uint32_t, uint32_t>, Target> targets;
-    std::map<std::tuple<uint32_t, uint32_t, uint32_t>, std::pair<uint32_t, uint32_t>> targetSizes;
+    std::map<TargetKey, Target> targets;
+    uint32_t nextPlain = 0; // plain (unswizzled) heap slots for target surfaces
+    std::map<TargetKey, std::pair<uint32_t, uint32_t>> targetSizes;
+    std::map<TargetKey, uint32_t> targetCounts;
+    auto keyOf = [](const Draw& d) {
+        return TargetKey(d.regs[RB_SURFACE_INFO], d.regs[RB_COLOR_INFO], d.regs[RB_COLOR1_INFO], d.regs[RB_COLOR2_INFO],
+            d.regs[RB_COLOR3_INFO], d.regs[RB_DEPTH_INFO]);
+    };
+    // RT k is written when the pixel shader outputs SV_Target<k> and the color
+    // mask has bits for it (Xenia's rule); count = highest written + 1.
+    std::map<std::string, uint32_t> psTargets;
+    auto writtenTargets = [&](const Draw& d) -> uint32_t {
+        if (d.ps.empty()) return (d.regs[RB_COLOR_MASK] & 0xF) ? 1u : 0u;
+        auto found = psTargets.find(d.ps);
+        if (found == psTargets.end())
+        {
+            const std::vector<uint8_t> text = ReadFile(dir + "/" + d.ps + ".ps.hlsl");
+            const std::string hlsl(text.begin(), text.end());
+            uint32_t mask = 0;
+            for (uint32_t k = 0; k < 4; ++k)
+                if (hlsl.find("SV_Target" + std::to_string(k)) != std::string::npos) mask |= 1u << k;
+            found = psTargets.emplace(d.ps, mask).first;
+        }
+        uint32_t mask = 0;
+        for (uint32_t k = 0; k < 4; ++k)
+            if ((found->second >> k & 1) && ((d.regs[RB_COLOR_MASK] >> (4 * k)) & 0xF)) mask |= 1u << k;
+        return mask;
+    };
     for (const Draw& d : draws)
     {
         if (d.resolve) continue;
-        auto& size = targetSizes[std::make_tuple(d.regs[RB_SURFACE_INFO], d.regs[RB_COLOR_INFO], d.regs[RB_DEPTH_INFO])];
+        const uint32_t written = writtenTargets(d);
+        uint32_t& count = targetCounts[keyOf(d)];
+        for (uint32_t k = 0; k < 4; ++k)
+            if (written >> k & 1) count = (std::max)(count, k + 1);
+        auto& size = targetSizes[keyOf(d)];
         size.first = (std::max)(size.first, uint32_t(std::lround(2 * std::fabs(AsFloat(d.regs[VPORT_XSCALE])))));
         size.second = (std::max)(size.second, uint32_t(std::lround(2 * std::fabs(AsFloat(d.regs[VPORT_YSCALE])))));
     }
     auto targetFor = [&](const Draw& d) -> Target& {
-        auto key = std::make_tuple(d.regs[RB_SURFACE_INFO], d.regs[RB_COLOR_INFO], d.regs[RB_DEPTH_INFO]);
+        const TargetKey key = keyOf(d);
         Target& t = targets[key];
-        if (t.color) return t;
+        if (t.framebuffer) return t;
         // Size: window scissor when the frame wrote it, else the viewport
         // (PA_CL_VPORT scale is half the size in pixels).
         const uint32_t br = d.regs[PA_SC_WINDOW_SCISSOR_BR];
@@ -486,23 +549,29 @@ int main(int argc, char** argv)
         }
         t.width = (std::clamp)(t.width, 1u, 4096u);
         t.height = (std::clamp)(t.height, 1u, 4096u);
-        t.format = ColorFormat(d.regs[RB_COLOR_INFO]);
-        t.color = device->createTexture(RenderTextureDesc::ColorTarget(t.width, t.height, t.format));
-        t.descriptor = textureCount + uint32_t((std::min)(targets.size() - 1, size_t(kMaxTargets - 1)));
-        sets[0]->setTexture(t.descriptor, t.color.get(), RenderTextureLayout::SHADER_READ);
+        t.count = (std::max)(targetCounts[key], 1u);
+        const RenderTexture* colors[4] = {};
+        for (uint32_t k = 0; k < t.count; ++k)
+        {
+            Surface& rt = t.rt[k];
+            rt.format = ColorFormat(ColorInfo(d.regs, k));
+            rt.texture = device->createTexture(RenderTextureDesc::ColorTarget(t.width, t.height, rt.format));
+            rt.descriptor = textureCount + uint32_t((std::min)(nextPlain++, kMaxTargets - 1));
+            sets[0]->setTexture(rt.descriptor, rt.texture.get(), RenderTextureLayout::SHADER_READ);
+            rt.rowPitch = (t.width * FormatBytes(rt.format) + 255) & ~255u;
+            rt.readback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(rt.rowPitch) * t.height));
+            colors[k] = rt.texture.get();
+            list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(rt.texture.get(), RenderTextureLayout::COLOR_WRITE));
+        }
         t.depth = device->createTexture(RenderTextureDesc::DepthTarget(t.width, t.height, RenderFormat::D32_FLOAT));
-        const RenderTexture* color = t.color.get();
         RenderFramebufferDesc fb;
-        fb.colorAttachments = &color;
-        fb.colorAttachmentsCount = 1;
+        fb.colorAttachments = colors;
+        fb.colorAttachmentsCount = t.count;
         fb.depthAttachment = t.depth.get();
         t.framebuffer = device->createFramebuffer(fb);
-        t.rowPitch = (t.width * FormatBytes(t.format) + 255) & ~255u;
-        t.readback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(t.rowPitch) * t.height));
-        list->barriers(RenderBarrierStage::GRAPHICS, {RenderTextureBarrier(t.color.get(), RenderTextureLayout::COLOR_WRITE),
-            RenderTextureBarrier(t.depth.get(), RenderTextureLayout::DEPTH_WRITE)});
+        list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(t.depth.get(), RenderTextureLayout::DEPTH_WRITE));
         list->setFramebuffer(t.framebuffer.get());
-        list->clearColor(0, RenderColor(0.1f, 0.0f, 0.2f, 1.0f));
+        for (uint32_t k = 0; k < t.count; ++k) list->clearColor(k, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
         // From Dust uses reversed depth (viewport Z scale -1, offset 1, GREATER_EQUAL).
         list->clearDepthStencil(true, false, 0.0f);
         return t;
@@ -516,6 +585,9 @@ int main(int argc, char** argv)
         std::string key = d.vs + "|" + d.ps + "|" + std::to_string(d.stride) + "|" + std::to_string(depthControl & 0x76) + "|" + std::to_string(mode & 7) +
             "|" + std::to_string(d.regs[RB_BLENDCONTROL0]) + "|" + std::to_string(d.regs[RB_COLOR_MASK] & 0xF) +
             "|" + std::to_string(int(ColorFormat(d.regs[RB_COLOR_INFO])));
+        for (uint32_t k = 1; k < 4; ++k)
+            key += "|" + std::to_string(ColorInfo(d.regs, k)) + "/" + std::to_string(BlendControl(d.regs, k));
+        key += "|" + std::to_string(d.regs[RB_COLOR_MASK]) + "|" + std::to_string(writtenTargets(d));
         for (const auto& s : d.semantics) key += "|" + s;
         auto it = pipelines.find(key);
         if (it != pipelines.end()) return it->second.second.get();
@@ -550,9 +622,13 @@ int main(int argc, char** argv)
         desc.vertexShader = vs.get();
         // FD_REPLAY_DEBUG_PS=1 keeps the depth-colour debug shader.
         desc.pixelShader = getenv("FD_REPLAY_DEBUG_PS") ? pixelShader.get() : ps;
-        desc.renderTargetFormat[0] = ColorFormat(d.regs[RB_COLOR_INFO]);
-        desc.renderTargetBlend[0] = Blend(d.regs[RB_BLENDCONTROL0], d.regs[RB_COLOR_MASK]);
-        desc.renderTargetCount = 1;
+        const uint32_t count = targetFor(d).count, written = writtenTargets(d);
+        for (uint32_t k = 0; k < count; ++k)
+        {
+            desc.renderTargetFormat[k] = ColorFormat(ColorInfo(d.regs, k));
+            desc.renderTargetBlend[k] = Blend(BlendControl(d.regs, k), (written >> k & 1) ? d.regs[RB_COLOR_MASK] >> (4 * k) : 0);
+        }
+        desc.renderTargetCount = count;
         // RB_DEPTHCONTROL: z_enable bit 1, z_write bit 2, zfunc bits 4-6.
         desc.depthEnabled = (depthControl >> 1) & 1;
         desc.depthWriteEnabled = (depthControl >> 2) & 1;
@@ -573,7 +649,8 @@ int main(int argc, char** argv)
     list->begin();
     size_t vertexAt = 0, indexAt = 0;
     const Target* current = nullptr;
-    std::map<uint32_t, Target*> resolved; // texture base address -> render target copied there
+    std::map<uint32_t, Surface*> resolved; // texture base address -> surface copied there
+    std::map<uint64_t, std::pair<uint32_t, std::unique_ptr<RenderTextureView>>> tableViews; // (texture, swizzle) -> view
     uint32_t aliasHits = 0;
     uint32_t nextView = textureCount + 64; // first 64 slots: one plain view per target
     for (size_t i = 0; i < draws.size(); ++i)
@@ -583,9 +660,11 @@ int main(int argc, char** argv)
         {
             // Copy source: the target configured when the copy runs. Only
             // color copies (copy_src_select 0-3) are aliased for now.
-            auto key = std::make_tuple(d.copySurface, d.copyColor, d.copyDepth);
-            auto found = targets.find(key);
-            if (found != targets.end() && (d.copyControl & 7) < 4) resolved[d.copyDest] = &found->second;
+            const uint32_t source = d.copyControl & 7; // copy_src_select: 0-3 color RT, 4 depth
+            for (auto& [key, t] : targets)
+                if (std::get<0>(key) == d.copySurface && std::get<1>(key) == d.copyColor && std::get<5>(key) == d.copyDepth &&
+                    source < t.count && t.rt[source].texture)
+                    resolved[d.copyDest] = &t.rt[source];
             continue;
         }
         memcpy(vertexMap + vertexAt, d.vertices, d.vertexBytes);
@@ -603,29 +682,46 @@ int main(int argc, char** argv)
         for (uint32_t slot = 0; slot < 32; ++slot)
         {
             uint32_t index = d.slots[slot] >= 0 ? uint32_t(d.slots[slot]) : 0;
+            // Table textures are RGBA = Xenos components XYZW; the fetch swizzle
+            // picks what the shader sees, through a view when not identity.
+            if (d.slots[slot] >= 0 && d.swizzles[slot] != kIdentitySwizzle)
+            {
+                const uint64_t viewKey = uint64_t(uint32_t(d.slots[slot])) << 32 | d.swizzles[slot];
+                auto view = tableViews.find(viewKey);
+                if (view == tableViews.end() && nextView < textureCount + kMaxTargets)
+                {
+                    RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(RenderFormat::R8G8B8A8_UNORM);
+                    viewDesc.componentMapping = SwizzleMapping(d.swizzles[slot]);
+                    auto textureView = textures[d.slots[slot]]->createTextureView(viewDesc);
+                    sets[0]->setTexture(nextView, textures[d.slots[slot]].get(), RenderTextureLayout::SHADER_READ, textureView.get());
+                    view = tableViews.emplace(viewKey, std::make_pair(nextView++, std::move(textureView))).first;
+                }
+                if (view != tableViews.end()) index = view->second.first;
+            }
             auto alias = d.bases[slot] ? resolved.find(d.bases[slot]) : resolved.end();
-            if (alias != resolved.end() && alias->second != &targetFor(d))
+            Target& drawTarget = targetFor(d);
+            const bool own = alias != resolved.end() &&
+                std::any_of(std::begin(drawTarget.rt), std::end(drawTarget.rt), [&](const Surface& rt) { return &rt == alias->second; });
+            if (alias != resolved.end() && !own)
             {
                 // A resolved read sees the target through the fetch constant's
                 // swizzle (component i of the result = target channel swizzle[i]).
-                Target& source = *alias->second;
+                Surface& source = *alias->second;
                 auto view = source.views.find(d.swizzles[slot]);
                 if (view == source.views.end() && nextView < textureCount + kMaxTargets)
                 {
-                    static const RenderSwizzle channel[] = {RenderSwizzle::R, RenderSwizzle::G, RenderSwizzle::B,
-                        RenderSwizzle::A, RenderSwizzle::ZERO, RenderSwizzle::ONE, RenderSwizzle::ZERO, RenderSwizzle::ZERO};
                     RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(source.format);
                     const uint32_t w = d.swizzles[slot];
-                    viewDesc.componentMapping = RenderComponentMapping(channel[w & 7], channel[(w >> 3) & 7], channel[(w >> 6) & 7], channel[(w >> 9) & 7]);
-                    auto textureView = source.color->createTextureView(viewDesc);
-                    sets[0]->setTexture(nextView, source.color.get(), RenderTextureLayout::SHADER_READ, textureView.get());
+                    viewDesc.componentMapping = SwizzleMapping(w);
+                    auto textureView = source.texture->createTextureView(viewDesc);
+                    sets[0]->setTexture(nextView, source.texture.get(), RenderTextureLayout::SHADER_READ, textureView.get());
                     view = source.views.emplace(w, std::make_pair(nextView++, std::move(textureView))).first;
                 }
                 index = view != source.views.end() ? view->second.first : alias->second->descriptor;
                 ++aliasHits;
                 if (!alias->second->shaderRead)
                 {
-                    list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(alias->second->color.get(), RenderTextureLayout::SHADER_READ));
+                    list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(alias->second->texture.get(), RenderTextureLayout::SHADER_READ));
                     alias->second->shaderRead = true;
                 }
             }
@@ -635,11 +731,12 @@ int main(int argc, char** argv)
         RenderPipeline* pipeline = pipelineFor(d);
         if (pipeline && d.primitive == 4)
         {
-            if (target.shaderRead)
-            {
-                list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.color.get(), RenderTextureLayout::COLOR_WRITE));
-                target.shaderRead = false;
-            }
+            for (uint32_t k = 0; k < target.count; ++k)
+                if (target.rt[k].shaderRead)
+                {
+                    list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.rt[k].texture.get(), RenderTextureLayout::COLOR_WRITE));
+                    target.rt[k].shaderRead = false;
+                }
             if (current != &target)
             {
                 list->setFramebuffer(target.framebuffer.get());
@@ -674,13 +771,14 @@ int main(int argc, char** argv)
         indexAt += d.indexBytes;
     }
     for (auto& [key, t] : targets)
-    {
-        list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(t.color.get(), RenderTextureLayout::COPY_SOURCE));
-        t.shaderRead = false;
-        list->copyTextureRegion(
-            RenderTextureCopyLocation::PlacedFootprint(t.readback.get(), t.format, t.width, t.height, 1, t.rowPitch / FormatBytes(t.format)),
-            RenderTextureCopyLocation::Subresource(t.color.get()));
-    }
+        for (uint32_t k = 0; k < t.count; ++k)
+        {
+            Surface& rt = t.rt[k];
+            list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(rt.texture.get(), RenderTextureLayout::COPY_SOURCE));
+            list->copyTextureRegion(
+                RenderTextureCopyLocation::PlacedFootprint(rt.readback.get(), rt.format, t.width, t.height, 1, rt.rowPitch / FormatBytes(rt.format)),
+                RenderTextureCopyLocation::Subresource(rt.texture.get()));
+        }
     list->end();
     vertexBuffer->unmap();
     indexBuffer->unmap();
@@ -692,16 +790,21 @@ int main(int argc, char** argv)
     int n = 0;
     for (auto& [key, t] : targets)
     {
-        const std::string path = dir + "/target_" + std::to_string(n++) + ".png";
-        const auto* pixels = static_cast<const uint8_t*>(t.readback->map());
-        std::vector<uint8_t> rgba(size_t(t.width) * t.height * 4);
-        for (uint32_t y = 0; y < t.height; ++y)
-            for (uint32_t x = 0; x < t.width; ++x)
-                ToRgba8(t.format, pixels + size_t(y) * t.rowPitch + size_t(x) * FormatBytes(t.format), &rgba[(size_t(y) * t.width + x) * 4]);
-        stbi_write_png(path.c_str(), t.width, t.height, 4, rgba.data(), t.width * 4);
-        t.readback->unmap();
-        printf("%s: %ux%u, %u draws (surface %08X color %08X depth %08X)\n", path.c_str(), t.width, t.height, t.draws,
-            std::get<0>(key), std::get<1>(key), std::get<2>(key));
+        for (uint32_t k = 0; k < t.count; ++k)
+        {
+            Surface& rt = t.rt[k];
+            const std::string path = dir + "/target_" + std::to_string(n) + (k ? "_rt" + std::to_string(k) : "") + ".png";
+            const auto* pixels = static_cast<const uint8_t*>(rt.readback->map());
+            std::vector<uint8_t> rgba(size_t(t.width) * t.height * 4);
+            for (uint32_t y = 0; y < t.height; ++y)
+                for (uint32_t x = 0; x < t.width; ++x)
+                    ToRgba8(rt.format, pixels + size_t(y) * rt.rowPitch + size_t(x) * FormatBytes(rt.format), &rgba[(size_t(y) * t.width + x) * 4]);
+            stbi_write_png(path.c_str(), t.width, t.height, 4, rgba.data(), t.width * 4);
+            rt.readback->unmap();
+        }
+        printf("target_%d: %ux%u, %u RT, %u draws (surface %08X color %08X depth %08X)\n", n, t.width, t.height, t.count, t.draws,
+            std::get<0>(key), std::get<1>(key), std::get<5>(key));
+        ++n;
     }
     printf("fd_replay: %zu draws, %zu pipelines, %zu targets, %zu resolves mapped, %u resolved reads\n", draws.size(),
         pipelines.size(), targets.size(), resolved.size(), aliasHits);

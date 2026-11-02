@@ -77,20 +77,50 @@ def shader_objects(path, bins):
     return out
 
 
-def vertex_layout(code):
-    """Vertex fetches of stream fetch constant 95 in live microcode: stride and elements."""
+def live_vfetches(code):
+    """Vertex fetch instructions in live microcode (D3D patches format, offset,
+    stride and fetch constant into them at bind time), in address order."""
     words = struct.unpack(">%dI" % (len(code) // 4), code[: len(code) // 4 * 4])
-    stride, elements = 0, {}
+    out = []
     for i in range(len(words) - 2):
         w = list(words[i:i + 3])
         if w[0] & 0x1F or not (w[0] >> 19) & 1:
             continue
         v = decode_vfetch(w)
-        if v["fetch_constant_index"] != 95 or not 0 < v["stride"] <= 64:
-            continue
-        stride = stride or v["stride"]
-        elements.setdefault(v["offset"] * 4, v)  # microcode order is kept (dict order)
-    return stride * 4, list(elements.items())
+        if v["format"] in COMPONENTS and 0 <= v["stride"] <= 64:
+            out.append(v)
+    return out
+
+
+def hlsl_vfetches(name):
+    """Semantics of the shader's vertex fetches in program order (FDVFETCH
+    comments written by the patched XenosRecomp)."""
+    hlsl = open(os.path.join(ROOT, "build", "shaders_split", name + ".hlsl"), encoding="utf-8", errors="replace").read()
+    return [(int(r), sem) for r, sem in re.findall(r"r(\d+)\.\w+ = /\* FDVFETCH ([A-Z]+[0-9]+) ", hlsl)]
+
+
+def vertex_layout(code, name):
+    """(stride bytes, [(offset bytes, vfetch, semantic)]) for stream fetch 95, or
+    (0, []) when the shader's fetches cannot be matched or use other streams."""
+    live, fetches = live_vfetches(code), hlsl_vfetches(name)
+    # Pair each HLSL fetch with the live fetch writing the same register, in
+    # order (the microcode scan can also match non-fetch instructions).
+    pairs, used = [], set()
+    for reg, semantic in fetches:
+        match = next((k for k, v in enumerate(live) if k not in used and v["dest_reg"] == reg), None)
+        if match is None:
+            return 0, []
+        used.add(match)
+        pairs.append((live[match], semantic))
+    if not pairs:
+        return 0, []
+    stride, elements = 0, {}
+    for v, semantic in pairs:
+        if v["fetch_constant_index"] != 95:
+            return 0, []  # instancing / second stream: not supported yet
+        stride = stride or (v["stride"] if not v["is_mini_fetch"] else 0)
+        elements.setdefault(semantic, (v["offset"] * 4, v))
+    return stride * 4, [(off, v, sem) for sem, (off, v) in elements.items()]
 
 
 def convert_element(data, offset, v):
@@ -151,7 +181,8 @@ float4 main(float4 position : SV_Position) : SV_Target
 
 # GPU registers the replay needs per draw (render target, viewport, state).
 STATE_REGISTERS = [0x2000, 0x2001, 0x2002, 0x2081, 0x2082, 0x2104, 0x2200, 0x2201, 0x2205,
-                   0x2102, 0x210F, 0x2110, 0x2111, 0x2112, 0x2113, 0x2114, 0x2206]
+                   0x2102, 0x210F, 0x2110, 0x2111, 0x2112, 0x2113, 0x2114, 0x2206,
+                   0x2003, 0x2004, 0x2005, 0x2209, 0x220A, 0x220B]  # RB_COLOR1-3_INFO, RB_BLENDCONTROL1-3
 
 
 def expand_rects(vdata, element_count):
@@ -249,12 +280,13 @@ def main():
         indices = buffers.get(draw[1][2] & 0x1FFFFFFF) if source == 0 else b""
         vfetch = struct.unpack_from(">2I", device, 0x480 + 190 * 4)
         vertices = buffers.get(vfetch[0] & 0x1FFFFFFC)
-        stride, elements = vertex_layout(objs["vs_code"][1][0x40:])
+        stride, layout = vertex_layout(objs["vs_code"][1][0x40:], name)
+        elements = [(off, v) for off, v, _ in layout]
         if indices is None or vertices is None or not stride or not elements or prim not in (4, 8):
             skipped["missing data/layout"] = skipped.get("missing data/layout", 0) + 1
             continue
-        semantics = hlsl_inputs(name)
-        if any(v["format"] not in COMPONENTS for _, v in elements) or len(semantics) != len(elements):
+        semantics = [sem for _, _, sem in layout]
+        if not elements or set(semantics) != set(hlsl_inputs(name)):
             skipped["vertex format/semantics"] = skipped.get("vertex format/semantics", 0) + 1
             continue
         if name not in compiled:

@@ -107,10 +107,25 @@ index 1c74034..ea3bb28 100644
  
  float4 tfetchR11G11B10(uint4 value)
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 698a418..2749c06 100644
+index 698a418..53fcaf0 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
-@@ -253,6 +253,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -179,6 +179,14 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+     auto findResult = vertexElements.find(address);
+     assert(findResult != vertexElements.end());
+ 
++    // FromDust: the vertex layout of each input, for hosts that build input
++    // layouts from the shader (parsed by tools/replay_pack.py).
++    out += fmt::format("/* FDVFETCH {}{} const={} offset={} stride={} format={} signed={} int={} exp={} mini={} */ ",
++        USAGE_SEMANTICS[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex),
++        uint32_t(instr.constIndex) * 3 + uint32_t(instr.constIndexSelect), int32_t(instr.offset), uint32_t(instr.stride),
++        uint32_t(instr.format), uint32_t(instr.formatCompAll), uint32_t(instr.numFormatAll), int32_t(instr.expAdjust),
++        uint32_t(instr.isMiniFetch));
++
+     switch (findResult->second.usage)
+     {
+     case DeclUsage::Normal:
+@@ -253,6 +261,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
  #endif
  
      auto findResult = samplers.find(instr.constIndex);
@@ -120,7 +135,7 @@ index 698a418..2749c06 100644
      if (findResult != samplers.end())
      {
          constNamePtr = findResult->second;
-@@ -331,7 +334,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -331,7 +342,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
          out += "Bicubic";
  #endif
  
@@ -131,7 +146,7 @@ index 698a418..2749c06 100644
      printSrcRegister(componentCount);
  
      switch (instr.dimension)
-@@ -1105,11 +1110,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1105,11 +1118,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
      assert(shaderContainer->constantTableOffset != NULL);
  
@@ -148,7 +163,7 @@ index 698a418..2749c06 100644
      const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
      constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
  
-@@ -1174,11 +1182,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1174,11 +1190,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
@@ -162,7 +177,7 @@ index 698a418..2749c06 100644
  
              samplers.emplace(constantInfo->registerIndex, constantName);
              break;
-@@ -1233,11 +1241,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1233,11 +1249,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",
@@ -176,7 +191,7 @@ index 698a418..2749c06 100644
          }
      }
  
-@@ -1322,19 +1330,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1322,19 +1338,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              }
          #endif
  
@@ -217,7 +232,7 @@ index 698a418..2749c06 100644
  
              vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
          }
-@@ -1418,6 +1440,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1418,6 +1448,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\n";
      }
  
