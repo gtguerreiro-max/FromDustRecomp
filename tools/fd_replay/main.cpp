@@ -1,14 +1,18 @@
 // fd_replay: redraws a frame captured by runtime/gpu/frame_capture.cpp with the
-// native renderer's building blocks (plume + XenosRecomp shaders), offscreen,
-// and writes the result as a PNG to compare with the Xenia screenshot.
+// native renderer's building blocks (plume + XenosRecomp shaders), offscreen.
+// tools/replay_pack.py prepares <dir>/replay.bin and the shaders; every render
+// target configuration of the frame is written as <dir>/target_<n>.png.
 //
-// Usage: fd_replay <capture dir> <output.png>
+// Usage: fd_replay <replay dir>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "plume_render_interface.h"
@@ -25,69 +29,15 @@ using namespace plume;
 
 namespace
 {
-constexpr uint32_t kWidth = 1024, kHeight = 600; // the game's render size
-constexpr uint32_t kRowPitch = (kWidth * 4 + 255) & ~255u;
-
-struct Renderer
+// Order of the per-draw registers written by replay_pack.py (STATE_REGISTERS).
+enum Reg
 {
-    std::unique_ptr<RenderInterface> api;
-    std::unique_ptr<RenderDevice> device;
-    std::unique_ptr<RenderCommandQueue> queue;
-    std::unique_ptr<RenderCommandList> list;
-    std::unique_ptr<RenderCommandFence> fence;
-    std::unique_ptr<RenderTexture> color;
-    std::unique_ptr<RenderFramebuffer> framebuffer;
-    std::unique_ptr<RenderBuffer> readback;
-
-    bool Initialize()
-    {
-        api = CreateD3D12Interface();
-        if (!api) return false;
-        device = api->createDevice();
-        if (!device) return false;
-        queue = device->createCommandQueue(RenderCommandListType::DIRECT);
-        list = queue->createCommandList();
-        fence = device->createCommandFence();
-        color = device->createTexture(RenderTextureDesc::ColorTarget(kWidth, kHeight, RenderFormat::R8G8B8A8_UNORM));
-        const RenderTexture* attachment = color.get();
-        RenderFramebufferDesc desc;
-        desc.colorAttachments = &attachment;
-        desc.colorAttachmentsCount = 1;
-        framebuffer = device->createFramebuffer(desc);
-        readback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(kRowPitch) * kHeight));
-        return framebuffer && readback;
-    }
-
-    void Begin()
-    {
-        list->begin();
-        list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(color.get(), RenderTextureLayout::COLOR_WRITE));
-        list->setFramebuffer(framebuffer.get());
-        list->setViewports(RenderViewport(0.0f, 0.0f, float(kWidth), float(kHeight)));
-        list->setScissors(RenderRect(0, 0, kWidth, kHeight));
-        list->clearColor(0, RenderColor(0.1f, 0.0f, 0.2f, 1.0f));
-    }
-
-    bool EndAndSave(const char* path)
-    {
-        list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(color.get(), RenderTextureLayout::COPY_SOURCE));
-        list->copyTextureRegion(
-            RenderTextureCopyLocation::PlacedFootprint(readback.get(), RenderFormat::R8G8B8A8_UNORM, kWidth, kHeight, 1, kRowPitch / 4),
-            RenderTextureCopyLocation::Subresource(color.get()));
-        list->end();
-        const RenderCommandList* lists = list.get();
-        queue->executeCommandLists(&lists, 1, nullptr, 0, nullptr, 0, fence.get());
-        queue->waitForCommandFence(fence.get());
-        const auto* pixels = static_cast<const uint8_t*>(readback->map());
-        const bool ok = stbi_write_png(path, kWidth, kHeight, 4, pixels, kRowPitch) != 0;
-        readback->unmap();
-        return ok;
-    }
+    RB_SURFACE_INFO, RB_COLOR_INFO, RB_DEPTH_INFO, PA_SC_WINDOW_SCISSOR_TL, PA_SC_WINDOW_SCISSOR_BR,
+    RB_COLOR_MASK, RB_DEPTHCONTROL, RB_BLENDCONTROL0, PA_SU_SC_MODE_CNTL, VGT_INDX_OFFSET,
+    VPORT_XSCALE, VPORT_XOFFSET, VPORT_YSCALE, VPORT_YOFFSET, VPORT_ZSCALE, VPORT_ZOFFSET, PA_CL_VTE_CNTL,
+    kRegCount
 };
-}
 
-namespace
-{
 std::vector<uint8_t> ReadFile(const std::string& path)
 {
     std::vector<uint8_t> data;
@@ -102,7 +52,13 @@ std::vector<uint8_t> ReadFile(const std::string& path)
     return data;
 }
 
-// One draw from replay.bin (tools/replay_pack.py documents the layout).
+float AsFloat(uint32_t bits)
+{
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
 struct Draw
 {
     std::string vs;
@@ -113,6 +69,7 @@ struct Draw
     uint32_t vertexBytes = 0;
     std::vector<std::string> semantics;
     const uint8_t* constants = nullptr; // 4096 bytes
+    uint32_t regs[kRegCount] = {};
 };
 
 std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
@@ -122,8 +79,7 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
     auto u32 = [&] { uint32_t v; memcpy(&v, file.data() + at, 4); at += 4; return v; };
     auto bytes = [&](uint32_t n) { const uint8_t* p = file.data() + at; at += n; return p; };
     if (file.size() < 8 || u32() != 0x50524446) return draws;
-    const uint32_t count = u32();
-    for (uint32_t i = 0; i < count; ++i)
+    for (uint32_t count = u32(); count; --count)
     {
         Draw d;
         const uint32_t nameLength = u32();
@@ -142,30 +98,55 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         }
         d.constants = bytes(4096);
         d.index32 = u32();
+        for (uint32_t& r : d.regs) r = u32();
         draws.push_back(d);
     }
     return draws;
 }
+
+// Xenos/D3D9 comparison functions (RB_DEPTHCONTROL zfunc): never, less, equal,
+// less-equal, greater, not-equal, greater-equal, always.
+RenderComparisonFunction Compare(uint32_t f)
+{
+    static const RenderComparisonFunction table[] = {
+        RenderComparisonFunction::NEVER, RenderComparisonFunction::LESS, RenderComparisonFunction::EQUAL,
+        RenderComparisonFunction::LESS_EQUAL, RenderComparisonFunction::GREATER, RenderComparisonFunction::NOT_EQUAL,
+        RenderComparisonFunction::GREATER_EQUAL, RenderComparisonFunction::ALWAYS};
+    return table[f & 7];
+}
+
+// A render target configuration of the frame (EDRAM color/depth bases + pitch).
+struct Target
+{
+    uint32_t width = 0, height = 0;
+    std::unique_ptr<RenderTexture> color, depth;
+    std::unique_ptr<RenderFramebuffer> framebuffer;
+    std::unique_ptr<RenderBuffer> readback;
+    uint32_t rowPitch = 0, draws = 0;
+};
 }
 
 int main(int argc, char** argv)
 {
-    if (argc < 3)
+    if (argc < 2)
     {
-        fprintf(stderr, "usage: fd_replay <replay dir> <output.png>\n");
+        fprintf(stderr, "usage: fd_replay <replay dir>\n");
         return 1;
     }
     const std::string dir = argv[1];
     const std::vector<uint8_t> file = ReadFile(dir + "/replay.bin");
     const std::vector<Draw> draws = ParseReplay(file);
-    fprintf(stderr, "\nfd_replay: parsed %zu draws", draws.size());
-    Renderer renderer;
-    if (!renderer.Initialize())
+
+    auto api = CreateD3D12Interface();
+    auto device = api ? api->createDevice() : nullptr;
+    if (!device)
     {
-        fprintf(stderr, "\nfd_replay: D3D12 initialization failed\n");
+        fprintf(stderr, "fd_replay: D3D12 initialization failed\n");
         return 1;
     }
-    RenderDevice& device = *renderer.device;
+    auto queue = device->createCommandQueue(RenderCommandListType::DIRECT);
+    auto list = queue->createCommandList();
+    auto fence = device->createCommandFence();
 
     // Root constant buffers as XenosRecomp's D3D12 shaders expect them:
     // b0 vertex constants, b1 pixel constants, b2 shared constants (space 4).
@@ -178,51 +159,75 @@ int main(int argc, char** argv)
     layoutDesc.rootDescriptorDescs = roots;
     layoutDesc.rootDescriptorDescsCount = 3;
     layoutDesc.allowInputLayout = true;
-    fprintf(stderr, "\nfd_replay: before layout");
-    auto layout = device.createPipelineLayout(layoutDesc);
-
-    fprintf(stderr, "\nfd_replay: layout ok");
+    auto layout = device->createPipelineLayout(layoutDesc);
     const std::vector<uint8_t> psCode = ReadFile(dir + "/debug.ps.dxil");
-    auto pixelShader = device.createShader(psCode.data(), psCode.size(), "main", RenderShaderFormat::DXIL);
+    auto pixelShader = device->createShader(psCode.data(), psCode.size(), "main", RenderShaderFormat::DXIL);
 
-    fprintf(stderr, "\nfd_replay: pixel shader %p", (void*)pixelShader.get());
     // All per-draw data in a few upload buffers.
-    size_t vertexTotal = 0, indexTotal = 0;
+    size_t vertexTotal = 16, indexTotal = 16;
     for (const Draw& d : draws) vertexTotal += d.vertexBytes, indexTotal += d.indexBytes;
-    auto vertexBuffer = device.createBuffer(RenderBufferDesc::VertexBuffer((std::max<size_t>)(vertexTotal, 16), RenderHeapType::UPLOAD));
-    auto indexBuffer = device.createBuffer(RenderBufferDesc::IndexBuffer((std::max<size_t>)(indexTotal, 16), RenderHeapType::UPLOAD));
-    auto constantBuffer = device.createBuffer(RenderBufferDesc::UploadBuffer(4096 * (draws.size() + 1) + 4096, RenderBufferFlag::CONSTANT));
+    auto vertexBuffer = device->createBuffer(RenderBufferDesc::VertexBuffer(vertexTotal, RenderHeapType::UPLOAD));
+    auto indexBuffer = device->createBuffer(RenderBufferDesc::IndexBuffer(indexTotal, RenderHeapType::UPLOAD));
+    auto constantBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(4096 * (draws.size() + 1), RenderBufferFlag::CONSTANT));
     auto* vertexMap = static_cast<uint8_t*>(vertexBuffer->map());
     auto* indexMap = static_cast<uint8_t*>(indexBuffer->map());
     auto* constantMap = static_cast<uint8_t*>(constantBuffer->map());
-    memset(constantMap, 0, 4096); // shared constants and pixel constants: zero for now
+    memset(constantMap, 0, 4096); // shared and pixel constants: zero for now
 
-    fprintf(stderr, "\nfd_replay: buffers mapped");
-    std::unique_ptr<RenderTexture> depth = device.createTexture(RenderTextureDesc::DepthTarget(kWidth, kHeight, RenderFormat::D32_FLOAT));
-    const RenderTexture* colorAttachment = renderer.color.get();
-    RenderFramebufferDesc fbDesc;
-    fbDesc.colorAttachments = &colorAttachment;
-    fbDesc.colorAttachmentsCount = 1;
-    fbDesc.depthAttachment = depth.get();
-    renderer.framebuffer = device.createFramebuffer(fbDesc);
+    // Targets keyed by (surface info, color info, depth info).
+    std::map<std::tuple<uint32_t, uint32_t, uint32_t>, Target> targets;
+    auto targetFor = [&](const Draw& d) -> Target& {
+        auto key = std::make_tuple(d.regs[RB_SURFACE_INFO], d.regs[RB_COLOR_INFO], d.regs[RB_DEPTH_INFO]);
+        Target& t = targets[key];
+        if (t.color) return t;
+        // Size: window scissor when the frame wrote it, else the viewport
+        // (PA_CL_VPORT scale is half the size in pixels).
+        const uint32_t br = d.regs[PA_SC_WINDOW_SCISSOR_BR];
+        t.width = br & 0x7FFF;
+        t.height = (br >> 16) & 0x7FFF;
+        if (!t.width || !t.height)
+        {
+            t.width = uint32_t(std::lround(2 * std::fabs(AsFloat(d.regs[VPORT_XSCALE]))));
+            t.height = uint32_t(std::lround(2 * std::fabs(AsFloat(d.regs[VPORT_YSCALE]))));
+        }
+        t.width = (std::clamp)(t.width, 1u, 4096u);
+        t.height = (std::clamp)(t.height, 1u, 4096u);
+        t.color = device->createTexture(RenderTextureDesc::ColorTarget(t.width, t.height, RenderFormat::R8G8B8A8_UNORM));
+        t.depth = device->createTexture(RenderTextureDesc::DepthTarget(t.width, t.height, RenderFormat::D32_FLOAT));
+        const RenderTexture* color = t.color.get();
+        RenderFramebufferDesc fb;
+        fb.colorAttachments = &color;
+        fb.colorAttachmentsCount = 1;
+        fb.depthAttachment = t.depth.get();
+        t.framebuffer = device->createFramebuffer(fb);
+        t.rowPitch = (t.width * 4 + 255) & ~255u;
+        t.readback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(t.rowPitch) * t.height));
+        list->barriers(RenderBarrierStage::GRAPHICS, {RenderTextureBarrier(t.color.get(), RenderTextureLayout::COLOR_WRITE),
+            RenderTextureBarrier(t.depth.get(), RenderTextureLayout::DEPTH_WRITE)});
+        list->setFramebuffer(t.framebuffer.get());
+        list->clearColor(0, RenderColor(0.1f, 0.0f, 0.2f, 1.0f));
+        // From Dust uses reversed depth (viewport Z scale -1, offset 1, GREATER_EQUAL).
+        list->clearDepthStencil(true, false, 0.0f);
+        return t;
+    };
 
-    struct Pipeline { std::unique_ptr<RenderShader> vs; std::unique_ptr<RenderPipeline> pipeline; };
-    std::vector<std::pair<std::string, Pipeline>> pipelines;
+    // Pipelines keyed by shader, vertex layout and fixed-function state.
+    std::map<std::string, std::pair<std::unique_ptr<RenderShader>, std::unique_ptr<RenderPipeline>>> pipelines;
     auto pipelineFor = [&](const Draw& d) -> RenderPipeline* {
-        std::string key = d.vs;
+        const uint32_t depthControl = d.regs[RB_DEPTHCONTROL], mode = d.regs[PA_SU_SC_MODE_CNTL];
+        std::string key = d.vs + "|" + std::to_string(d.stride) + "|" + std::to_string(depthControl & 0x76) + "|" + std::to_string(mode & 7);
         for (const auto& s : d.semantics) key += "|" + s;
-        for (auto& [k, p] : pipelines) if (k == key) return p.pipeline.get();
-        Pipeline p;
+        auto it = pipelines.find(key);
+        if (it != pipelines.end()) return it->second.second.get();
+        auto& [vs, pipeline] = pipelines[key];
         const std::vector<uint8_t> code = ReadFile(dir + "/" + d.vs + ".vs.dxil");
-        if (!code.empty()) p.vs = device.createShader(code.data(), code.size(), "main", RenderShaderFormat::DXIL);
+        if (!code.empty()) vs = device->createShader(code.data(), code.size(), "main", RenderShaderFormat::DXIL);
         std::vector<std::string> names;
         std::vector<RenderInputElement> elements;
         for (const auto& s : d.semantics) names.push_back(s.substr(0, s.find_first_of("0123456789")));
         for (size_t i = 0; i < d.semantics.size(); ++i)
-        {
-            const uint32_t index = uint32_t(atoi(d.semantics[i].c_str() + names[i].size()));
-            elements.emplace_back(names[i].c_str(), index, uint32_t(i), RenderFormat::R32G32B32A32_FLOAT, 0, uint32_t(i * 16));
-        }
+            elements.emplace_back(names[i].c_str(), uint32_t(atoi(d.semantics[i].c_str() + names[i].size())), uint32_t(i),
+                RenderFormat::R32G32B32A32_FLOAT, 0, uint32_t(i * 16));
         RenderInputSlot slot(0, d.stride);
         RenderGraphicsPipelineDesc desc;
         desc.inputSlots = &slot;
@@ -230,68 +235,96 @@ int main(int argc, char** argv)
         desc.inputElements = elements.data();
         desc.inputElementsCount = uint32_t(elements.size());
         desc.pipelineLayout = layout.get();
-        desc.vertexShader = p.vs.get();
+        desc.vertexShader = vs.get();
         desc.pixelShader = pixelShader.get();
         desc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
         desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
         desc.renderTargetCount = 1;
-        desc.depthEnabled = true;
-        desc.depthWriteEnabled = true;
-        desc.depthFunction = RenderComparisonFunction::LESS_EQUAL;
+        // RB_DEPTHCONTROL: z_enable bit 1, z_write bit 2, zfunc bits 4-6.
+        desc.depthEnabled = (depthControl >> 1) & 1;
+        desc.depthWriteEnabled = (depthControl >> 2) & 1;
+        desc.depthFunction = Compare(depthControl >> 4);
         desc.depthTargetFormat = RenderFormat::D32_FLOAT;
+        // PA_SU_SC_MODE_CNTL: cull_front bit 0, cull_back bit 1, face bit 2 (1 =
+        // clockwise front, the D3D12 default; 0 = counter-clockwise: swap sides).
+        const bool cullFront = (mode & 4) ? (mode & 1) : (mode & 2), cullBack = (mode & 4) ? (mode & 2) : (mode & 1);
+        desc.cullMode = cullBack ? RenderCullMode::BACK : cullFront ? RenderCullMode::FRONT : RenderCullMode::NONE;
         desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
-        fprintf(stderr, "\n  vs %s code %zu shader %p", d.vs.c_str(), code.size(), (void*)p.vs.get());
-        if (p.vs) p.pipeline = device.createGraphicsPipeline(desc);
-        if (!p.pipeline) fprintf(stderr, "\nfd_replay: no pipeline for VS %s\n", d.vs.c_str());
-        pipelines.emplace_back(key, std::move(p));
-        return pipelines.back().second.pipeline.get();
+        if (vs) pipeline = device->createGraphicsPipeline(desc);
+        if (!pipeline) fprintf(stderr, "fd_replay: no pipeline for VS %s\n", d.vs.c_str());
+        return pipeline.get();
     };
 
-    fprintf(stderr, "\nfd_replay: framebuffer %p", (void*)renderer.framebuffer.get());
-    renderer.Begin();
-    RenderCommandList& list = *renderer.list;
-    list.barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(depth.get(), RenderTextureLayout::DEPTH_WRITE));
-    list.setFramebuffer(renderer.framebuffer.get());
-    list.clearDepthStencil(true, false, 1.0f);
-    list.setGraphicsPipelineLayout(layout.get());
+    list->begin();
     size_t vertexAt = 0, indexAt = 0;
-    uint32_t drawn = 0;
+    const Target* current = nullptr;
     for (size_t i = 0; i < draws.size(); ++i)
     {
         const Draw& d = draws[i];
         memcpy(vertexMap + vertexAt, d.vertices, d.vertexBytes);
         memcpy(indexMap + indexAt, d.indices, d.indexBytes);
         memcpy(constantMap + 4096 * (i + 1), d.constants, 4096);
-        if (i < 2) fprintf(stderr, "\ndraw %zu vs %s stride %u elements %zu", i, d.vs.c_str(), d.stride, d.semantics.size());
+        Target& target = targetFor(d);
         RenderPipeline* pipeline = pipelineFor(d);
-        if (i < 2) fprintf(stderr, "\n  pipeline %p", (void*)pipeline);
         if (pipeline && d.primitive == 4)
         {
-            list.setPipeline(pipeline);
-            list.setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 4096 * (i + 1)), 0);
-            list.setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 0), 1);
-            list.setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 0), 2);
+            if (current != &target)
+            {
+                list->setFramebuffer(target.framebuffer.get());
+                list->setGraphicsPipelineLayout(layout.get());
+                current = &target;
+            }
+            // Hardware viewport transform (PA_CL_VPORT_*): NDC -> pixels.
+            const float xs = AsFloat(d.regs[VPORT_XSCALE]), xo = AsFloat(d.regs[VPORT_XOFFSET]);
+            const float ys = AsFloat(d.regs[VPORT_YSCALE]), yo = AsFloat(d.regs[VPORT_YOFFSET]);
+            const float zs = AsFloat(d.regs[VPORT_ZSCALE]), zo = AsFloat(d.regs[VPORT_ZOFFSET]);
+            // Z keeps the game's mapping (reversed: min 1, max 0), which D3D12 allows.
+            RenderViewport viewport(xo - std::fabs(xs), yo - std::fabs(ys), 2 * std::fabs(xs), 2 * std::fabs(ys), zo, zo + zs);
+            if (!(viewport.width > 0)) viewport = RenderViewport(0, 0, float(target.width), float(target.height));
+            list->setViewports(viewport);
+            list->setScissors(RenderRect(0, 0, target.width, target.height));
+            list->setPipeline(pipeline);
+            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 4096 * (i + 1)), 0);
+            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 0), 1);
+            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 0), 2);
             RenderVertexBufferView vertexView(RenderBufferReference(vertexBuffer.get(), vertexAt), d.vertexBytes);
             RenderInputSlot slot(0, d.stride);
-            list.setVertexBuffers(0, &vertexView, 1, &slot);
+            list->setVertexBuffers(0, &vertexView, 1, &slot);
             RenderIndexBufferView indexView(RenderBufferReference(indexBuffer.get(), indexAt), d.indexBytes,
                 d.index32 ? RenderFormat::R32_UINT : RenderFormat::R16_UINT);
-            list.setIndexBuffer(&indexView);
-            list.drawIndexedInstanced((std::min)(d.indexCount, d.indexBytes / (d.index32 ? 4u : 2u)), 1, 0, 0, 0);
-            ++drawn;
+            list->setIndexBuffer(&indexView);
+            const uint32_t count = (std::min)(d.indexCount, d.indexBytes / (d.index32 ? 4u : 2u));
+            list->drawIndexedInstanced(count, 1, 0, int32_t(d.regs[VGT_INDX_OFFSET]), 0);
+            ++target.draws;
         }
         vertexAt += d.vertexBytes;
         indexAt += d.indexBytes;
     }
+    for (auto& [key, t] : targets)
+    {
+        list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(t.color.get(), RenderTextureLayout::COPY_SOURCE));
+        list->copyTextureRegion(
+            RenderTextureCopyLocation::PlacedFootprint(t.readback.get(), RenderFormat::R8G8B8A8_UNORM, t.width, t.height, 1, t.rowPitch / 4),
+            RenderTextureCopyLocation::Subresource(t.color.get()));
+    }
+    list->end();
     vertexBuffer->unmap();
     indexBuffer->unmap();
     constantBuffer->unmap();
-    printf("fd_replay: %zu draws read, %u drawn, %zu pipelines\n", draws.size(), drawn, pipelines.size());
-    if (!renderer.EndAndSave(argv[2]))
+    const RenderCommandList* lists = list.get();
+    queue->executeCommandLists(&lists, 1, nullptr, 0, nullptr, 0, fence.get());
+    queue->waitForCommandFence(fence.get());
+
+    int n = 0;
+    for (auto& [key, t] : targets)
     {
-        fprintf(stderr, "\nfd_replay: could not write %s\n", argv[2]);
-        return 1;
+        const std::string path = dir + "/target_" + std::to_string(n++) + ".png";
+        const auto* pixels = static_cast<const uint8_t*>(t.readback->map());
+        stbi_write_png(path.c_str(), t.width, t.height, 4, pixels, t.rowPitch);
+        t.readback->unmap();
+        printf("%s: %ux%u, %u draws (surface %08X color %08X depth %08X)\n", path.c_str(), t.width, t.height, t.draws,
+            std::get<0>(key), std::get<1>(key), std::get<2>(key));
     }
-    printf("fd_replay: wrote %s\n", argv[2]);
+    printf("fd_replay: %zu draws, %zu pipelines, %zu targets\n", draws.size(), pipelines.size(), targets.size());
     return 0;
 }

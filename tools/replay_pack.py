@@ -13,7 +13,8 @@ replay.bin (little-endian):
   converted to float32 x4, so stride = 16 * elements),
   u32 element count, per element: u32 semantic length, semantic (e.g. POSITION0),
   4096 bytes vertex shader constants (float4 c0..c255, swapped),
-  u32 index32.
+  u32 index32, then u32 x STATE_REGISTERS (current values of those GPU
+  registers at the draw, tracked from every draw's register writes).
 """
 import os, struct, subprocess, sys
 
@@ -126,10 +127,24 @@ def compile_vs(name):
 DEBUG_PS = """// fd_replay debug pixel shader: shades geometry by depth (near = bright).
 float4 main(float4 position : SV_Position) : SV_Target
 {
-    float shade = saturate(1.0 - position.z);
+    float shade = saturate(position.z); // reversed depth: near = 1
     return float4(shade, shade * 0.8, 0.4 + 0.6 * shade, 1.0);
 }
 """
+
+
+# GPU registers the replay needs per draw (render target, viewport, state).
+STATE_REGISTERS = [0x2000, 0x2001, 0x2002, 0x2081, 0x2082, 0x2104, 0x2200, 0x2201, 0x2205,
+                   0x2102, 0x210F, 0x2110, 0x2111, 0x2112, 0x2113, 0x2114, 0x2206]
+
+
+def track_registers(regs, commands):
+    """Apply a draw's type-0 register writes (commands start one word in)."""
+    for name, payload in packets(commands[4:]):
+        if name.startswith("REG "):
+            base = int(name.split()[1], 16)
+            for k, value in enumerate(payload):
+                regs[base + k] = value
 
 
 def main():
@@ -143,7 +158,9 @@ def main():
     buffers = load_buffers(os.path.join(ROOT, "build", "buffers.bin"))
     draws = [r for r in load(os.path.join(ROOT, "build", "frame_capture.bin"), True) if r[0][1] != 3]
     compiled, records, skipped = {}, [], {}
+    regs = {}
     for header, device, objs in draws:
+        track_registers(regs, objs.get("commands", b""))
         vs_obj = objs[0x3290][0]
         name = objects.get(vs_obj, (0, None))[1]
         draw = next(((n, p) for n, p in packets(objs.get("commands", b"")[4:]) if n.startswith("DRAW_INDX") and not n.startswith("DRAW_INDX_")), None)
@@ -183,6 +200,7 @@ def main():
         rec += struct.pack("<2I", 16 * len(elements), len(vdata)) + vdata
         rec += struct.pack("<I", len(semantics)) + b"".join(struct.pack("<I", len(x)) + x.encode() for x in semantics)
         rec += constants + struct.pack("<I", index32)
+        rec += struct.pack("<%dI" % len(STATE_REGISTERS), *(regs.get(r, 0) for r in STATE_REGISTERS))
         records.append(rec)
     with open(os.path.join(OUT, "replay.bin"), "wb") as f:
         f.write(struct.pack("<2I", 0x50524446, len(records)))
