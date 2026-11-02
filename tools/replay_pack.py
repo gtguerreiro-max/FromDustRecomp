@@ -16,7 +16,9 @@ replay.bin (little-endian):
   u32 index32, then u32 x STATE_REGISTERS (current values of those GPU
   registers at the draw, tracked from every draw's register writes),
   then i32 x 32: texture table index per fetch slot (0-15 pixel, 16-31
-  vertex samplers), -1 if none.
+  vertex samplers), -1 if none,
+  then u32 ps name length, name (empty: no pixel shader, depth only),
+  4096 bytes pixel shader constants (c0..c223, swapped, zero padded).
 
 textures.rgba: u32 count, per texture u32 width, u32 height, RGBA8 pixels
 (decoded by xenos_texture.py; unsupported formats become 1x1 white).
@@ -120,13 +122,14 @@ def hlsl_inputs(name):
     return re.findall(r"in (?:float4|uint4) i\w+ : ([A-Z]+[0-9]+)", main[:main.index("{")])
 
 
-def compile_vs(name):
+def compile_shader(name, stage):
+    """XenosRecomp HLSL -> <name>.<stage>.dxil (spec constants fixed at 0)."""
     src = os.path.join(ROOT, "build", "shaders_split", name + ".hlsl")
     hlsl = open(src, encoding="utf-8", errors="replace").read() + "\nuint g_SpecConstants() { return 0; }\n"
-    tmp = os.path.join(OUT, name + ".vs.hlsl")
-    dst = os.path.join(OUT, name + ".vs.dxil")
+    tmp = os.path.join(OUT, "%s.%s.hlsl" % (name, stage))
+    dst = os.path.join(OUT, "%s.%s.dxil" % (name, stage))
     open(tmp, "w", encoding="utf-8").write(hlsl)
-    r = subprocess.run([DXC, "-T", "vs_6_0", "-E", "main", "-HV", "2021", "-all-resources-bound",
+    r = subprocess.run([DXC, "-T", stage + "_6_0", "-E", "main", "-HV", "2021", "-all-resources-bound",
                         "-Wno-ignored-attributes", tmp, "-Fo", dst], capture_output=True, text=True)
     return r.returncode == 0
 
@@ -215,7 +218,7 @@ def main():
             skipped["vertex format/semantics"] = skipped.get("vertex format/semantics", 0) + 1
             continue
         if name not in compiled:
-            compiled[name] = compile_vs(name)
+            compiled[name] = compile_shader(name, "vs")
         if not compiled[name]:
             skipped["vs compile"] = skipped.get("vs compile", 0) + 1
             continue
@@ -235,13 +238,20 @@ def main():
             fetch = struct.unpack_from(">6I", device, 0x480 + slot * 24)
             slots.append(texture_index.get(fetch[1] & 0xFFFFF000, -1) if fetch[0] & 3 == 2 else -1)
         rec += struct.pack("<32i", *slots)
+        ps_name = objects.get(objs[0x328C][0], (0, ""))[1] if objs[0x328C][0] else ""
+        if ps_name and ("ps", ps_name) not in compiled:
+            compiled[("ps", ps_name)] = compile_shader(ps_name, "ps")
+        if ps_name and not compiled[("ps", ps_name)]:
+            ps_name = ""
+        rec += struct.pack("<I", len(ps_name)) + ps_name.encode()
+        rec += swap32(device[0x1780:0x1780 + 3584]) + bytes(512)
         records.append(rec)
     with open(os.path.join(OUT, "replay.bin"), "wb") as f:
         f.write(struct.pack("<2I", 0x50524446, len(records)))
         for rec in records:
             f.write(rec)
-    print("packed %d of %d draws; skipped %s; shaders %s" % (len(records), len(draws), skipped,
-          {k: v for k, v in compiled.items()}))
+    print("packed %d of %d draws; skipped %s; shaders compiled %d, failed %s" % (len(records), len(draws), skipped,
+          sum(compiled.values()), [k for k, v in compiled.items() if not v]))
 
 
 if __name__ == "__main__":

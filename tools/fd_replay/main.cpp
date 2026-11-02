@@ -117,6 +117,8 @@ struct Draw
     const uint8_t* constants = nullptr; // 4096 bytes
     uint32_t regs[kRegCount] = {};
     int32_t slots[32] = {}; // texture table index per fetch slot, -1 if none
+    std::string ps;                       // empty: depth only
+    const uint8_t* psConstants = nullptr; // 4096 bytes
 };
 
 // Shared constants layout of the patched XenosRecomp (shader_common.h).
@@ -152,6 +154,9 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         d.index32 = u32();
         for (uint32_t& r : d.regs) r = u32();
         for (int32_t& slot : d.slots) slot = int32_t(u32());
+        const uint32_t psLength = u32();
+        d.ps.assign(reinterpret_cast<const char*>(bytes(psLength)), psLength);
+        d.psConstants = bytes(4096);
         draws.push_back(d);
     }
     return draws;
@@ -272,8 +277,8 @@ int main(int argc, char** argv)
     for (const Draw& d : draws) vertexTotal += d.vertexBytes, indexTotal += d.indexBytes;
     auto vertexBuffer = device->createBuffer(RenderBufferDesc::VertexBuffer(vertexTotal, RenderHeapType::UPLOAD));
     auto indexBuffer = device->createBuffer(RenderBufferDesc::IndexBuffer(indexTotal, RenderHeapType::UPLOAD));
-    // Per draw: 4096 bytes vertex constants, then kSharedSize shared constants.
-    constexpr uint32_t kPerDraw = 4096 + kSharedSize;
+    // Per draw: 4096 bytes vertex constants, 4096 pixel constants, kSharedSize shared.
+    constexpr uint32_t kPerDraw = 4096 + 4096 + kSharedSize;
     auto constantBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(kPerDraw * (draws.size() + 1), RenderBufferFlag::CONSTANT));
     auto* vertexMap = static_cast<uint8_t*>(vertexBuffer->map());
     auto* indexMap = static_cast<uint8_t*>(indexBuffer->map());
@@ -360,13 +365,26 @@ int main(int argc, char** argv)
 
     // Pipelines keyed by shader, vertex layout and fixed-function state.
     std::map<std::string, std::pair<std::unique_ptr<RenderShader>, std::unique_ptr<RenderPipeline>>> pipelines;
+    std::map<std::string, std::unique_ptr<RenderShader>> pixelShaders;
     auto pipelineFor = [&](const Draw& d) -> RenderPipeline* {
         const uint32_t depthControl = d.regs[RB_DEPTHCONTROL], mode = d.regs[PA_SU_SC_MODE_CNTL];
-        std::string key = d.vs + "|" + std::to_string(d.stride) + "|" + std::to_string(depthControl & 0x76) + "|" + std::to_string(mode & 7);
+        std::string key = d.vs + "|" + d.ps + "|" + std::to_string(d.stride) + "|" + std::to_string(depthControl & 0x76) + "|" + std::to_string(mode & 7);
         for (const auto& s : d.semantics) key += "|" + s;
         auto it = pipelines.find(key);
         if (it != pipelines.end()) return it->second.second.get();
         auto& [vs, pipeline] = pipelines[key];
+        RenderShader* ps = nullptr;
+        if (!d.ps.empty())
+        {
+            auto found = pixelShaders.find(d.ps);
+            if (found == pixelShaders.end())
+            {
+                const std::vector<uint8_t> psFile = ReadFile(dir + "/" + d.ps + ".ps.dxil");
+                found = pixelShaders.emplace(d.ps, psFile.empty() ? nullptr
+                    : device->createShader(psFile.data(), psFile.size(), "main", RenderShaderFormat::DXIL)).first;
+            }
+            ps = found->second.get();
+        }
         const std::vector<uint8_t> code = ReadFile(dir + "/" + d.vs + ".vs.dxil");
         if (!code.empty()) vs = device->createShader(code.data(), code.size(), "main", RenderShaderFormat::DXIL);
         std::vector<std::string> names;
@@ -383,7 +401,8 @@ int main(int argc, char** argv)
         desc.inputElementsCount = uint32_t(elements.size());
         desc.pipelineLayout = layout.get();
         desc.vertexShader = vs.get();
-        desc.pixelShader = pixelShader.get();
+        // FD_REPLAY_DEBUG_PS=1 keeps the depth-colour debug shader.
+        desc.pixelShader = getenv("FD_REPLAY_DEBUG_PS") ? pixelShader.get() : ps;
         desc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
         desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
         desc.renderTargetCount = 1;
@@ -414,7 +433,8 @@ int main(int argc, char** argv)
         memcpy(indexMap + indexAt, d.indices, d.indexBytes);
         uint8_t* drawConstants = constantMap + kPerDraw * (i + 1);
         memcpy(drawConstants, d.constants, 4096);
-        uint8_t* shared = drawConstants + 4096;
+        memcpy(drawConstants + 4096, d.psConstants, 4096);
+        uint8_t* shared = drawConstants + 8192;
         memset(shared, 0, kSharedSize);
         for (uint32_t slot = 0; slot < 32; ++slot)
         {
@@ -443,8 +463,8 @@ int main(int argc, char** argv)
             list->setScissors(RenderRect(0, 0, target.width, target.height));
             list->setPipeline(pipeline);
             list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1)), 0);
-            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 0), 1);
-            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1) + 4096), 2);
+            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1) + 4096), 1);
+            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1) + 8192), 2);
             RenderVertexBufferView vertexView(RenderBufferReference(vertexBuffer.get(), vertexAt), d.vertexBytes);
             RenderInputSlot slot(0, d.stride);
             list->setVertexBuffers(0, &vertexView, 1, &slot);
