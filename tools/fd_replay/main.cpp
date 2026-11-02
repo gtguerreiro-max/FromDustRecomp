@@ -669,6 +669,36 @@ int main(int argc, char** argv)
     list->begin();
     size_t vertexAt = 0, indexAt = 0;
     const Target* current = nullptr;
+
+    // Depth resolved to k_8_8_8_8: a full-screen pass packs the depth surface
+    // into the bytes the copy writes (tools/fd_replay/depth_pack.hlsl).
+    const std::vector<uint8_t> packVsCode = ReadFile(dir + "/depth_pack.vs.dxil");
+    const std::vector<uint8_t> packPsCode = ReadFile(dir + "/depth_pack.ps.dxil");
+    auto packVs = device->createShader(packVsCode.data(), packVsCode.size(), "vs_main", RenderShaderFormat::DXIL);
+    auto packPs = device->createShader(packPsCode.data(), packPsCode.size(), "ps_main", RenderShaderFormat::DXIL);
+    std::unique_ptr<RenderPipeline> packPipeline;
+    {
+        RenderGraphicsPipelineDesc desc;
+        desc.pipelineLayout = layout.get();
+        desc.vertexShader = packVs.get();
+        desc.pixelShader = packPs.get();
+        desc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
+        desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+        desc.renderTargetCount = 1;
+        desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+        packPipeline = device->createGraphicsPipeline(desc);
+    }
+    constexpr uint32_t kMaxPacks = 64;
+    auto packConstants = device->createBuffer(RenderBufferDesc::UploadBuffer(256 * kMaxPacks, RenderBufferFlag::CONSTANT));
+    auto* packMap = static_cast<uint8_t*>(packConstants->map());
+    const uint32_t packOrder = getenv("FD_DEPTH_PACK_ORDER") ? uint32_t(atoi(getenv("FD_DEPTH_PACK_ORDER"))) : 0;
+    struct Packed
+    {
+        Surface surface;
+        std::unique_ptr<RenderTextureView> depthView;
+        std::unique_ptr<RenderFramebuffer> framebuffer;
+    };
+    std::vector<std::unique_ptr<Packed>> packed;
     std::map<uint32_t, Surface*> resolved; // texture base address -> surface copied there
     std::map<uint32_t, bool> resolvedSwap;  // texture base address -> copy swapped red/blue
     std::map<uint32_t, int32_t> resolvedBias; // texture base address -> copy exponent bias
@@ -694,6 +724,42 @@ int main(int argc, char** argv)
                         fprintf(stderr, "resolve %08X info %08X src %u bias %d count %u\n", d.copyDest, d.copyDestInfo,
                             source, resolvedBias[d.copyDest], t.count);
                     if (source < t.count && t.rt[source].texture) resolved[d.copyDest] = &t.rt[source];
+                    else if (source == 4 && t.ds.texture && ((d.copyDestInfo >> 7) & 0x3F) == 6 && packPipeline &&
+                        packed.size() < kMaxPacks && nextView + 2 <= textureCount + kMaxTargets)
+                    {
+                        auto p = std::make_unique<Packed>();
+                        p->surface.format = RenderFormat::R8G8B8A8_UNORM;
+                        p->surface.texture = device->createTexture(RenderTextureDesc::ColorTarget(t.width, t.height, RenderFormat::R8G8B8A8_UNORM));
+                        p->surface.descriptor = nextView++;
+                        sets[0]->setTexture(p->surface.descriptor, p->surface.texture.get(), RenderTextureLayout::SHADER_READ);
+                        p->depthView = t.ds.texture->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::R32_FLOAT));
+                        const uint32_t depthIndex = nextView++;
+                        sets[0]->setTexture(depthIndex, t.ds.texture.get(), RenderTextureLayout::SHADER_READ, p->depthView.get());
+                        const RenderTexture* color = p->surface.texture.get();
+                        RenderFramebufferDesc fb;
+                        fb.colorAttachments = &color;
+                        fb.colorAttachmentsCount = 1;
+                        p->framebuffer = device->createFramebuffer(fb);
+                        // RB_DEPTH_INFO bit 16: D24FS8 (20e4 float depth).
+                        const uint32_t constants[3] = {depthIndex, (d.copyDepth >> 16) & 1, packOrder};
+                        memcpy(packMap + 256 * packed.size(), constants, sizeof(constants));
+                        list->barriers(RenderBarrierStage::GRAPHICS, {
+                            RenderTextureBarrier(t.ds.texture.get(), RenderTextureLayout::SHADER_READ),
+                            RenderTextureBarrier(p->surface.texture.get(), RenderTextureLayout::COLOR_WRITE)});
+                        t.ds.shaderRead = true;
+                        list->setFramebuffer(p->framebuffer.get());
+                        list->setGraphicsPipelineLayout(layout.get());
+                        for (uint32_t set = 0; set < 4; ++set) list->setGraphicsDescriptorSet(sets[set].get(), set);
+                        list->setPipeline(packPipeline.get());
+                        list->setGraphicsRootDescriptor(RenderBufferReference(packConstants.get(), 256 * packed.size()), 2);
+                        list->setViewports(RenderViewport(0, 0, float(t.width), float(t.height)));
+                        list->setScissors(RenderRect(0, 0, t.width, t.height));
+                        list->drawInstanced(3, 1, 0, 0);
+                        current = nullptr;
+                        resolved[d.copyDest] = &p->surface;
+                        resolvedSwap[d.copyDest] = false;
+                        packed.push_back(std::move(p));
+                    }
                     else if (source == 4 && t.ds.texture) resolved[d.copyDest] = &t.ds;
                 }
             continue;
@@ -764,6 +830,9 @@ int main(int argc, char** argv)
                 }
                 index = view != source.views.end() ? view->second.first : alias->second->descriptor;
                 ++aliasHits;
+                if (getenv("FD_REPLAY_TRACE") && d.ps == "130")
+                    fprintf(stderr, "final slot %u base %08X swz %o swap %d bias %d exp %d fmt %d\n", slot, alias->first,
+                        d.swizzles[slot], int(resolvedSwap[alias->first]), resolvedBias[alias->first], d.expAdjust[slot], int(source.format));
                 if (const int32_t bias = resolvedBias[alias->first])
                 {
                     const float scale = std::ldexp(1.0f, bias + d.expAdjust[slot]);

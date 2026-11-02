@@ -296,6 +296,11 @@ def build_texture_table(textures):
 
 def main():
     os.makedirs(OUT, exist_ok=True)
+    # Depth -> 8_8_8_8 resolve emulation pass (tools/fd_replay/depth_pack.hlsl).
+    pack = os.path.join(ROOT, "tools", "fd_replay", "depth_pack.hlsl")
+    for stage, entry in (("vs", "vs_main"), ("ps", "ps_main")):
+        subprocess.run([DXC, "-T", stage + "_6_0", "-E", entry, pack, "-Fo",
+                        os.path.join(OUT, "depth_pack.%s.dxil" % stage)], check=True, capture_output=True)
     open(os.path.join(OUT, "debug.ps.hlsl"), "w").write(DEBUG_PS)
     subprocess.run([DXC, "-T", "ps_6_0", "-E", "main", os.path.join(OUT, "debug.ps.hlsl"), "-Fo",
                     os.path.join(OUT, "debug.ps.dxil")], check=True, capture_output=True)
