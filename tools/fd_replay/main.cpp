@@ -173,6 +173,51 @@ RenderComparisonFunction Compare(uint32_t f)
     return table[f & 7];
 }
 
+// xenos::BlendFactor / BlendOp -> plume (RB_BLENDCONTROL fields).
+RenderBlend BlendFactor(uint32_t f)
+{
+    switch (f)
+    {
+    case 0: return RenderBlend::ZERO;
+    case 1: return RenderBlend::ONE;
+    case 4: return RenderBlend::SRC_COLOR;
+    case 5: return RenderBlend::INV_SRC_COLOR;
+    case 6: return RenderBlend::SRC_ALPHA;
+    case 7: return RenderBlend::INV_SRC_ALPHA;
+    case 8: return RenderBlend::DEST_COLOR;
+    case 9: return RenderBlend::INV_DEST_COLOR;
+    case 10: return RenderBlend::DEST_ALPHA;
+    case 11: return RenderBlend::INV_DEST_ALPHA;
+    case 12: case 14: return RenderBlend::BLEND_FACTOR;
+    case 13: case 15: return RenderBlend::INV_BLEND_FACTOR;
+    case 16: return RenderBlend::SRC_ALPHA_SAT;
+    default: return RenderBlend::ONE;
+    }
+}
+
+RenderBlendOperation BlendOp(uint32_t op)
+{
+    static const RenderBlendOperation table[] = {RenderBlendOperation::ADD, RenderBlendOperation::SUBTRACT,
+        RenderBlendOperation::MIN, RenderBlendOperation::MAX, RenderBlendOperation::REV_SUBTRACT};
+    return op < 5 ? table[op] : RenderBlendOperation::ADD;
+}
+
+// RB_BLENDCONTROL0 + RB_COLOR_MASK (RT0 bits 0-3). Blending is off when it is a
+// plain copy (ONE, ZERO, ADD for colour and alpha), as in Xenia.
+RenderBlendDesc Blend(uint32_t control, uint32_t mask)
+{
+    RenderBlendDesc b;
+    b.srcBlend = BlendFactor(control & 0x1F);
+    b.blendOp = BlendOp((control >> 5) & 7);
+    b.dstBlend = BlendFactor((control >> 8) & 0x1F);
+    b.srcBlendAlpha = BlendFactor((control >> 16) & 0x1F);
+    b.blendOpAlpha = BlendOp((control >> 21) & 7);
+    b.dstBlendAlpha = BlendFactor((control >> 24) & 0x1F);
+    b.blendEnabled = (control & 0x1F1F1FFF) != 0x00010001;
+    b.renderTargetWriteMask = uint8_t(mask & 0xF);
+    return b;
+}
+
 // A render target configuration of the frame (EDRAM color/depth bases + pitch).
 struct Target
 {
@@ -368,7 +413,8 @@ int main(int argc, char** argv)
     std::map<std::string, std::unique_ptr<RenderShader>> pixelShaders;
     auto pipelineFor = [&](const Draw& d) -> RenderPipeline* {
         const uint32_t depthControl = d.regs[RB_DEPTHCONTROL], mode = d.regs[PA_SU_SC_MODE_CNTL];
-        std::string key = d.vs + "|" + d.ps + "|" + std::to_string(d.stride) + "|" + std::to_string(depthControl & 0x76) + "|" + std::to_string(mode & 7);
+        std::string key = d.vs + "|" + d.ps + "|" + std::to_string(d.stride) + "|" + std::to_string(depthControl & 0x76) + "|" + std::to_string(mode & 7) +
+            "|" + std::to_string(d.regs[RB_BLENDCONTROL0]) + "|" + std::to_string(d.regs[RB_COLOR_MASK] & 0xF);
         for (const auto& s : d.semantics) key += "|" + s;
         auto it = pipelines.find(key);
         if (it != pipelines.end()) return it->second.second.get();
@@ -404,7 +450,7 @@ int main(int argc, char** argv)
         // FD_REPLAY_DEBUG_PS=1 keeps the depth-colour debug shader.
         desc.pixelShader = getenv("FD_REPLAY_DEBUG_PS") ? pixelShader.get() : ps;
         desc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
-        desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+        desc.renderTargetBlend[0] = Blend(d.regs[RB_BLENDCONTROL0], d.regs[RB_COLOR_MASK]);
         desc.renderTargetCount = 1;
         // RB_DEPTHCONTROL: z_enable bit 1, z_write bit 2, zfunc bits 4-6.
         desc.depthEnabled = (depthControl >> 1) & 1;
