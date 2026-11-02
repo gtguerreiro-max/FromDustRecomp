@@ -591,7 +591,7 @@ int main(int argc, char** argv)
         t.framebuffer = device->createFramebuffer(fb);
         list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(t.ds.texture.get(), RenderTextureLayout::DEPTH_WRITE));
         list->setFramebuffer(t.framebuffer.get());
-        for (uint32_t k = 0; k < t.count; ++k) list->clearColor(k, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+        for (uint32_t k = 0; k < t.count; ++k) list->clearColor(k, RenderColor(0.0f, 0.0f, 0.0f, getenv("FD_CLEAR_ALPHA") ? float(atof(getenv("FD_CLEAR_ALPHA"))) : 0.0f));
         // From Dust uses reversed depth (viewport Z scale -1, offset 1, GREATER_EQUAL).
         list->clearDepthStencil(true, false, 0.0f);
         return t;
