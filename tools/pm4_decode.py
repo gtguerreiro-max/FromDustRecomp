@@ -52,3 +52,49 @@ def packets(data):
             i += 1
 
     return out
+
+
+def _valid_at(words, i):
+    """Size of the packet at i if its header is plausible, else 0."""
+    h = words[i]
+    kind = h >> 30
+    if kind == 0:
+        n = ((h >> 16) & 0x3FFF) + 1
+        base = h & 0x7FFF
+        return 1 + n if i + 1 + n <= len(words) and base + (1 if (h >> 15) & 1 else n) <= 0x5003 else 0
+    if kind == 1:
+        return 3 if i + 3 <= len(words) else 0
+    if kind == 2:
+        return 1
+    n = ((h >> 16) & 0x3FFF) + 1
+    return 1 + n if ((h >> 8) & 0x7F) in OPCODES and i + 1 + n <= len(words) else 0
+
+
+def _parses_to_end(words, i):
+    while i < len(words):
+        size = _valid_at(words, i)
+        if not size:
+            return False
+        i += size
+    return True
+
+
+def packets_robust(data):
+    """Like packets(), but an implausible header (unknown opcode, register out
+    of range, payload past the end) is treated as inline data: parsing resumes
+    at the first later word from which the stream parses cleanly to the end of
+    the block (blocks end with the draw packet). D3D can leave data the GPU
+    never executes as commands (e.g. constants) between packets."""
+    nwords = len(data) // 4
+    words = struct.unpack(">%dI" % nwords, data[:nwords * 4])
+    good, i = bytearray(), 0
+    spans = []
+    while i < nwords:
+        size = _valid_at(words, i)
+        if not size:
+            j = next((j for j in range(i + 1, nwords) if _parses_to_end(words, j)), nwords)
+            i = j
+            continue
+        spans.append((i, size))
+        i += size
+    return [p for k, size in spans for p in packets(data[k * 4:(k + size) * 4])]

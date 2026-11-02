@@ -32,25 +32,41 @@ index 9c1e52b..11f34a2 100644
    static constexpr HANDLE kMappingHandleInvalid = nullptr;
  
 diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
-index 82076bc..f62fe7a 100644
+index 82076bc..660da8e 100644
 --- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
 +++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
-@@ -2246,6 +2246,9 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -42,6 +42,12 @@ DEFINE_bool(d3d12_submit_on_primary_buffer_end, true,
+ DECLARE_bool(clear_memory_page_state);
+ DECLARE_bool(readback_resolve_half_pixel_offset);
+ 
++#if defined(FROMDUST_GPU_SHIM)
++// FromDust runtime (runtime/gpu/frame_capture.cpp): GPU events with the register
++// file, 0 draw / copy, 2 swap.
++extern "C" void (*fd_gpu_event_hook)(int event, const uint32_t* registers);
++#endif
++
+ namespace xe {
+ namespace gpu {
+ namespace d3d12 {
+@@ -2246,6 +2252,10 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
  void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                        uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
 +#if defined(FROMDUST_GPU_SHIM)
 +  memory_->OnGpuSwap();
++  if (fd_gpu_event_hook) fd_gpu_event_hook(2, register_file_->values);
 +#endif
    SCOPE_profile_cpu_f("gpu");
    EndZPDFrame();
  
-@@ -2617,6 +2620,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+@@ -2617,6 +2627,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                        uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
 +#if defined(FROMDUST_GPU_SHIM)
 +  memory_->OnGpuDraw();
++  // FromDust frame capture: the register file at every draw (and copy).
++  if (fd_gpu_event_hook) fd_gpu_event_hook(0, register_file_->values);
 +#endif
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");

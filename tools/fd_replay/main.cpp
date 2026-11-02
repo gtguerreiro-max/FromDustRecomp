@@ -270,6 +270,7 @@ uint32_t FormatBytes(RenderFormat f)
     switch (f)
     {
     case RenderFormat::R16G16B16A16_FLOAT: case RenderFormat::R32G32_FLOAT: return 8;
+    case RenderFormat::R32G32B32A32_FLOAT: return 16;
     default: return 4;
     }
 }
@@ -473,6 +474,7 @@ int main(int argc, char** argv)
 
     // Textures: RGBA8, uploaded through one staging buffer.
     std::vector<std::unique_ptr<RenderTexture>> textures;
+    std::vector<RenderFormat> textureFormats; // per table texture
     std::unique_ptr<RenderBuffer> staging;
     {
         size_t at = 4, stagingSize = 0;
@@ -482,27 +484,34 @@ int main(int argc, char** argv)
             uint32_t w, h;
             memcpy(&w, textureFile.data() + at, 4);
             memcpy(&h, textureFile.data() + at + 4, 4);
+            // Width bit 31: RGBA float32 texels (16-bit fixed point formats).
+            textureFormats.push_back((w >> 31) ? RenderFormat::R32G32B32A32_FLOAT : RenderFormat::R8G8B8A8_UNORM);
+            w &= 0x7FFFFFFF;
+            const uint32_t texel = FormatBytes(textureFormats.back());
             layoutInfo.emplace_back(w, h, at + 8, stagingSize);
-            stagingSize += size_t((w * 4 + 255) & ~255u) * h;
+            stagingSize += size_t((w * texel + 255) & ~255u) * h;
             stagingSize = (stagingSize + 511) & ~size_t(511);
-            at += 8 + size_t(w) * h * 4;
+            at += 8 + size_t(w) * h * texel;
         }
         staging = device->createBuffer(RenderBufferDesc::UploadBuffer((std::max)(stagingSize, size_t(16))));
         auto* map = static_cast<uint8_t*>(staging->map());
-        for (const auto& [w, h, from, to] : layoutInfo)
+        for (uint32_t i = 0; i < textureCount; ++i)
         {
-            const uint32_t pitch = (w * 4 + 255) & ~255u;
-            for (uint32_t y = 0; y < h; ++y) memcpy(map + to + size_t(y) * pitch, textureFile.data() + from + size_t(y) * w * 4, w * 4);
+            const auto& [w, h, from, to] = layoutInfo[i];
+            const uint32_t texel = FormatBytes(textureFormats[i]), pitch = (w * texel + 255) & ~255u;
+            for (uint32_t y = 0; y < h; ++y) memcpy(map + to + size_t(y) * pitch, textureFile.data() + from + size_t(y) * w * texel, w * texel);
         }
         staging->unmap();
         list->begin();
         for (uint32_t i = 0; i < textureCount; ++i)
         {
             const auto& [w, h, from, to] = layoutInfo[i];
-            textures.push_back(device->createTexture(RenderTextureDesc::Texture2D(w, h, 1, RenderFormat::R8G8B8A8_UNORM)));
+            const RenderFormat format = textureFormats[i];
+            const uint32_t texel = FormatBytes(format);
+            textures.push_back(device->createTexture(RenderTextureDesc::Texture2D(w, h, 1, format)));
             list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(textures.back().get(), RenderTextureLayout::COPY_DEST));
             list->copyTextureRegion(RenderTextureCopyLocation::Subresource(textures.back().get()),
-                RenderTextureCopyLocation::PlacedFootprint(staging.get(), RenderFormat::R8G8B8A8_UNORM, w, h, 1, ((w * 4 + 255) & ~255u) / 4, to));
+                RenderTextureCopyLocation::PlacedFootprint(staging.get(), format, w, h, 1, ((w * texel + 255) & ~255u) / texel, to));
             list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(textures.back().get(), RenderTextureLayout::SHADER_READ));
             sets[0]->setTexture(i, textures.back().get(), RenderTextureLayout::SHADER_READ);
         }
@@ -775,7 +784,26 @@ int main(int argc, char** argv)
                     }
                     else if (source < t.count && t.rt[source].texture && (getenv("FD_NO_SNAPSHOT") || ((d.copyDestInfo >> 7) & 0x3F) != 6 ||
                         (getenv("FD_LIVE_DEST") && strtoul(getenv("FD_LIVE_DEST"), nullptr, 16) == d.copyDest)))
+                    {
                         resolved[d.copyDest] = &t.rt[source];
+                        // Dump the copied rectangle as it is now, for compare_resolves.py.
+                        Surface& rt = t.rt[source];
+                        Dump dump;
+                        dump.dest = d.copyDest;
+                        dump.order = uint32_t(dumps.size());
+                        dump.format = rt.format;
+                        dump.width = copyW;
+                        dump.height = copyH;
+                        dump.rowPitch = (t.width * FormatBytes(rt.format) + 255) & ~255u;
+                        dump.buffer = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(dump.rowPitch) * t.height));
+                        list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(rt.texture.get(), RenderTextureLayout::COPY_SOURCE));
+                        list->copyTextureRegion(
+                            RenderTextureCopyLocation::PlacedFootprint(dump.buffer.get(), rt.format, t.width, t.height, 1, dump.rowPitch / FormatBytes(rt.format)),
+                            RenderTextureCopyLocation::Subresource(rt.texture.get()));
+                        list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(rt.texture.get(), RenderTextureLayout::COLOR_WRITE));
+                        rt.shaderRead = false;
+                        dumps.push_back(std::move(dump));
+                    }
                     else if (source < t.count && t.rt[source].texture)
                     {
                         // Like the Xbox copy: the rectangle (from the origin) goes to a
@@ -881,7 +909,7 @@ int main(int argc, char** argv)
         // RB_COLOR_INFO bits 20-25 (signed): the output is stored times 2^bias.
         for (uint32_t k = 0; k < 4; ++k)
         {
-            const float scale = std::ldexp(1.0f, int32_t(ColorInfo(d.regs, k) << 6) >> 26);
+            const float scale = getenv("FD_NO_COLOR_BIAS") ? 1.0f : std::ldexp(1.0f, int32_t(ColorInfo(d.regs, k) << 6) >> 26);
             memcpy(shared + kSharedColorScale + k * 4, &scale, 4);
         }
         // FD_ZERO_SLOTS=<ps>:<slot>[,<slot>...]: debug, zero those fetches of that pixel shader.
@@ -907,7 +935,7 @@ int main(int argc, char** argv)
                 auto view = tableViews.find(viewKey);
                 if (view == tableViews.end() && nextView < textureCount + kMaxTargets)
                 {
-                    RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(RenderFormat::R8G8B8A8_UNORM);
+                    RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(textureFormats[d.slots[slot]]);
                     viewDesc.componentMapping = SwizzleMapping(d.swizzles[slot]);
                     auto textureView = textures[d.slots[slot]]->createTextureView(viewDesc);
                     sets[0]->setTexture(nextView, textures[d.slots[slot]].get(), RenderTextureLayout::SHADER_READ, textureView.get());
@@ -961,6 +989,8 @@ int main(int argc, char** argv)
                 }
             }
             memcpy(shared + kSharedTextureIndex + slot * 4, &index, 4); // 2D heap; sampler index stays 0
+            if (getenv("FD_TRACE_DRAWS") && i <= size_t(atoi(getenv("FD_TRACE_DRAWS"))) && slot < 4)
+                fprintf(stderr, "draw %zu slot %u: table %d base %08X -> heap %u\n", i, slot, d.slots[slot], d.bases[slot], index);
         }
         Target& target = targetFor(d);
         RenderPipeline* pipeline = pipelineFor(d);
@@ -1005,6 +1035,16 @@ int main(int argc, char** argv)
                 d.index32 ? RenderFormat::R32_UINT : RenderFormat::R16_UINT);
             list->setIndexBuffer(&indexView);
             const uint32_t count = (std::min)(d.indexCount, d.indexBytes / (d.index32 ? 4u : 2u));
+            if (getenv("FD_TRACE_DRAWS") && i <= size_t(atoi(getenv("FD_TRACE_DRAWS"))))
+            {
+                float v[8] = {};
+                memcpy(v, d.vertices, (std::min)(sizeof(v), size_t(d.vertexBytes)));
+                fprintf(stderr, "draw %zu vs %s ps %s: %u indices (%u bytes, idx32 %u) stride %u vbytes %u sem0 %s v0 (%g %g %g %g) v1 (%g %g %g %g) "
+                    "viewport %g %g %g %g z %g..%g target %ux%u depthctl %08X offset %d\n", i, d.vs.c_str(), d.ps.c_str(), count, d.indexBytes,
+                    d.index32, d.stride, d.vertexBytes, d.semantics.empty() ? "-" : d.semantics[0].c_str(), v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+                    viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth, viewport.maxDepth, target.width, target.height,
+                    d.regs[RB_DEPTHCONTROL], int32_t(d.regs[VGT_INDX_OFFSET]));
+            }
             list->drawIndexedInstanced(count, 1, 0, int32_t(d.regs[VGT_INDX_OFFSET]), 0);
             ++target.draws;
         }
@@ -1057,6 +1097,15 @@ int main(int argc, char** argv)
             for (uint32_t x = 0; x < dump.width; ++x)
                 ToRgba8(dump.format, pixels + size_t(y) * dump.rowPitch + size_t(x) * FormatBytes(dump.format), &rgba[(size_t(y) * dump.width + x) * 4]);
         stbi_write_png((dir + name).c_str(), dump.width, dump.height, 4, rgba.data(), dump.width * 4);
+        // Raw texels too (.raw: u32 width, height, plume format, bytes per texel, rows).
+        snprintf(name, sizeof(name), "/resolve_%02u_%08X.raw", dump.order, dump.dest);
+        if (FILE* f = fopen((dir + name).c_str(), "wb"))
+        {
+            const uint32_t head[4] = {dump.width, dump.height, uint32_t(dump.format), FormatBytes(dump.format)};
+            fwrite(head, sizeof(head), 1, f);
+            for (uint32_t y = 0; y < dump.height; ++y) fwrite(pixels + size_t(y) * dump.rowPitch, FormatBytes(dump.format), dump.width, f);
+            fclose(f);
+        }
         dump.buffer->unmap();
     }
     printf("fd_replay: %zu draws, %zu pipelines, %zu targets, %zu resolves mapped, %u resolved reads\n", draws.size(),

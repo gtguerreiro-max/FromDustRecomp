@@ -31,6 +31,11 @@ def main():
     count, at, images = struct.unpack_from("<I", table, 0)[0], 4, []
     for _ in range(count):
         w, h = struct.unpack_from("<2I", table, at)
+        if w >> 31:  # float32 texels (16-bit fixed point): shown as 0-255 of [0, 1]
+            w &= 0x7FFFFFFF
+            images.append(np.clip(np.frombuffer(table, np.float32, w * h * 4, at + 8).reshape(h, w, 4) * 255, 0, 255))
+            at += 8 + w * h * 16
+            continue
         images.append(np.frombuffer(table, np.uint8, w * h * 4, at + 8).reshape(h, w, 4).astype(float))
         at += 8 + w * h * 4
     for path in sorted(glob.glob(os.path.join(ROOT, "build", "replay", "resolve_*.png"))):

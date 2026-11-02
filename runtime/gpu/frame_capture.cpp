@@ -22,6 +22,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+// Called by Xenia's D3D12 command processor (FROMDUST_GPU_SHIM) at every draw and swap.
+extern "C" void (*fd_gpu_event_hook)(int event, const uint32_t* registers) = nullptr;
+
 namespace
 {
 constexpr uint32_t kDeviceSnapshot = 0x8000;
@@ -213,16 +216,51 @@ void RecordCommands(uint32_t device, uint32_t before)
     RecordVertexBuffers(device);
 }
 
+// GPU side (Xenia's command processor thread): the register file at every
+// draw of the captured frame, i.e. between the GPU's processing of the swap
+// that started the capture and the next one. xenia_regs.bin: per draw, u32
+// 'FDXR', then registers 0x2000-0x23FF and 0x4900-0x4927 (bool/loop constants).
+std::atomic<uint32_t> g_cpuSwaps{0}, g_gpuSwaps{0}, g_gpuCaptureSwap{0};
+FILE* g_gpuFile = nullptr;
+uint32_t g_gpuDraws = 0;
+
+void OnGpuEvent(int event, const uint32_t* registers)
+{
+    if (event == 2)
+    {
+        const uint32_t swap = ++g_gpuSwaps, start = g_gpuCaptureSwap.load();
+        if (start && swap == start)
+            g_gpuFile = fopen("xenia_regs.bin", "wb");
+        else if (start && swap == start + 1 && g_gpuFile)
+        {
+            fclose(g_gpuFile);
+            g_gpuFile = nullptr;
+            kernel::Log("frame capture: %u GPU draws written to xenia_regs.bin", g_gpuDraws);
+        }
+        return;
+    }
+    if (!g_gpuFile) return;
+    const uint32_t magic = 0x52584446;
+    fwrite(&magic, 4, 1, g_gpuFile);
+    fwrite(registers + 0x2000, 4, 0x400, g_gpuFile);
+    fwrite(registers + 0x4900, 4, 0x28, g_gpuFile);
+    ++g_gpuDraws;
+}
+
 // Frame boundary: arm at the first swap after the delay, capture until the next.
 void OnSwap(PPCContext& ctx)
 {
     if (!Enabled()) return;
     std::lock_guard lock(g_mutex);
+    fd_gpu_event_hook = OnGpuEvent; // before the GPU processes this swap
+    ++g_cpuSwaps;
     const State state = g_state.load();
     if (state == State::Waiting && GetTickCount64() >= g_armAt)
     {
         g_file = fopen("frame_capture.bin", "wb");
         g_state = g_file ? State::Capturing : State::Done;
+        // The GPU processes this swap later: its frame starts there.
+        if (g_file) g_gpuCaptureSwap = g_cpuSwaps.load();
     }
     else if (state == State::Capturing)
     {

@@ -33,7 +33,7 @@ import os, struct, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 from analyze_capture import load
-from pm4_decode import packets
+from pm4_decode import packets_robust as packets
 from xenos_vfetch import decode_vfetch
 from xenos_fetch import decode_texture_fetch
 import xenos_texture
@@ -261,6 +261,51 @@ def copy_dest_info(commands):
     return 0
 
 
+def draw_key(objs):
+    """(VGT_DRAW_INITIATOR, VGT_DMA_BASE or 0) of a record's draw packet."""
+    commands = objs.get("commands", b"")[4:]
+    draw = next(((n, p if n.startswith("DRAW_INDX(") or n == "DRAW_INDX" else (0,) + tuple(p))
+                 for n, p in packets(commands) if n.split("(")[0] in ("DRAW_INDX", "DRAW_INDX_2")), None) or scan_draw(commands)
+    if not draw or len(draw[1]) < 2:
+        return None
+    source = (draw[1][1] >> 6) & 3
+    return draw[1][1], draw[1][2] if source == 0 and len(draw[1]) > 2 else 0
+
+
+def align_xenia(draws, xenia):
+    """Draw ordinal (records with a draw packet, in order) -> Xenia event index,
+    by sequence alignment of the draw keys (Xenia also sees D3D-internal draws)."""
+    import difflib
+    # Key: draw initiator, index base, and the colour target (RB_SURFACE_INFO,
+    # RB_COLOR_INFO) - many full-screen rects share the first two.
+    ours, tracked = [], {}
+    for header, _, objs in draws:
+        track_registers(tracked, objs.get("commands", b""))
+        if header[1] != 4:
+            key = draw_key(objs)
+            ours.append(key + (tracked.get(0x2000, 0), tracked.get(0x2001, 0)) if key else None)
+    theirs = [(x[0x21FC], x[0x21FA] if (x[0x21FC] >> 6) & 3 == 0 else 0, x[0x2000], x[0x2001]) for x in xenia]
+    out = {}
+    for block in difflib.SequenceMatcher(None, ours, theirs, autojunk=False).get_matching_blocks():
+        for k in range(block.size):
+            out[block.a + k] = block.b + k
+    return out
+
+
+def load_xenia_registers(path):
+    """xenia_regs.bin (frame_capture.cpp, GPU side): per Xenia draw, registers
+    0x2000-0x23FF and 0x4900-0x4927 as dicts."""
+    if not os.path.exists(path):
+        return []
+    data, out = open(path, "rb").read(), []
+    for at in range(0, len(data) - 4259, 4260):
+        values = struct.unpack_from("<1064I", data, at + 4)
+        regs = dict(zip(range(0x2000, 0x2400), values[:0x400]))
+        regs.update(zip(range(0x4900, 0x4928), values[0x400:]))
+        out.append(regs)
+    return out
+
+
 def track_registers(regs, commands):
     """Apply a draw's type-0 register writes (commands start one word in)."""
     for name, payload in packets(commands[4:]):
@@ -281,10 +326,56 @@ def load_textures(path):
     return out
 
 
+def decode_fixed16(raw, fetch):
+    """k_16_16 / k_16_16_16_16 (fixed point, not float) as RGBA float32, with the
+    value a shader fetch returns: sign per component (fetch dword 0 bits 2-9),
+    fraction or integer (dword 3 bit 0) and 2^exp_adjust (dword 3 bits 13-18)."""
+    info = decode_texture_fetch(fetch)
+    width, height = int(info["width"]), int(info["height"])
+    pitch, n = max(int(info.get("pitch", width) or width), width), 2 if info["format_name"] == "k_16_16" else 4
+    data = xenos_texture._fix_endian(bytes(raw), int(info.get("endianness", 0) or 0))
+    if info.get("tiled"):
+        from xenos_tiling import untile_2d
+        expected = height * pitch * 2 * n
+        data = bytes(untile_2d((data + bytes(max(0, expected - len(data))))[:expected], width, height, pitch, 2 * n))
+    stride = xenos_texture._choose_stride_texels(len(data), height, width, pitch, 2 * n)
+    signs = [(fetch[0] >> (2 + 2 * c)) & 3 for c in range(4)]
+    integer, exp = fetch[3] & 1, (((fetch[3] >> 13) & 0x3F) ^ 32) - 32
+    scale = math.ldexp(1.0, exp)
+    out = bytearray(width * height * 16)
+    for y in range(height):
+        row = data[y * stride * 2 * n:(y * stride + width) * 2 * n]
+        row += bytes(width * 2 * n - len(row))
+        values = struct.unpack("<%dH" % (width * n), row)
+        texels = []
+        for x in range(width):
+            px = []
+            for c in range(n):
+                v = values[x * n + c]
+                if signs[c] == 1:
+                    v = v - 65536 if v >= 32768 else v
+                    v = v if integer else max(v / 32767.0, -1.0)
+                else:
+                    v = v if integer else v / 65535.0
+                px.append(v * scale)
+            texels.extend(px + [0.0, 1.0][len(px) - 2:] if n == 2 else px)
+        struct.pack_into("<%df" % (width * 4), out, y * width * 16, *texels)
+    return width, height, bytes(out)
+
+
 def build_texture_table(textures):
-    """Decode every captured texture to RGBA8; returns (base -> index, table bytes)."""
+    """Decode every captured texture to RGBA8, or RGBA float32 for 16-bit fixed
+    point formats (width bit 31 set); returns (base -> index, table bytes)."""
     index, blobs = {}, []
     for base, (fetch, raw) in textures.items():
+        if fetch[1] & 0x3F in (25, 26):  # k_16_16, k_16_16_16_16
+            try:
+                width, height, data = decode_fixed16(raw, fetch)
+                index[base] = len(blobs)
+                blobs.append(struct.pack("<2I", width | 0x80000000, height) + data)
+                continue
+            except Exception as e:
+                print("fixed16 decode failed for %08X: %s" % (base, e))
         try:
             width, height, rgba = xenos_texture.decode_texture(raw, decode_texture_fetch(fetch))
         except Exception:
@@ -313,9 +404,25 @@ def main():
     draws = [r for r in load(os.path.join(ROOT, "build", "frame_capture.bin"), True) if r[0][1] != 3]
     compiled, records, skipped = {}, [], {}
     streams, blob = {}, bytearray()  # pulled vertex streams: address -> (blob offset, size)
+    # GPU registers persist across frames: start from the state the previous
+    # frame ended in, approximated by this frame's final state (two passes).
     regs = {}
-    for header, device, objs in draws:
+    for _, _, objs in load(os.path.join(ROOT, "build", "frame_capture.bin"), True):  # Swap included: the frame ends there
         track_registers(regs, objs.get("commands", b""))
+    # The Swap's commands are not captured; D3D leaves blending off (ONE, ZERO)
+    # between frames, which the first passes (the simulation) rely on.
+    for r in (0x2201, 0x2209, 0x220A, 0x220B):
+        regs[r] = 0x00010001
+    print("initial RB_BLENDCONTROL0 %08X RB_COLOR_MASK %08X RB_DEPTHCONTROL %08X" % (regs.get(0x2201, 0), regs.get(0x2104, 0), regs.get(0x2200, 0)))
+    xenia, matched, draw_ordinal = load_xenia_registers(os.path.join(ROOT, "build", "xenia_regs.bin")), 0, 0
+    alignment = align_xenia(draws, xenia)
+    tracked = regs
+    for header, device, objs in draws:
+        track_registers(tracked, objs.get("commands", b""))
+        regs = tracked
+        ordinal = draw_ordinal  # index among records with a draw (align_xenia)
+        if header[1] != 4:
+            draw_ordinal += 1
         if header[1] == 4:  # resolve / clear (D3D internal draw)
             # D3DDevice_Resolve(device, flags, rect, dest texture, ...): the
             # destination fetch constant (object + 0x1C) gives the address.
@@ -344,6 +451,13 @@ def main():
         if not name or not draw or len(draw[1]) < 2 or source not in (0, 2) or (source == 0 and len(draw[1]) < 3):
             skipped["no vs/indexed draw"] = skipped.get("no vs/indexed draw", 0) + 1
             continue
+        # Exact GPU state: Xenia's register file at the matching draw (same
+        # VGT_DRAW_INITIATOR and, when indexed, VGT_DMA_BASE), in order.
+        k = alignment.get(ordinal)
+        if k is not None:
+            regs = dict(tracked)
+            regs.update(xenia[k])
+            matched += 1
         prim, count, index32 = draw[1][1] & 0x3F, draw[1][1] >> 16, (draw[1][1] >> 11) & 1
         indices = buffers.get(draw[1][2] & 0x1FFFFFFF) if source == 0 else b""
         vfetch = struct.unpack_from(">2I", device, 0x480 + 190 * 4)
@@ -417,6 +531,7 @@ def main():
         f.write(struct.pack("<2I", 0x50524446, len(records)))
         for rec in records:
             f.write(rec)
+    print("matched %d draws to Xenia's register file (%d GPU draws)" % (matched, len(xenia)))
     print("packed %d of %d draws; skipped %s; shaders compiled %d, failed %s" % (len(records), len(draws), skipped,
           sum(compiled.values()), [k for k, v in compiled.items() if not v]))
 
