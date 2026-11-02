@@ -550,17 +550,14 @@ int main(int argc, char** argv)
         const TargetKey key = keyOf(d);
         Target& t = targets[key];
         if (t.framebuffer) return t;
-        // Size: window scissor when the frame wrote it, else the viewport
-        // (PA_CL_VPORT scale is half the size in pixels).
+        // Size: the larger of the window scissor and the largest viewport of
+        // the target's draws (PA_CL_VPORT scale is half the size in pixels);
+        // the scissor can be stale, e.g. the final 1024x600 composite after a
+        // 512x300 pass.
         const uint32_t br = d.regs[PA_SC_WINDOW_SCISSOR_BR];
-        t.width = br & 0x7FFF;
-        t.height = (br >> 16) & 0x7FFF;
-        if (!t.width || !t.height)
-        {
-            const auto& size = targetSizes[key];
-            t.width = size.first;
-            t.height = size.second;
-        }
+        const auto& size = targetSizes[key];
+        t.width = (std::max)(br & 0x7FFF, size.first);
+        t.height = (std::max)((br >> 16) & 0x7FFF, size.second);
         t.width = (std::clamp)(t.width, 1u, 4096u);
         t.height = (std::clamp)(t.height, 1u, 4096u);
         t.count = (std::max)(targetCounts[key], 1u);
