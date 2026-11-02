@@ -177,6 +177,34 @@ Findings:
 - 145/146/147 are the terrain shaders (heightfield vertex fetch), used for
   the depth pass and the colour pass.
 
+## Status of the offline replay (fd_replay)
+
+- Captures a frame, packs it into replay.bin, and draws it in offscreen plume/D3D12 with PNG readback.
+- Draws indexed, rectangle-list, auto-indexed, and depth-only passes with per-pass render targets.
+- Uses viewports, reverse-Z depth, culling, clears, blending, and colour write masks.
+- Supports up to 4 colour targets per configuration, with per-RT formats and resolved reads.
+- Binds real pixel shaders, pixel/vertex constants, boolean and loop constants.
+- Terrain and 13 vertex shaders draw; exact vertex layouts are used where vfetch data matches.
+- Textures are decoded, uploaded, and bound with swizzled views, including table textures and fixed BC2/BC3.
+- Colour and depth resolves (depth through an R32_FLOAT view) are aliased to host render targets.
+- Captured resolves are aliased to host render targets and bound for later reads.
+- The output is compared to the Xenia screenshot; PSNR improved from 6 to 10 dB.
+
+Still missing:
+- Colour LUTs that are not yet represented correctly.
+- Skinned meshes (the tribe): bone matrices POSITION13-15 are fetched with an index computed in the shader (vertex pulling needed).
+- The remaining skipped draws.
+- The live in-game renderer and DLSS.
+
+Next steps:
+1. Skinned meshes: vertex pulling for vfetch with computed indices (XenosRecomp).
+2. Sky and fog: the scene target is black where Xenia shows blue fog.
+3. Colour LUTs.
+4. Run the live renderer in the game.
+5. DLSS.
+
+(Section drafted by the local Qwen model from the commit log.)
+
 ## Helper modules (written by the local Qwen model, validated)
 
 | Module | Content | Validation |
