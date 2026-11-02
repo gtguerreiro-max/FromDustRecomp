@@ -14,6 +14,7 @@
 #include "../kernel/kernel.h"
 #include "../kernel/thread.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
@@ -177,8 +178,18 @@ void KernelState::EmulateCPInterruptDPC(uint32_t callback, uint32_t userData,
 }
 }
 
+DECLARE_string(readback_resolve);
+DECLARE_bool(readback_memexport);
+
 namespace gpu::xenia {
 bool Initialize() {
+  // Frame captures read render-to-texture results and memexport data from
+  // guest memory (colour LUTs, G-buffer copies): make Xenia write them back.
+  if (const char* capture = getenv("FD_FRAME_CAPTURE"); capture && *capture) {
+    cvars::readback_resolve = "full";
+    cvars::readback_memexport = true;
+    kernel::Log("gpu: frame capture: resolve and memexport readback enabled");
+  }
   const char* renderer = getenv("FD_RENDERER");
   if (renderer && !strcmp(renderer, "null")) return true;
   kernel::Log("gpu: initializing logging");

@@ -393,8 +393,17 @@ int main(int argc, char** argv)
         queue->waitForCommandFence(fence.get());
     }
 
-    // Targets keyed by (surface info, color info, depth info).
+    // Targets keyed by (surface info, color info, depth info), sized to the
+    // largest viewport any draw of the frame uses with them.
     std::map<std::tuple<uint32_t, uint32_t, uint32_t>, Target> targets;
+    std::map<std::tuple<uint32_t, uint32_t, uint32_t>, std::pair<uint32_t, uint32_t>> targetSizes;
+    for (const Draw& d : draws)
+    {
+        if (d.resolve) continue;
+        auto& size = targetSizes[std::make_tuple(d.regs[RB_SURFACE_INFO], d.regs[RB_COLOR_INFO], d.regs[RB_DEPTH_INFO])];
+        size.first = (std::max)(size.first, uint32_t(std::lround(2 * std::fabs(AsFloat(d.regs[VPORT_XSCALE])))));
+        size.second = (std::max)(size.second, uint32_t(std::lround(2 * std::fabs(AsFloat(d.regs[VPORT_YSCALE])))));
+    }
     auto targetFor = [&](const Draw& d) -> Target& {
         auto key = std::make_tuple(d.regs[RB_SURFACE_INFO], d.regs[RB_COLOR_INFO], d.regs[RB_DEPTH_INFO]);
         Target& t = targets[key];
@@ -406,8 +415,9 @@ int main(int argc, char** argv)
         t.height = (br >> 16) & 0x7FFF;
         if (!t.width || !t.height)
         {
-            t.width = uint32_t(std::lround(2 * std::fabs(AsFloat(d.regs[VPORT_XSCALE]))));
-            t.height = uint32_t(std::lround(2 * std::fabs(AsFloat(d.regs[VPORT_YSCALE]))));
+            const auto& size = targetSizes[key];
+            t.width = size.first;
+            t.height = size.second;
         }
         t.width = (std::clamp)(t.width, 1u, 4096u);
         t.height = (std::clamp)(t.height, 1u, 4096u);
