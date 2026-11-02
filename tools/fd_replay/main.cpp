@@ -128,6 +128,7 @@ struct Draw
     // "#resolve" records: EDRAM -> texture copy.
     bool resolve = false;
     uint32_t copyDest = 0, copyControl = 0, copySurface = 0, copyColor = 0, copyDepth = 0, copyDestInfo = 0;
+    uint32_t copyWidth = 0, copyHeight = 0; // destination texture size
 };
 
 // Shared constants layout of the patched XenosRecomp (shader_common.h).
@@ -135,6 +136,7 @@ constexpr uint32_t kSharedTextureIndex = 0;   // + dimension * 128 + slot * 4
 constexpr uint32_t kSharedSamplerIndex = 384; // + slot * 4
 constexpr uint32_t kSharedVertexFetch = 1024; // 32 uint4
 constexpr uint32_t kSharedFetchScale = 1536; // 32 floats
+constexpr uint32_t kSharedColorScale = 1664; // 4 floats
 constexpr uint32_t kSharedSize = 2048;
 
 std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
@@ -158,6 +160,8 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
             d.copyColor = u32();
             d.copyDepth = u32();
             d.copyDestInfo = u32();
+            d.copyWidth = u32();
+            d.copyHeight = u32();
             draws.push_back(d);
             continue;
         }
@@ -512,6 +516,10 @@ int main(int argc, char** argv)
     // largest viewport any draw of the frame uses with them.
     std::map<TargetKey, Target> targets;
     uint32_t nextPlain = 0; // plain (unswizzled) heap slots for target surfaces
+    std::map<uint32_t, Surface*> resolved; // texture base address -> surface copied there
+    std::map<uint32_t, bool> resolvedSwap;  // texture base address -> copy swapped red/blue
+    std::map<uint32_t, int32_t> resolvedBias; // texture base address -> copy exponent bias
+    std::map<uint32_t, const Draw*> pendingResolves; // destination -> its first resolve in the frame
     std::map<TargetKey, std::pair<uint32_t, uint32_t>> targetSizes;
     std::map<TargetKey, uint32_t> targetCounts;
     auto keyOf = [](const Draw& d) {
@@ -540,7 +548,13 @@ int main(int argc, char** argv)
     };
     for (const Draw& d : draws)
     {
-        if (d.resolve) continue;
+        if (d.resolve)
+        {
+            // First resolve of each destination: reads before it in the frame see
+            // the previous frame's copy, approximated by the live source target.
+            pendingResolves.emplace(d.copyDest, &d);
+            continue;
+        }
         const uint32_t written = writtenTargets(d);
         uint32_t& count = targetCounts[keyOf(d)];
         for (uint32_t k = 0; k < 4; ++k)
@@ -592,6 +606,18 @@ int main(int argc, char** argv)
         list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(t.ds.texture.get(), RenderTextureLayout::DEPTH_WRITE));
         list->setFramebuffer(t.framebuffer.get());
         for (uint32_t k = 0; k < t.count; ++k) list->clearColor(k, RenderColor(0.0f, 0.0f, 0.0f, getenv("FD_CLEAR_ALPHA") ? float(atof(getenv("FD_CLEAR_ALPHA"))) : 0.0f));
+        // FD_PENDING_LIVE=1: reads before a destination's first copy this frame see
+        // the live source target; by default they see the captured memory copy
+        // (the previous frame's state, e.g. the simulation's height maps).
+        if (getenv("FD_PENDING_LIVE"))
+        for (const auto& [dest, r] : pendingResolves)
+            if (!resolved.count(dest) && std::get<0>(key) == r->copySurface && std::get<1>(key) == r->copyColor &&
+                std::get<5>(key) == r->copyDepth && (r->copyControl & 7) < t.count)
+            {
+                resolved[dest] = &t.rt[r->copyControl & 7];
+                resolvedSwap[dest] = (r->copyDestInfo >> 24) & 1;
+                resolvedBias[dest] = int32_t(r->copyDestInfo << 10) >> 26;
+            }
         // From Dust uses reversed depth (viewport Z scale -1, offset 1, GREATER_EQUAL).
         list->clearDepthStencil(true, false, 0.0f);
         return t;
@@ -700,13 +726,26 @@ int main(int argc, char** argv)
         std::unique_ptr<RenderFramebuffer> framebuffer;
     };
     std::vector<std::unique_ptr<Packed>> packed;
-    std::map<uint32_t, Surface*> resolved; // texture base address -> surface copied there
-    std::map<uint32_t, bool> resolvedSwap;  // texture base address -> copy swapped red/blue
-    std::map<uint32_t, int32_t> resolvedBias; // texture base address -> copy exponent bias
+    struct Snapshot
+    {
+        RenderFormat format = RenderFormat::UNKNOWN;
+        uint32_t width = 0, height = 0;
+        Surface surface;
+    };
+    std::map<uint32_t, std::unique_ptr<Snapshot>> snapshots; // resolve destination -> copy
+    struct Dump
+    {
+        uint32_t dest = 0, order = 0, width = 0, height = 0, rowPitch = 0;
+        RenderFormat format = RenderFormat::UNKNOWN;
+        std::unique_ptr<RenderBuffer> buffer;
+    };
+    std::vector<Dump> dumps;
     std::map<uint64_t, std::pair<uint32_t, std::unique_ptr<RenderTextureView>>> tableViews; // (texture, swizzle) -> view
     uint32_t aliasHits = 0;
     uint32_t nextView = textureCount + 64; // first 64 slots: one plain view per target
-    for (size_t i = 0; i < draws.size(); ++i)
+    // FD_STOP_AFTER=<record>: debug, replay only up to that record.
+    const size_t stopAfter = getenv("FD_STOP_AFTER") ? size_t(atoi(getenv("FD_STOP_AFTER"))) : draws.size();
+    for (size_t i = 0; i < draws.size() && i <= stopAfter; ++i)
     {
         const Draw& d = draws[i];
         if (d.resolve)
@@ -724,13 +763,70 @@ int main(int argc, char** argv)
                     if (getenv("FD_REPLAY_TRACE"))
                         fprintf(stderr, "resolve %08X info %08X src %u bias %d count %u\n", d.copyDest, d.copyDestInfo,
                             source, resolvedBias[d.copyDest], t.count);
-                    if (source < t.count && t.rt[source].texture) resolved[d.copyDest] = &t.rt[source];
+                    const uint32_t copyW = (std::clamp)(d.copyWidth, 1u, t.width), copyH = (std::clamp)(d.copyHeight, 1u, t.height);
+                    // Snapshots only for 8_8_8_8 copies (the post-process chain); other
+                    // formats (e.g. the terrain height map, updated by tiles at an
+                    // offset this replay does not know yet) stay live aliases.
+                    if (source < t.count && t.rt[source].texture && !t.draws)
+                    {
+                        // Nothing drawn yet this frame: on the Xbox the target still
+                        // holds the previous frame; the captured memory copy is closer.
+                        resolved.erase(d.copyDest);
+                    }
+                    else if (source < t.count && t.rt[source].texture && (getenv("FD_NO_SNAPSHOT") || ((d.copyDestInfo >> 7) & 0x3F) != 6 ||
+                        (getenv("FD_LIVE_DEST") && strtoul(getenv("FD_LIVE_DEST"), nullptr, 16) == d.copyDest)))
+                        resolved[d.copyDest] = &t.rt[source];
+                    else if (source < t.count && t.rt[source].texture)
+                    {
+                        // Like the Xbox copy: the rectangle (from the origin) goes to a
+                        // texture of the destination's size, a snapshot of this moment.
+                        Surface& rt = t.rt[source];
+                        auto& snap = snapshots[d.copyDest];
+                        if (!snap || snap->format != rt.format || snap->width != copyW || snap->height != copyH)
+                        {
+                            if (nextView + 1 > textureCount + kMaxTargets) continue;
+                            snap = std::make_unique<Snapshot>();
+                            snap->format = rt.format;
+                            snap->width = copyW;
+                            snap->height = copyH;
+                            snap->surface.format = rt.format;
+                            snap->surface.texture = device->createTexture(RenderTextureDesc::Texture2D(copyW, copyH, 1, rt.format));
+                            snap->surface.descriptor = nextView++;
+                            sets[0]->setTexture(snap->surface.descriptor, snap->surface.texture.get(), RenderTextureLayout::SHADER_READ);
+                        }
+                        list->barriers(RenderBarrierStage::COPY, {
+                            RenderTextureBarrier(rt.texture.get(), RenderTextureLayout::COPY_SOURCE),
+                            RenderTextureBarrier(snap->surface.texture.get(), RenderTextureLayout::COPY_DEST)});
+                        const RenderBox box(0, 0, int32_t(copyW), int32_t(copyH));
+                        list->copyTextureRegion(RenderTextureCopyLocation::Subresource(snap->surface.texture.get()),
+                            RenderTextureCopyLocation::Subresource(rt.texture.get()), 0, 0, 0, &box);
+                        // Dump of every copy, for comparison with Xenia's (tools/compare_resolves.py).
+                        {
+                            Dump dump;
+                            dump.dest = d.copyDest;
+                            dump.order = uint32_t(dumps.size());
+                            dump.format = rt.format;
+                            dump.width = copyW;
+                            dump.height = copyH;
+                            dump.rowPitch = (copyW * FormatBytes(rt.format) + 255) & ~255u;
+                            dump.buffer = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(dump.rowPitch) * copyH));
+                            list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(snap->surface.texture.get(), RenderTextureLayout::COPY_SOURCE));
+                            list->copyTextureRegion(
+                                RenderTextureCopyLocation::PlacedFootprint(dump.buffer.get(), rt.format, copyW, copyH, 1, dump.rowPitch / FormatBytes(rt.format)),
+                                RenderTextureCopyLocation::Subresource(snap->surface.texture.get()));
+                            dumps.push_back(std::move(dump));
+                        }
+                        list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(rt.texture.get(), RenderTextureLayout::COLOR_WRITE));
+                        rt.shaderRead = false;
+                        snap->surface.shaderRead = false;
+                        resolved[d.copyDest] = &snap->surface;
+                    }
                     else if (source == 4 && t.ds.texture && ((d.copyDestInfo >> 7) & 0x3F) == 6 && packPipeline &&
                         packed.size() < kMaxPacks && nextView + 2 <= textureCount + kMaxTargets)
                     {
                         auto p = std::make_unique<Packed>();
                         p->surface.format = RenderFormat::R8G8B8A8_UNORM;
-                        p->surface.texture = device->createTexture(RenderTextureDesc::ColorTarget(t.width, t.height, RenderFormat::R8G8B8A8_UNORM));
+                        p->surface.texture = device->createTexture(RenderTextureDesc::ColorTarget(copyW, copyH, RenderFormat::R8G8B8A8_UNORM));
                         p->surface.descriptor = nextView++;
                         sets[0]->setTexture(p->surface.descriptor, p->surface.texture.get(), RenderTextureLayout::SHADER_READ);
                         p->depthView = t.ds.texture->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::R32_FLOAT));
@@ -753,8 +849,8 @@ int main(int argc, char** argv)
                         for (uint32_t set = 0; set < 4; ++set) list->setGraphicsDescriptorSet(sets[set].get(), set);
                         list->setPipeline(packPipeline.get());
                         list->setGraphicsRootDescriptor(RenderBufferReference(packConstants.get(), 256 * packed.size()), 2);
-                        list->setViewports(RenderViewport(0, 0, float(t.width), float(t.height)));
-                        list->setScissors(RenderRect(0, 0, t.width, t.height));
+                        list->setViewports(RenderViewport(0, 0, float(copyW), float(copyH)));
+                        list->setScissors(RenderRect(0, 0, copyW, copyH));
                         list->drawInstanced(3, 1, 0, 0);
                         current = nullptr;
                         resolved[d.copyDest] = &p->surface;
@@ -781,6 +877,13 @@ int main(int argc, char** argv)
         memcpy(shared + kSharedVertexFetch, d.vertexFetch, 512);
         // fdFetchScale (1536 + slot * 4): 1, or for a render target read in
         // place of its biased copy, 2^(copy bias + fetch exp_adjust).
+        // fdColorScale (1664 + k * 4): render target k's colour exponent bias,
+        // RB_COLOR_INFO bits 20-25 (signed): the output is stored times 2^bias.
+        for (uint32_t k = 0; k < 4; ++k)
+        {
+            const float scale = std::ldexp(1.0f, int32_t(ColorInfo(d.regs, k) << 6) >> 26);
+            memcpy(shared + kSharedColorScale + k * 4, &scale, 4);
+        }
         // FD_ZERO_SLOTS=<ps>:<slot>[,<slot>...]: debug, zero those fetches of that pixel shader.
         static const char* zeroSlots = getenv("FD_ZERO_SLOTS");
         for (uint32_t slot = 0; slot < 32; ++slot)
@@ -842,6 +945,8 @@ int main(int argc, char** argv)
                 if (getenv("FD_TRACE_PS") && ("," + std::string(getenv("FD_TRACE_PS")) + ",").find("," + d.ps + ",") != std::string::npos)
                     fprintf(stderr, "ps %s draw %u slot %u base %08X swz %o swap %d bias %d exp %d fmt %d\n", d.ps.c_str(), i, slot, alias->first,
                         d.swizzles[slot], int(resolvedSwap[alias->first]), resolvedBias[alias->first], d.expAdjust[slot], int(source.format));
+                if (getenv("FD_TRACE_PS") && ("," + std::string(getenv("FD_TRACE_PS")) + ",").find("," + d.ps + ",") != std::string::npos)
+                    fprintf(stderr, "   %s\n", snapshots.count(alias->first) && &snapshots[alias->first]->surface == alias->second ? "snapshot" : "live");
                 if (const int32_t bias = resolvedBias[alias->first])
                 {
                     const float scale = std::ldexp(1.0f, bias + d.expAdjust[slot]);
@@ -941,6 +1046,18 @@ int main(int argc, char** argv)
         printf("target_%d: %ux%u, %u RT, %u draws (surface %08X color %08X depth %08X)\n", n, t.width, t.height, t.count, t.draws,
             std::get<0>(key), std::get<1>(key), std::get<5>(key));
         ++n;
+    }
+    for (Dump& dump : dumps)
+    {
+        char name[64];
+        snprintf(name, sizeof(name), "/resolve_%02u_%08X.png", dump.order, dump.dest);
+        const auto* pixels = static_cast<const uint8_t*>(dump.buffer->map());
+        std::vector<uint8_t> rgba(size_t(dump.width) * dump.height * 4);
+        for (uint32_t y = 0; y < dump.height; ++y)
+            for (uint32_t x = 0; x < dump.width; ++x)
+                ToRgba8(dump.format, pixels + size_t(y) * dump.rowPitch + size_t(x) * FormatBytes(dump.format), &rgba[(size_t(y) * dump.width + x) * 4]);
+        stbi_write_png((dir + name).c_str(), dump.width, dump.height, 4, rgba.data(), dump.width * 4);
+        dump.buffer->unmap();
     }
     printf("fd_replay: %zu draws, %zu pipelines, %zu targets, %zu resolves mapped, %u resolved reads\n", draws.size(),
         pipelines.size(), targets.size(), resolved.size(), aliasHits);

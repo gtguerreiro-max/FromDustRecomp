@@ -325,8 +325,11 @@ def main():
                 if dest:
                     name = "#resolve"
                     rec = struct.pack("<I", len(name)) + name.encode()
-                    rec += struct.pack("<6I", dest, flags, regs.get(0x2000, 0), regs.get(0x2001, 0),
-                                       regs.get(0x2002, 0), copy_dest_info(objs.get("commands", b"")[4:]))
+                    # Destination size: texture fetch dword 2 (width - 1 bits 0-12, height - 1 bits 13-25).
+                    size = struct.unpack_from(">I", obj, 0x1C + 8)[0]
+                    rec += struct.pack("<8I", dest, flags, regs.get(0x2000, 0), regs.get(0x2001, 0),
+                                       regs.get(0x2002, 0), copy_dest_info(objs.get("commands", b"")[4:]),
+                                       (size & 0x1FFF) + 1, ((size >> 13) & 0x1FFF) + 1)
                     records.append(rec)
                     skipped["resolves"] = skipped.get("resolves", 0) + 1
             continue

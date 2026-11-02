@@ -1,5 +1,5 @@
 diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
-index 1c74034..6efeeac 100644
+index 1c74034..5c481e6 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
 @@ -15,6 +15,9 @@
@@ -12,7 +12,7 @@ index 1c74034..6efeeac 100644
  #ifdef __spirv__
  
  struct PushConstants
-@@ -26,10 +29,12 @@ struct PushConstants
+@@ -26,10 +29,13 @@ struct PushConstants
  
  [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
  
@@ -26,10 +26,11 @@ index 1c74034..6efeeac 100644
 +#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 528)
 +#define g_LoopConstant(INDEX)      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 544 + (INDEX) * 4)
 +#define fdFetchScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1536 + (INDEX) * 4)
++#define fdColorScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1664 + (INDEX) * 4)
  
  [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
  
-@@ -38,15 +43,95 @@ struct PushConstants
+@@ -38,15 +44,98 @@ struct PushConstants
  #else
  
  #define DEFINE_SHARED_CONSTANTS() \
@@ -42,10 +43,13 @@ index 1c74034..6efeeac 100644
 +    float2 g_HalfPixelOffset : packoffset(c32.z); \
 +    float g_AlphaThreshold : packoffset(c33.x); \
 +    uint4 g_LoopConstants[8] : packoffset(c34); \
-+    uint4 g_VertexFetch[32] : packoffset(c64);     float4 g_FetchScales[8] : packoffset(c96);
++    uint4 g_VertexFetch[32] : packoffset(c64); \
++    float4 g_FetchScales[8] : packoffset(c96); \
++    float4 g_ColorScales : packoffset(c104);
 +
 +#define g_LoopConstant(INDEX) g_LoopConstants[(INDEX) / 4][(INDEX) % 4]
 +#define fdFetchScale(INDEX) g_FetchScales[(INDEX) / 4][(INDEX) % 4]
++#define fdColorScale(INDEX) g_ColorScales[INDEX]
  
  uint g_SpecConstants();
  
@@ -129,7 +133,7 @@ index 1c74034..6efeeac 100644
  Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
  Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
  TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
-@@ -59,10 +144,15 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+@@ -59,10 +148,15 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
      return dimensions;
  }
  
@@ -146,7 +150,7 @@ index 1c74034..6efeeac 100644
  }
  
  float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
-@@ -135,17 +225,17 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+@@ -135,17 +229,17 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
      float h1y = h1(fy);
  
      float4 r =
@@ -169,7 +173,7 @@ index 1c74034..6efeeac 100644
  }
  
  struct CubeMapData
-@@ -156,7 +246,7 @@ struct CubeMapData
+@@ -156,7 +250,7 @@ struct CubeMapData
  
  float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
  {
@@ -179,7 +183,7 @@ index 1c74034..6efeeac 100644
  
  float4 tfetchR11G11B10(uint4 value)
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 698a418..d84f153 100644
+index 698a418..195f796 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -179,6 +179,20 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
@@ -302,7 +306,15 @@ index 698a418..d84f153 100644
          }
      }
  
-@@ -1322,19 +1354,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1288,6 +1320,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         out += "#endif\n";
+ 
+         auto pixelShader = reinterpret_cast<const PixelShader*>(shader);
++        pixelShaderOutputs = pixelShader->outputs;
+         if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
+             out += ",\n\tout float4 oC0 : SV_Target0";
+         if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR1)
+@@ -1322,19 +1355,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              }
          #endif
  
@@ -343,7 +355,7 @@ index 698a418..d84f153 100644
  
              vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
          }
-@@ -1347,6 +1393,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1347,6 +1394,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
      #endif
  
@@ -354,7 +366,7 @@ index 698a418..d84f153 100644
          out += "\tout float4 oPos : SV_Position";
  
          for (auto& [usage, usageIndex] : INTERPOLATORS)
-@@ -1418,6 +1468,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1418,6 +1469,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\n";
      }
  
@@ -370,7 +382,7 @@ index 698a418..d84f153 100644
      bool printedRegisters[32]{};
  
      uint32_t interpolatorCount = (shader->interpolatorInfo >> 5) & 0x1F;
-@@ -1471,6 +1530,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1471,6 +1531,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              {
                  out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
              }
@@ -382,14 +394,35 @@ index 698a418..d84f153 100644
          #endif
              else
              {
+@@ -1809,6 +1874,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     indent();
+                     out += "}";
+ 
++                    // FromDust: render target colour exponent bias (RB_COLOR_INFO
++                    // bits 20-25), applied to the outputs like Xenia does.
++                    const uint32_t colorOutputs[] = { PIXEL_SHADER_OUTPUT_COLOR0, PIXEL_SHADER_OUTPUT_COLOR1,
++                        PIXEL_SHADER_OUTPUT_COLOR2, PIXEL_SHADER_OUTPUT_COLOR3 };
++                    for (uint32_t k = 0; k < 4; k++)
++                    {
++                        if (pixelShaderOutputs & colorOutputs[k])
++                        {
++                            indent();
++                            println("oC{0} *= fdColorScale({0});", k);
++                        }
++                    }
++
+                 #ifdef UNLEASHED_RECOMP
+                     specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
+ 
 diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
-index b2e317d..32d49ac 100644
+index b2e317d..0ef6749 100644
 --- a/XenosRecomp/shader_recompiler.h
 +++ b/XenosRecomp/shader_recompiler.h
-@@ -33,6 +33,7 @@ struct ShaderRecompiler : StringBuffer
+@@ -33,6 +33,8 @@ struct ShaderRecompiler : StringBuffer
      std::unordered_map<uint32_t, const char*> samplers;
      std::unordered_map<uint32_t, uint32_t> ifEndLabels;
      uint32_t specConstantsMask = 0;
++    uint32_t pixelShaderOutputs = 0; // FromDust: PIXEL_SHADER_OUTPUT_* of the shader
 +    uint32_t vertexFetchCount = 0; // FromDust: ordinal of the next vertex fetch (g_VertexFetch index)
  
  #ifdef UNLEASHED_RECOMP
