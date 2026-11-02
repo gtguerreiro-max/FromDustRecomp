@@ -199,15 +199,16 @@ void RecordCommands(uint32_t device, uint32_t before)
     std::lock_guard lock(g_mutex);
     if (!g_file) return;
     const uint32_t after = mem::Read32(device + 0x30);
-    const uint32_t length = after > before && after - before < 0x40000 ? after - before : 0;
+    // The cursor points at the last written word: the draw wrote
+    // [before + 4, after + 4). Saved from `before` (one word early) so tools
+    // skip 4 bytes, up to and including the last word.
+    const uint32_t length = after > before && after - before < 0x40000 ? after - before + 4 : 0;
     const uint32_t head[2] = {0x46444342, length};
     fwrite(head, sizeof(head), 1, g_file);
     if (length)
     {
         fwrite(mem::Translate(before), length, 1, g_file);
-        // The cursor points at the last written word: this draw's packets are
-        // [before + 4, after + 4).
-        RecordIndexBuffers(static_cast<const uint8_t*>(mem::Translate(before)) + 4, length);
+        RecordIndexBuffers(static_cast<const uint8_t*>(mem::Translate(before)) + 4, length - 4);
     }
     RecordVertexBuffers(device);
 }

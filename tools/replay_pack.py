@@ -148,6 +148,27 @@ STATE_REGISTERS = [0x2000, 0x2001, 0x2002, 0x2081, 0x2082, 0x2104, 0x2200, 0x220
                    0x2102, 0x210F, 0x2110, 0x2111, 0x2112, 0x2113, 0x2114, 0x2206]
 
 
+def expand_rects(vdata, element_count):
+    """Xenos rectangle lists -> triangles: per 3 vertices, mirror the vertex
+    opposite the longest edge (Xenia's rule, measured on element 0 x/y), giving
+    4 vertices and 6 indices per rectangle. vdata: float4 x element_count per vertex."""
+    size = 16 * element_count
+    verts = [vdata[i:i + size] for i in range(0, len(vdata) - size + 1, size)]
+    out, indices = [], []
+    for k in range(0, len(verts) - 2, 3):
+        v = [struct.unpack("<%df" % (4 * element_count), verts[k + j]) for j in range(3)]
+        dist = lambda a, b: (v[a][0] - v[b][0]) ** 2 + (v[a][1] - v[b][1]) ** 2
+        e12, e20, e01 = dist(1, 2), dist(2, 0), dist(0, 1)
+        order = (0, 1, 2) if e12 >= e20 and e12 >= e01 else (1, 2, 0) if e20 >= e01 else (2, 0, 1)
+        a, b, c = (v[i] for i in order)
+        d = [b[i] + c[i] - a[i] for i in range(len(a))]
+        base = len(out)
+        out += [a, b, c, d]
+        indices += [base, base + 1, base + 2, base + 2, base + 1, base + 3]
+    data = b"".join(struct.pack("<%df" % len(x), *x) for x in out)
+    return data, struct.pack("<%dH" % len(indices), *indices), len(indices)
+
+
 def track_registers(regs, commands):
     """Apply a draw's type-0 register writes (commands start one word in)."""
     for name, payload in packets(commands[4:]):
@@ -200,17 +221,16 @@ def main():
         vs_obj = objs[0x3290][0]
         name = objects.get(vs_obj, (0, None))[1]
         draw = next(((n, p) for n, p in packets(objs.get("commands", b"")[4:]) if n.startswith("DRAW_INDX") and not n.startswith("DRAW_INDX_")), None)
-        # The saved commands end one word early (frame_capture.cpp), so the
-        # last DRAW_INDX may lack its index size word; only words 1-2 are needed.
-        if not name or not draw or len(draw[1]) < 3 or (draw[1][1] >> 6) & 3:
+        source = (draw[1][1] >> 6) & 3 if draw and len(draw[1]) >= 2 else 3
+        if not name or not draw or len(draw[1]) < 2 or source not in (0, 2) or (source == 0 and len(draw[1]) < 3):
             skipped["no vs/indexed draw"] = skipped.get("no vs/indexed draw", 0) + 1
             continue
         prim, count, index32 = draw[1][1] & 0x3F, draw[1][1] >> 16, (draw[1][1] >> 11) & 1
-        indices = buffers.get(draw[1][2] & 0x1FFFFFFF)
+        indices = buffers.get(draw[1][2] & 0x1FFFFFFF) if source == 0 else b""
         vfetch = struct.unpack_from(">2I", device, 0x480 + 190 * 4)
         vertices = buffers.get(vfetch[0] & 0x1FFFFFFC)
         stride, elements = vertex_layout(objs["vs_code"][1][0x40:])
-        if indices is None or vertices is None or not stride or not elements or prim != 4:
+        if indices is None or vertices is None or not stride or not elements or prim not in (4, 8):
             skipped["missing data/layout"] = skipped.get("missing data/layout", 0) + 1
             continue
         semantics = hlsl_inputs(name)
@@ -222,13 +242,23 @@ def main():
         if not compiled[name]:
             skipped["vs compile"] = skipped.get("vs compile", 0) + 1
             continue
-        n = len(indices) // (4 if index32 else 2)
-        index_le = struct.pack("<%d%s" % (n, "I" if index32 else "H"), *struct.unpack(">%d%s" % (n, "I" if index32 else "H"), indices))
+        if source == 0:
+            n = len(indices) // (4 if index32 else 2)
+            index_le = struct.pack("<%d%s" % (n, "I" if index32 else "H"), *struct.unpack(">%d%s" % (n, "I" if index32 else "H"), indices))
+        else:  # auto-indexed: vertices 0..count-1
+            index32 = 1
+            index_le = struct.pack("<%dI" % count, *range(count))
         constants = swap32(device[0x780:0x780 + 4096])
-        rec = struct.pack("<I", len(name)) + name.encode()
-        rec += struct.pack("<3I", prim, count, len(index_le)) + index_le
         vdata = b"".join(convert_element(vertices, base + offset, v)
                          for base in range(0, len(vertices) - stride + 1, stride) for offset, v in elements)
+        if prim == 8:  # rectangle list: expand the referenced vertices to triangles
+            order = struct.unpack("<%d%s" % (len(index_le) // (4 if index32 else 2), "I" if index32 else "H"), index_le)
+            size = 16 * len(elements)
+            picked = b"".join(vdata[i * size:(i + 1) * size] for i in order[:count] if (i + 1) * size <= len(vdata))
+            vdata, index_le, count = expand_rects(picked, len(elements))
+            index32, prim = 0, 4
+        rec = struct.pack("<I", len(name)) + name.encode()
+        rec += struct.pack("<3I", prim, count, len(index_le)) + index_le
         rec += struct.pack("<2I", 16 * len(elements), len(vdata)) + vdata
         rec += struct.pack("<I", len(semantics)) + b"".join(struct.pack("<I", len(x)) + x.encode() for x in semantics)
         rec += constants + struct.pack("<I", index32)
