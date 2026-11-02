@@ -438,6 +438,13 @@ def main():
     texture_index, table = build_texture_table(load_textures(os.path.join(ROOT, "build", "textures.bin")))
     open(os.path.join(OUT, "textures.rgba"), "wb").write(table)
     draws = [r for r in load(os.path.join(ROOT, "build", "frame_capture.bin"), True) if r[0][1] != 3]
+    for header, _, objs in draws:
+        # BeginVertices through D3D's user-pointer draw wrapper (returns to
+        # 0x8250D964, the 2D layer): the completed region has the draw. Other
+        # kind-2 calls are nested in an engine draw whose packet would be
+        # duplicated.
+        if header[1] == 2 and "up" in objs and header[2] == 0x8250D964 and not os.environ.get("FD_NO_UP"):
+            objs["commands"] = objs["up"][1]
     compiled, records, skipped = {}, [], {}
     streams, blob = {}, bytearray()  # pulled vertex streams: address -> (blob offset, size)
     # GPU registers persist across frames: start from the state the previous
@@ -497,6 +504,8 @@ def main():
         prim, count, index32 = draw[1][1] & 0x3F, draw[1][1] >> 16, (draw[1][1] >> 11) & 1
         indices = buffers.get(draw[1][2] & 0x1FFFFFFF) if source == 0 else b""
         vfetch = struct.unpack_from(">2I", device, 0x480 + 190 * 4)
+        if "up" in objs and 0x48BE in tracked:  # BeginVertices: fetch 95 set in the stream
+            vfetch = (tracked[0x48BE], tracked[0x48BF])
         vertices = buffers.get(vfetch[0] & 0x1FFFFFFC)
         stride, layout, pulls = vertex_layout(objs["vs_code"][1], name)
         elements = [(off, v) for off, v, _ in layout]

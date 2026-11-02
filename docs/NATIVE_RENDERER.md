@@ -255,3 +255,34 @@ Milestones:
 2. Decode the vertex layouts (vertex fetch instructions in each VS) and the
    render state registers the draws write (0x2000-0x2380).
 3. Then hook the engine draws live and draw natively instead of the PM4 path.
+
+## Status 2026-11-02 (handoff)
+
+Workflow: capture a frame, replay it natively, compare every resolve with Xenia's.
+
+- Capture: `FD_FRAME_CAPTURE=<s>` (+ `run.ps1 -Capture build\xenia_*.png -CaptureSeconds <s>`).
+  Title screen: no `FD_AUTOPRESS`, 60 s. Gameplay: see the FD_AUTOPRESS sequence used before
+  (`40:0010` then `1000` every 4 s from 50 to 150, capture at 170).
+  Writes build/frame_capture.bin, textures.bin, buffers.bin, shader_inits.bin and
+  xenia_regs.bin (Xenia's register file at every GPU draw, via the FROMDUST_GPU_SHIM hook).
+- `python tools/replay_pack.py` then `build\fd_replay\fd_replay.exe build\replay`.
+- `python tools/compare_resolves.py [--save]`: our copies (resolve_NN_ADDR.png/.raw) vs Xenia's
+  (readback_resolve=full puts them in textures.bin). Note: textures.bin holds one version per
+  address (when it was read), so for addresses copied several times only the last copy compares.
+- `tools/rank_targets.py`, `tools/target_gallery.py`, `tools/img_compare.py`, `tools/color_fit.py`.
+- Debug switches in fd_replay: FD_TRACE_PS, FD_TRACE_DRAWS, FD_STOP_AFTER, FD_ZERO_SLOTS,
+  FD_LIVE_DEST, FD_NO_SNAPSHOT, FD_PENDING_LIVE, FD_NO_COLOR_BIAS, FD_REPLAY_DEBUG_PS.
+- RenderDoc 1.47 in third_party/renderdoc_dl (gitignored); launched under renderdoccmd the game
+  triggers a capture of the same frame; tools/rdoc/rdc_info.py runs in qrenderdoc. Xenia draws
+  EDRAM through a UAV, so per-draw images need its RTV mode.
+
+Where it stands: the title screen's final composite matches Xenia's scene (sky, terrain,
+grading; ~17-19 dB). Open:
+1. 2D layer (logo, "Press START"): records with lr 0x8250D964 (BeginVertices style) now get
+   their completed command region (FDUP block) and vertices. They draw, but appear as two yellow
+   dots: positions are pixel coordinates (e.g. 450, 28) with 32_32_FLOAT, so the VS probably
+   relies on PA_CL_VTE_CNTL / screen-space (viewport transform off) or the texture is wrong.
+2. DOF / statue: the statue on the left and the right pillar's detail are missing or dark.
+3. Gameplay frame needs a fresh capture to confirm the fixes (old capture was overwritten).
+4. Only part of the draws align with Xenia's register dump (alignment key: initiator, index
+   base, colour target); the rest use parsed state.

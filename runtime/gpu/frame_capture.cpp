@@ -57,11 +57,40 @@ bool Enabled()
 
 void RecordTextures(uint32_t device);
 
+// BeginVertices-style draws (kind 2) reserve command buffer space that the
+// caller fills with vertices afterwards; the draw packet follows at
+// EndVertices. At the next recorded call (or the swap) the region is saved
+// again, now complete. Block: u32 'FDUP', u32 guest address, u32 length, bytes.
+uint32_t g_upDevice = 0, g_upBefore = 0;
+void RecordVertexBuffers(uint32_t device);
+void DumpBuffer(uint32_t address, uint32_t length);
+
+void FlushPendingVertices()
+{
+    if (!g_upDevice || !g_file) return;
+    const uint32_t after = mem::Read32(g_upDevice + 0x30);
+    const uint32_t length = after > g_upBefore && after - g_upBefore < 0x80000 ? after - g_upBefore + 4 : 0;
+    const uint32_t head[3] = {0x50554446, g_upBefore, length};
+    fwrite(head, sizeof(head), 1, g_file);
+    if (length) fwrite(mem::Translate(g_upBefore), length, 1, g_file);
+    // The vertices themselves (a vertex ring, through fetch constant 95, which
+    // the region sets with a type-0 write of registers 0x48BA-0x48BF).
+    RecordVertexBuffers(g_upDevice);
+    for (uint32_t at = 4; at + 28 <= length; at += 4)
+        if (mem::Read32(g_upBefore + at) == 0x000548BA)
+        {
+            const uint32_t word0 = mem::Read32(g_upBefore + at + 20), word1 = mem::Read32(g_upBefore + at + 24);
+            if ((word0 & 3) == 3) DumpBuffer(word0 & ~3u, ((word1 >> 2) & 0xFFFFFF) * 4);
+        }
+    g_upDevice = 0;
+}
+
 void Record(uint32_t kind, PPCContext& ctx)
 {
     if (g_state.load() != State::Capturing) return;
     std::lock_guard lock(g_mutex);
     if (!g_file) return;
+    FlushPendingVertices();
     const uint32_t header[12] = {0x46445257, kind, uint32_t(ctx.lr), ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
         ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32, kDeviceSnapshot};
     fwrite(header, sizeof(header), 1, g_file);
@@ -284,6 +313,7 @@ void OnSwap(PPCContext& ctx)
     }
     else if (state == State::Capturing)
     {
+        FlushPendingVertices();
         const uint32_t header[12] = {0x46445257, 3, uint32_t(ctx.lr), ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
             ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32, kDeviceSnapshot};
         fwrite(header, sizeof(header), 1, g_file);
@@ -326,6 +356,12 @@ PPC_FUNC(sub_8250D480)
     Record(2, ctx);
     __imp__sub_8250D480(ctx, base);
     RecordCommands(device, cursor);
+    if (g_state.load() == State::Capturing)
+    {
+        std::lock_guard lock(g_mutex);
+        g_upDevice = device;
+        g_upBefore = cursor;
+    }
 }
 
 // Swap (calls VdSwap).

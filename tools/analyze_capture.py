@@ -16,6 +16,13 @@ def load(path, with_objects=False):
     data = open(path, "rb").read()
     records, i = [], 0
     while i < len(data):
+        # BeginVertices data completed after the call (frame_capture.cpp FlushPendingVertices).
+        if data[i:i + 4] == b"FDUP":
+            address, length = struct.unpack_from("<2I", data, i + 4)
+            if records and with_objects:
+                records[-1][2]["up"] = (address, data[i + 12:i + 12 + length])
+            i += 12 + length
+            continue
         header = struct.unpack_from("<12I", data, i)
         size = header[11]
         snapshot = data[i + 48:i + 48 + size]
