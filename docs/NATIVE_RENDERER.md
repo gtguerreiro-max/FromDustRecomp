@@ -1,5 +1,18 @@
 # Native renderer: research notes
 
+> Shortcut found (2026-11-02): 96dot/Dragon-Age-Origins-Recomp (MIT, Xenia
+> BSD) adds DLSS (Streamline), FSR 4 / 3.1, XeSS and frame generation on top of
+> Xenia's D3D12 renderer, the path FromDust already uses. Its code is
+> `xenia/src/xenia/gpu/d3d12/dao_upscale*.cc/.h` (6668 lines) plus hooks in
+> d3d12_command_processor, d3d12_render_target_cache and pipeline_cache. Motion
+> vectors: each opaque draw's vertex shader is re-run with stream output and
+> matched to the previous frame's draw (hash of VS ucode, PS, vertex fetch
+> address, vertex count; closest float constants), drawn into R16G16_FLOAT and
+> depth-tested. Jitter: viewport ndc_offset before system constants. Their
+> Xenia is close to ours (~960 differing lines in those five files, ignoring
+> line endings), so porting it is the fastest route to DLSS. The native
+> renderer below stays the long-term route for new lighting.
+
 Goal: replace the Xenia GPU translation (PM4 command stream → D3D12) with a
 renderer that draws the game's D3D calls directly, as UnleashedRecomp does.
 This would expose real draw calls, render targets and matrices, which DLSS
