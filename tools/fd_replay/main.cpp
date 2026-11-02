@@ -334,6 +334,7 @@ struct Surface
     uint32_t descriptor = 0;      // index in the Texture2D heap (resolved reads)
     std::map<uint32_t, std::pair<uint32_t, std::unique_ptr<RenderTextureView>>> views; // swizzle -> heap index, view
     bool shaderRead = false;      // texture currently in SHADER_READ
+    bool isDepth = false;         // depth surface: written as D32_FLOAT, read as R32_FLOAT
 };
 
 // A render target configuration of the frame (EDRAM color/depth bases + pitch).
@@ -341,7 +342,8 @@ struct Target
 {
     uint32_t width = 0, height = 0, count = 1, draws = 0;
     Surface rt[4];
-    std::unique_ptr<RenderTexture> depth;
+    Surface ds;                                // depth: R32_TYPELESS texture
+    std::unique_ptr<RenderTextureView> dsv;    // D32_FLOAT view for the framebuffer
     std::unique_ptr<RenderFramebuffer> framebuffer;
 };
 
@@ -563,13 +565,19 @@ int main(int argc, char** argv)
             colors[k] = rt.texture.get();
             list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(rt.texture.get(), RenderTextureLayout::COLOR_WRITE));
         }
-        t.depth = device->createTexture(RenderTextureDesc::DepthTarget(t.width, t.height, RenderFormat::D32_FLOAT));
+        // Depth as R32_TYPELESS: D32_FLOAT view to render, R32_FLOAT views to
+        // read it after a depth resolve (fog, lighting).
+        t.ds.isDepth = true;
+        t.ds.format = RenderFormat::R32_FLOAT;
+        t.ds.texture = device->createTexture(RenderTextureDesc::DepthTarget(t.width, t.height, RenderFormat::R32_TYPELESS));
+        t.dsv = t.ds.texture->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::D32_FLOAT));
         RenderFramebufferDesc fb;
         fb.colorAttachments = colors;
         fb.colorAttachmentsCount = t.count;
-        fb.depthAttachment = t.depth.get();
+        fb.depthAttachment = t.ds.texture.get();
+        fb.depthAttachmentView = t.dsv.get();
         t.framebuffer = device->createFramebuffer(fb);
-        list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(t.depth.get(), RenderTextureLayout::DEPTH_WRITE));
+        list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(t.ds.texture.get(), RenderTextureLayout::DEPTH_WRITE));
         list->setFramebuffer(t.framebuffer.get());
         for (uint32_t k = 0; k < t.count; ++k) list->clearColor(k, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
         // From Dust uses reversed depth (viewport Z scale -1, offset 1, GREATER_EQUAL).
@@ -662,9 +670,11 @@ int main(int argc, char** argv)
             // color copies (copy_src_select 0-3) are aliased for now.
             const uint32_t source = d.copyControl & 7; // copy_src_select: 0-3 color RT, 4 depth
             for (auto& [key, t] : targets)
-                if (std::get<0>(key) == d.copySurface && std::get<1>(key) == d.copyColor && std::get<5>(key) == d.copyDepth &&
-                    source < t.count && t.rt[source].texture)
-                    resolved[d.copyDest] = &t.rt[source];
+                if (std::get<0>(key) == d.copySurface && std::get<1>(key) == d.copyColor && std::get<5>(key) == d.copyDepth)
+                {
+                    if (source < t.count && t.rt[source].texture) resolved[d.copyDest] = &t.rt[source];
+                    else if (source == 4 && t.ds.texture) resolved[d.copyDest] = &t.ds;
+                }
             continue;
         }
         memcpy(vertexMap + vertexAt, d.vertices, d.vertexBytes);
@@ -700,8 +710,8 @@ int main(int argc, char** argv)
             }
             auto alias = d.bases[slot] ? resolved.find(d.bases[slot]) : resolved.end();
             Target& drawTarget = targetFor(d);
-            const bool own = alias != resolved.end() &&
-                std::any_of(std::begin(drawTarget.rt), std::end(drawTarget.rt), [&](const Surface& rt) { return &rt == alias->second; });
+            const bool own = alias != resolved.end() && (alias->second == &drawTarget.ds ||
+                std::any_of(std::begin(drawTarget.rt), std::end(drawTarget.rt), [&](const Surface& rt) { return &rt == alias->second; }));
             if (alias != resolved.end() && !own)
             {
                 // A resolved read sees the target through the fetch constant's
@@ -737,6 +747,11 @@ int main(int argc, char** argv)
                     list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.rt[k].texture.get(), RenderTextureLayout::COLOR_WRITE));
                     target.rt[k].shaderRead = false;
                 }
+            if (target.ds.shaderRead)
+            {
+                list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.ds.texture.get(), RenderTextureLayout::DEPTH_WRITE));
+                target.ds.shaderRead = false;
+            }
             if (current != &target)
             {
                 list->setFramebuffer(target.framebuffer.get());
