@@ -238,6 +238,19 @@ def expand_rects(vdata, element_count):
     return data, struct.pack("<%dH" % len(indices), *indices), len(indices)
 
 
+def scan_draw(commands):
+    """Fallback when packet parsing derails: the last type-3 DRAW_INDX /
+    DRAW_INDX_2 header whose packet fits in the block, by raw word scan."""
+    words = struct.unpack(">%dI" % (len(commands) // 4), commands[: len(commands) // 4 * 4])
+    for i in range(len(words) - 1, -1, -1):
+        h = words[i]
+        op, n = (h >> 8) & 0x7F, ((h >> 16) & 0x3FFF) + 1
+        if h >> 30 == 3 and op in (0x22, 0x36) and i + 1 + n <= len(words) and n <= 8:
+            p = words[i + 1:i + 1 + n]
+            return ("DRAW_INDX", p) if op == 0x22 else ("DRAW_INDX_2", (0,) + tuple(p))
+    return None
+
+
 def track_registers(regs, commands):
     """Apply a draw's type-0 register writes (commands start one word in)."""
     for name, payload in packets(commands[4:]):
@@ -304,7 +317,11 @@ def main():
             continue
         vs_obj = objs[0x3290][0]
         name = objects.get(vs_obj, (0, None))[1]
-        draw = next(((n, p) for n, p in packets(objs.get("commands", b"")[4:]) if n.startswith("DRAW_INDX") and not n.startswith("DRAW_INDX_")), None)
+        # DRAW_INDX: [viz query, initiator, index base, size]; DRAW_INDX_2 (auto-indexed
+        # rects of post passes): [initiator, ...], normalised to the same layout.
+        draw = next(((n, p if n.startswith("DRAW_INDX(") or n == "DRAW_INDX" else (0,) + tuple(p))
+                     for n, p in packets(objs.get("commands", b"")[4:])
+                     if n.split("(")[0] in ("DRAW_INDX", "DRAW_INDX_2")), None) or scan_draw(objs.get("commands", b"")[4:])
         source = (draw[1][1] >> 6) & 3 if draw and len(draw[1]) >= 2 else 3
         if not name or not draw or len(draw[1]) < 2 or source not in (0, 2) or (source == 0 and len(draw[1]) < 3):
             skipped["no vs/indexed draw"] = skipped.get("no vs/indexed draw", 0) + 1
