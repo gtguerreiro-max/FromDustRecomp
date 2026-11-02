@@ -196,6 +196,27 @@ unpatched microcode to build/shader_inits.bin. The game creates 557 shaders at
 startup (all of fxlist_360.fxl); 507 match one extracted container exactly by
 microcode, 50 by their longest identical prefix (32-256 bytes).
 
+## Decision: own renderer on plume (2026-11-02)
+
+Goal: better than the Xenia-based ports: no GPU emulation, DLSS through
+Streamline on D3D12, new lighting, and Vulkan for Steam Deck/Linux/Android.
+- RHI: plume (MIT; D3D12, Vulkan, Metal). Builds with our clang-cl toolchain;
+  its triangle example runs on D3D12 (`third_party/plume`, see patches/README).
+- Shaders: XenosRecomp DXIL/SPIR-V (all 554 compile).
+- Capture of state: hook the engine's D3D draws and read the device (layout
+  above), as NativeXRenderer (MIT, ReXGlue/DiligentCore/Vulkan) also does; it
+  is a design reference. UnleashedRecomp (GPL) is reading reference only.
+- EDRAM: not emulated. Render targets are host textures; resolves copy or
+  alias them.
+
+Milestones:
+1. Capture vertex/index buffer contents with the frame (offline data).
+2. `fd_replay`: load a capture, draw it with plume and the DXIL shaders, write
+   a PNG; compare with the Xenia screenshot of the same frame.
+3. Live: hook the draws in the game and draw natively instead of the PM4 path.
+4. Then DLSS/DLAA (motion vectors from previous-frame constants per draw),
+   SSAO/SSGI from the G-buffer, Vulkan build for Steam Deck.
+
 ## Next steps
 
 0. Find the D3D create functions (CreateVertexShader / CreatePixelShader /

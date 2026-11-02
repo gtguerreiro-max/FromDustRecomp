@@ -14,6 +14,10 @@ git -C XenosRecomp checkout 990d03b28a27b50277ee5d8d942e1c5f873869d1
 git -C XenosRecomp submodule update --init --recursive
 git -C XenosRecomp apply ../patches/xenosrecomp.patch
 
+git clone https://github.com/renderbag/plume third_party/plume
+git -C third_party/plume checkout b84a6cebb83aa052cf0690946e7c5de36fb0cfd1
+git -C third_party/plume submodule update --init --depth 1
+
 git clone https://github.com/xenia-canary/xenia-canary third_party/xenia
 git -C third_party/xenia checkout 96ce1ac47ee7646deac2a2c9c912351e8ff0edee
 git -C third_party/xenia submodule update --init --depth 1 \
