@@ -123,6 +123,7 @@ struct Draw
     uint32_t bases[32] = {};              // texture base address per fetch slot
     uint32_t swizzles[32] = {};           // fetch swizzle per slot
     uint32_t boolLoop[40] = {};           // registers 0x4900-0x4927
+    const uint8_t* vertexFetch = nullptr; // 32 uint4 g_VertexFetch descriptors (pulled vertex fetches)
     // "#resolve" records: EDRAM -> texture copy.
     bool resolve = false;
     uint32_t copyDest = 0, copyControl = 0, copySurface = 0, copyColor = 0, copyDepth = 0, copyDestInfo = 0;
@@ -131,7 +132,8 @@ struct Draw
 // Shared constants layout of the patched XenosRecomp (shader_common.h).
 constexpr uint32_t kSharedTextureIndex = 0;   // + dimension * 128 + slot * 4
 constexpr uint32_t kSharedSamplerIndex = 384; // + slot * 4
-constexpr uint32_t kSharedSize = 1024;
+constexpr uint32_t kSharedVertexFetch = 1024; // 32 uint4
+constexpr uint32_t kSharedSize = 2048;
 
 std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
 {
@@ -179,6 +181,7 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         for (uint32_t& b : d.bases) b = u32();
         for (uint32_t& w : d.swizzles) w = u32();
         for (uint32_t& r : d.boolLoop) r = u32();
+        d.vertexFetch = bytes(512);
         draws.push_back(d);
     }
     return draws;
@@ -380,6 +383,7 @@ int main(int argc, char** argv)
         {0, 4, RenderRootDescriptorType::CONSTANT_BUFFER},
         {1, 4, RenderRootDescriptorType::CONSTANT_BUFFER},
         {2, 4, RenderRootDescriptorType::CONSTANT_BUFFER},
+        {0, 5, RenderRootDescriptorType::SHADER_RESOURCE}, // g_VertexStreams (ByteAddressBuffer)
     };
     // Bindless heaps of XenosRecomp shaders: Texture2D[] space0, Texture3D[]
     // space1, TextureCube[] space2, SamplerState[] space3 (plume: set = space).
@@ -399,7 +403,7 @@ int main(int argc, char** argv)
     };
     RenderPipelineLayoutDesc layoutDesc;
     layoutDesc.rootDescriptorDescs = roots;
-    layoutDesc.rootDescriptorDescsCount = 3;
+    layoutDesc.rootDescriptorDescsCount = 4;
     layoutDesc.descriptorSetDescs = setDescs;
     layoutDesc.descriptorSetDescsCount = 4;
     layoutDesc.allowInputLayout = true;
@@ -447,6 +451,14 @@ int main(int argc, char** argv)
     // Per draw: 4096 bytes vertex constants, 4096 pixel constants, kSharedSize shared.
     constexpr uint32_t kPerDraw = 4096 + 4096 + kSharedSize;
     auto constantBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(kPerDraw * (draws.size() + 1), RenderBufferFlag::CONSTANT));
+    // Guest vertex streams read by pulled vertex fetches.
+    const std::vector<uint8_t> streamFile = ReadFile(dir + "/streams.bin");
+    auto streamBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer((std::max)(streamFile.size(), size_t(16))));
+    if (!streamFile.empty())
+    {
+        memcpy(streamBuffer->map(), streamFile.data(), streamFile.size());
+        streamBuffer->unmap();
+    }
     auto* vertexMap = static_cast<uint8_t*>(vertexBuffer->map());
     auto* indexMap = static_cast<uint8_t*>(indexBuffer->map());
     auto* constantMap = static_cast<uint8_t*>(constantBuffer->map());
@@ -689,6 +701,7 @@ int main(int argc, char** argv)
         const uint32_t booleans = (d.boolLoop[0] & 0xFFFF) | ((d.boolLoop[4] & 0xFFFF) << 16);
         memcpy(shared + 512, &booleans, 4);
         memcpy(shared + 544, &d.boolLoop[8], 32 * 4);
+        memcpy(shared + kSharedVertexFetch, d.vertexFetch, 512);
         for (uint32_t slot = 0; slot < 32; ++slot)
         {
             uint32_t index = d.slots[slot] >= 0 ? uint32_t(d.slots[slot]) : 0;
@@ -772,6 +785,7 @@ int main(int argc, char** argv)
             list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1)), 0);
             list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1) + 4096), 1);
             list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1) + 8192), 2);
+            list->setGraphicsRootDescriptor(RenderBufferReference(streamBuffer.get(), 0), 3);
             RenderVertexBufferView vertexView(RenderBufferReference(vertexBuffer.get(), vertexAt), d.vertexBytes);
             RenderInputSlot slot(0, d.stride);
             list->setVertexBuffers(0, &vertexView, 1, &slot);

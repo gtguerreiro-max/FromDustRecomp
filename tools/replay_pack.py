@@ -100,8 +100,10 @@ def hlsl_vfetches(name):
 
 
 def vertex_layout(code, name):
-    """(stride bytes, [(offset bytes, vfetch, semantic)]) for stream fetch 95, or
-    (0, []) when the shader's fetches cannot be matched or use other streams."""
+    """(stride bytes, [(offset bytes, vfetch, semantic)], [(ordinal, vfetch)]):
+    the input layout of stream fetch 95 and the fetches of other streams, which
+    the shader pulls from g_VertexStreams (their input elements get offset None,
+    zero data). (0, [], []) when the shader's fetches cannot be matched."""
     live, fetches = live_vfetches(code), hlsl_vfetches(name)
     # Pair each HLSL fetch with the live fetch writing the same register, in
     # order (the microcode scan can also match non-fetch instructions).
@@ -109,27 +111,57 @@ def vertex_layout(code, name):
     for reg, semantic in fetches:
         match = next((k for k, v in enumerate(live) if k not in used and v["dest_reg"] == reg), None)
         if match is None:
-            return 0, []
+            return 0, [], []
         used.add(match)
         pairs.append((live[match], semantic))
     if not pairs:
-        return 0, []
-    stride, elements = 0, {}
-    for v, semantic in pairs:
+        return 0, [], []
+    stride, elements, pulls = 0, {}, []
+    for ordinal, (v, semantic) in enumerate(pairs):
+        if os.environ.get("FD_PACK_DEBUG") and name in os.environ["FD_PACK_DEBUG"].split(","):
+            print("VS", name, semantic, "reg", v["dest_reg"], "src", v.get("src_reg"), "const", v["fetch_constant_index"], "off", v["offset"], "stride", v["stride"], "fmt", v["format"], "mini", v["is_mini_fetch"])
         if v["fetch_constant_index"] != 95:
-            return 0, []  # instancing / second stream: not supported yet
+            pulls.append((ordinal, v))
+            elements.setdefault(semantic, (None, v))
+            continue
         stride = stride or (v["stride"] if not v["is_mini_fetch"] else 0)
+        if elements.get(semantic, (0,))[0] is None:
+            del elements[semantic]
         elements.setdefault(semantic, (v["offset"] * 4, v))
-    return stride * 4, [(off, v, sem) for sem, (off, v) in elements.items()]
+    return stride * 4, [(off, v, sem) for sem, (off, v) in elements.items()], pulls
+
+
+def vertex_fetch_descriptors(pulls, device, buffers, streams, blob):
+    """32 uint4 g_VertexFetch descriptors (see XenosRecomp's shader_common.h):
+    pulled fetches read their stream from the streams blob (guest buffers with
+    dwords byte-swapped), appended once per guest address."""
+    desc = [(0, 0, 0, 0)] * 32
+    for ordinal, v in pulls:
+        if ordinal >= 32:
+            continue
+        fetch = struct.unpack_from(">2I", device, 0x480 + v["fetch_constant_index"] * 8)
+        address = fetch[0] & 0x1FFFFFFC
+        data = buffers.get(address)
+        if data is None:
+            continue
+        if address not in streams:
+            streams[address] = (len(blob), len(data))
+            blob += swap32(data) + bytes(-len(data) % 4)
+        base, size = streams[address]
+        flags = v["format"] | v["is_signed"] << 8 | (v["num_format"] & 1) << 9 | (v["exp_adjust"] & 63) << 10 | 1 << 31
+        desc[ordinal] = (base, v["stride"] * 4 | v["offset"] * 4 << 16, size, flags)
+    return b"".join(struct.pack("<4I", *d) for d in desc)
 
 
 def convert_element(data, offset, v):
     """One vertex element (big-endian guest bytes) -> 4 floats, like the vertex fetch unit."""
+    if offset is None:  # pulled by the shader: placeholder input
+        return bytes(16)
     code, n = COMPONENTS[v["format"]]
     size = struct.calcsize(code)
     raw = data[offset:offset + size * n]
-    if v["format"] == 6:  # 8_8_8_8 is one dword: components from its little end (Xenos order W Z Y X)
-        values = list(raw[::-1]) if len(raw) == 4 else [0] * 4
+    if v["format"] == 6:  # 8_8_8_8: components in memory order (skinning: weights, then bone indices)
+        values = list(raw) if len(raw) == 4 else [0] * 4
     else:
         values = list(struct.unpack(">%d%s" % (n, code), raw)) if len(raw) == size * n else [0] * n
     out = []
@@ -252,6 +284,7 @@ def main():
     open(os.path.join(OUT, "textures.rgba"), "wb").write(table)
     draws = [r for r in load(os.path.join(ROOT, "build", "frame_capture.bin"), True) if r[0][1] != 3]
     compiled, records, skipped = {}, [], {}
+    streams, blob = {}, bytearray()  # pulled vertex streams: address -> (blob offset, size)
     regs = {}
     for header, device, objs in draws:
         track_registers(regs, objs.get("commands", b""))
@@ -280,7 +313,7 @@ def main():
         indices = buffers.get(draw[1][2] & 0x1FFFFFFF) if source == 0 else b""
         vfetch = struct.unpack_from(">2I", device, 0x480 + 190 * 4)
         vertices = buffers.get(vfetch[0] & 0x1FFFFFFC)
-        stride, layout = vertex_layout(objs["vs_code"][1][0x40:], name)
+        stride, layout, pulls = vertex_layout(objs["vs_code"][1][0x40:], name)
         elements = [(off, v) for off, v, _ in layout]
         if indices is None or vertices is None or not stride or not elements or prim not in (4, 8):
             skipped["missing data/layout"] = skipped.get("missing data/layout", 0) + 1
@@ -301,8 +334,9 @@ def main():
             index32 = 1
             index_le = struct.pack("<%dI" % count, *range(count))
         constants = swap32(device[0x780:0x780 + 4096])
-        vdata = b"".join(convert_element(vertices, base + offset, v)
-                         for base in range(0, len(vertices) - stride + 1, stride) for offset, v in elements)
+        vdata = b"".join(convert_element(vertices, None if offset is None else base + offset, v)
+                         for base in range(0, len(vertices) - stride + 1, stride)
+                         for offset, v in elements)
         if prim == 8:  # rectangle list: expand the referenced vertices to triangles
             order = struct.unpack("<%d%s" % (len(index_le) // (4 if index32 else 2), "I" if index32 else "H"), index_le)
             size = 16 * len(elements)
@@ -338,7 +372,9 @@ def main():
         # Boolean (0x4900-0x4907: vertex 0x4900+, pixel 0x4904+) and loop
         # constants (0x4908-0x4927, vertex shader loops).
         rec += struct.pack("<40I", *(regs.get(r, 0) for r in range(0x4900, 0x4928)))
+        rec += vertex_fetch_descriptors(pulls, device, buffers, streams, blob)
         records.append(rec)
+    open(os.path.join(OUT, "streams.bin"), "wb").write(blob)
     with open(os.path.join(OUT, "replay.bin"), "wb") as f:
         f.write(struct.pack("<2I", 0x50524446, len(records)))
         for rec in records:
