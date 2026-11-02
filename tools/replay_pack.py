@@ -20,6 +20,7 @@ replay.bin (little-endian):
   then u32 ps name length, name (empty: no pixel shader, depth only),
   4096 bytes pixel shader constants (c0..c223, swapped, zero padded),
   then u32 x 32: texture base address per fetch slot (0 if none),
+  then u32 x 32: fetch swizzle per slot (4 x 3 bits: 0-3 XYZW, 4 zero, 5 one),
   then u32 x 40: registers 0x4900-0x4927 (boolean and loop constants).
 A record whose vs name is "#resolve" is an EDRAM -> texture copy instead:
   u32 RB_COPY_DEST_BASE, RB_COPY_CONTROL, RB_SURFACE_INFO, RB_COLOR_INFO,
@@ -299,6 +300,9 @@ def main():
             fetch = struct.unpack_from(">6I", device, 0x480 + slot * 24)
             bases.append(fetch[1] & 0x1FFFF000 if fetch[0] & 3 == 2 else 0)
         rec += struct.pack("<32I", *bases)
+        # Fetch swizzle per slot (texture fetch dword 3 bits 1-12).
+        rec += struct.pack("<32I", *((struct.unpack_from(">6I", device, 0x480 + slot * 24)[3] >> 1) & 0xFFF
+                                     for slot in range(32)))
         # Boolean (0x4900-0x4907: vertex 0x4900+, pixel 0x4904+) and loop
         # constants (0x4908-0x4927, vertex shader loops).
         rec += struct.pack("<40I", *(regs.get(r, 0) for r in range(0x4900, 0x4928)))

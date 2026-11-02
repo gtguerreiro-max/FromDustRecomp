@@ -120,6 +120,7 @@ struct Draw
     std::string ps;                       // empty: depth only
     const uint8_t* psConstants = nullptr; // 4096 bytes
     uint32_t bases[32] = {};              // texture base address per fetch slot
+    uint32_t swizzles[32] = {};           // fetch swizzle per slot
     uint32_t boolLoop[40] = {};           // registers 0x4900-0x4927
     // "#resolve" records: EDRAM -> texture copy.
     bool resolve = false;
@@ -175,6 +176,7 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         d.ps.assign(reinterpret_cast<const char*>(bytes(psLength)), psLength);
         d.psConstants = bytes(4096);
         for (uint32_t& b : d.bases) b = u32();
+        for (uint32_t& w : d.swizzles) w = u32();
         for (uint32_t& r : d.boolLoop) r = u32();
         draws.push_back(d);
     }
@@ -237,15 +239,78 @@ RenderBlendDesc Blend(uint32_t control, uint32_t mask)
     return b;
 }
 
+// xenos::ColorRenderTargetFormat (RB_COLOR_INFO bits 16-19) -> host format.
+// 16-bit and float formats keep their precision (k_16_16 as half float: the
+// Xenos fixed-point range is wider than unorm).
+RenderFormat ColorFormat(uint32_t colorInfo)
+{
+    switch ((colorInfo >> 16) & 0xF)
+    {
+    case 2: case 10: case 3: case 12: case 5: case 7: return RenderFormat::R16G16B16A16_FLOAT; // no 10-bit format in plume
+    case 4: case 6: return RenderFormat::R16G16_FLOAT;
+    case 14: return RenderFormat::R32_FLOAT;
+    case 15: return RenderFormat::R32G32_FLOAT;
+    default: return RenderFormat::R8G8B8A8_UNORM;
+    }
+}
+
+uint32_t FormatBytes(RenderFormat f)
+{
+    switch (f)
+    {
+    case RenderFormat::R16G16B16A16_FLOAT: case RenderFormat::R32G32_FLOAT: return 8;
+    default: return 4;
+    }
+}
+
+float HalfToFloat(uint16_t h)
+{
+    const uint32_t sign = (h >> 15) & 1, exponent = (h >> 10) & 0x1F, mantissa = h & 0x3FF;
+    float v = exponent == 0 ? std::ldexp(float(mantissa), -24)
+        : exponent == 31 ? 65504.0f : std::ldexp(float(mantissa | 0x400), int(exponent) - 25);
+    return sign ? -v : v;
+}
+
+// One pixel of a target as RGBA8 for the PNG (values clamped to 0-1).
+void ToRgba8(RenderFormat f, const uint8_t* src, uint8_t* dst)
+{
+    auto unit = [](float v) { return uint8_t(std::lround((std::clamp)(v, 0.0f, 1.0f) * 255.0f)); };
+    uint16_t h[4];
+    float x[2];
+    switch (f)
+    {
+    case RenderFormat::R16G16B16A16_FLOAT:
+        memcpy(h, src, 8);
+        for (int c = 0; c < 4; ++c) dst[c] = unit(HalfToFloat(h[c]));
+        break;
+    case RenderFormat::R16G16_FLOAT:
+        memcpy(h, src, 4);
+        dst[0] = unit(HalfToFloat(h[0])), dst[1] = unit(HalfToFloat(h[1])), dst[2] = 0, dst[3] = 255;
+        break;
+    case RenderFormat::R32_FLOAT:
+        memcpy(x, src, 4);
+        dst[0] = dst[1] = dst[2] = unit(x[0]), dst[3] = 255;
+        break;
+    case RenderFormat::R32G32_FLOAT:
+        memcpy(x, src, 8);
+        dst[0] = unit(x[0]), dst[1] = unit(x[1]), dst[2] = 0, dst[3] = 255;
+        break;
+    default:
+        memcpy(dst, src, 4);
+    }
+}
+
 // A render target configuration of the frame (EDRAM color/depth bases + pitch).
 struct Target
 {
     uint32_t width = 0, height = 0;
+    RenderFormat format = RenderFormat::R8G8B8A8_UNORM;
     std::unique_ptr<RenderTexture> color, depth;
     std::unique_ptr<RenderFramebuffer> framebuffer;
     std::unique_ptr<RenderBuffer> readback;
     uint32_t rowPitch = 0, draws = 0;
     uint32_t descriptor = 0;      // index in the Texture2D heap (resolved reads)
+    std::map<uint32_t, std::pair<uint32_t, std::unique_ptr<RenderTextureView>>> views; // swizzle -> heap index, view
     bool shaderRead = false;      // color texture currently in SHADER_READ
 };
 }
@@ -287,7 +352,7 @@ int main(int argc, char** argv)
     uint32_t textureCount = 0;
     if (textureFile.size() >= 4) memcpy(&textureCount, textureFile.data(), 4);
     // RenderDescriptorRange(type, binding, count).
-    constexpr uint32_t kMaxTargets = 64; // heap slots after the table for resolved targets
+    constexpr uint32_t kMaxTargets = 512; // heap slots after the table for resolved target views
     const RenderDescriptorRange textureRange(RenderDescriptorRangeType::TEXTURE, 0, textureCount + kMaxTargets);
     const RenderDescriptorRange emptyRange(RenderDescriptorRangeType::TEXTURE, 0, 1);
     const RenderDescriptorRange samplerRange(RenderDescriptorRangeType::SAMPLER, 0, 1);
@@ -421,7 +486,8 @@ int main(int argc, char** argv)
         }
         t.width = (std::clamp)(t.width, 1u, 4096u);
         t.height = (std::clamp)(t.height, 1u, 4096u);
-        t.color = device->createTexture(RenderTextureDesc::ColorTarget(t.width, t.height, RenderFormat::R8G8B8A8_UNORM));
+        t.format = ColorFormat(d.regs[RB_COLOR_INFO]);
+        t.color = device->createTexture(RenderTextureDesc::ColorTarget(t.width, t.height, t.format));
         t.descriptor = textureCount + uint32_t((std::min)(targets.size() - 1, size_t(kMaxTargets - 1)));
         sets[0]->setTexture(t.descriptor, t.color.get(), RenderTextureLayout::SHADER_READ);
         t.depth = device->createTexture(RenderTextureDesc::DepthTarget(t.width, t.height, RenderFormat::D32_FLOAT));
@@ -431,7 +497,7 @@ int main(int argc, char** argv)
         fb.colorAttachmentsCount = 1;
         fb.depthAttachment = t.depth.get();
         t.framebuffer = device->createFramebuffer(fb);
-        t.rowPitch = (t.width * 4 + 255) & ~255u;
+        t.rowPitch = (t.width * FormatBytes(t.format) + 255) & ~255u;
         t.readback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(t.rowPitch) * t.height));
         list->barriers(RenderBarrierStage::GRAPHICS, {RenderTextureBarrier(t.color.get(), RenderTextureLayout::COLOR_WRITE),
             RenderTextureBarrier(t.depth.get(), RenderTextureLayout::DEPTH_WRITE)});
@@ -448,7 +514,8 @@ int main(int argc, char** argv)
     auto pipelineFor = [&](const Draw& d) -> RenderPipeline* {
         const uint32_t depthControl = d.regs[RB_DEPTHCONTROL], mode = d.regs[PA_SU_SC_MODE_CNTL];
         std::string key = d.vs + "|" + d.ps + "|" + std::to_string(d.stride) + "|" + std::to_string(depthControl & 0x76) + "|" + std::to_string(mode & 7) +
-            "|" + std::to_string(d.regs[RB_BLENDCONTROL0]) + "|" + std::to_string(d.regs[RB_COLOR_MASK] & 0xF);
+            "|" + std::to_string(d.regs[RB_BLENDCONTROL0]) + "|" + std::to_string(d.regs[RB_COLOR_MASK] & 0xF) +
+            "|" + std::to_string(int(ColorFormat(d.regs[RB_COLOR_INFO])));
         for (const auto& s : d.semantics) key += "|" + s;
         auto it = pipelines.find(key);
         if (it != pipelines.end()) return it->second.second.get();
@@ -483,7 +550,7 @@ int main(int argc, char** argv)
         desc.vertexShader = vs.get();
         // FD_REPLAY_DEBUG_PS=1 keeps the depth-colour debug shader.
         desc.pixelShader = getenv("FD_REPLAY_DEBUG_PS") ? pixelShader.get() : ps;
-        desc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
+        desc.renderTargetFormat[0] = ColorFormat(d.regs[RB_COLOR_INFO]);
         desc.renderTargetBlend[0] = Blend(d.regs[RB_BLENDCONTROL0], d.regs[RB_COLOR_MASK]);
         desc.renderTargetCount = 1;
         // RB_DEPTHCONTROL: z_enable bit 1, z_write bit 2, zfunc bits 4-6.
@@ -508,6 +575,7 @@ int main(int argc, char** argv)
     const Target* current = nullptr;
     std::map<uint32_t, Target*> resolved; // texture base address -> render target copied there
     uint32_t aliasHits = 0;
+    uint32_t nextView = textureCount + 64; // first 64 slots: one plain view per target
     for (size_t i = 0; i < draws.size(); ++i)
     {
         const Draw& d = draws[i];
@@ -538,7 +606,22 @@ int main(int argc, char** argv)
             auto alias = d.bases[slot] ? resolved.find(d.bases[slot]) : resolved.end();
             if (alias != resolved.end() && alias->second != &targetFor(d))
             {
-                index = alias->second->descriptor;
+                // A resolved read sees the target through the fetch constant's
+                // swizzle (component i of the result = target channel swizzle[i]).
+                Target& source = *alias->second;
+                auto view = source.views.find(d.swizzles[slot]);
+                if (view == source.views.end() && nextView < textureCount + kMaxTargets)
+                {
+                    static const RenderSwizzle channel[] = {RenderSwizzle::R, RenderSwizzle::G, RenderSwizzle::B,
+                        RenderSwizzle::A, RenderSwizzle::ZERO, RenderSwizzle::ONE, RenderSwizzle::ZERO, RenderSwizzle::ZERO};
+                    RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(source.format);
+                    const uint32_t w = d.swizzles[slot];
+                    viewDesc.componentMapping = RenderComponentMapping(channel[w & 7], channel[(w >> 3) & 7], channel[(w >> 6) & 7], channel[(w >> 9) & 7]);
+                    auto textureView = source.color->createTextureView(viewDesc);
+                    sets[0]->setTexture(nextView, source.color.get(), RenderTextureLayout::SHADER_READ, textureView.get());
+                    view = source.views.emplace(w, std::make_pair(nextView++, std::move(textureView))).first;
+                }
+                index = view != source.views.end() ? view->second.first : alias->second->descriptor;
                 ++aliasHits;
                 if (!alias->second->shaderRead)
                 {
@@ -595,7 +678,7 @@ int main(int argc, char** argv)
         list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(t.color.get(), RenderTextureLayout::COPY_SOURCE));
         t.shaderRead = false;
         list->copyTextureRegion(
-            RenderTextureCopyLocation::PlacedFootprint(t.readback.get(), RenderFormat::R8G8B8A8_UNORM, t.width, t.height, 1, t.rowPitch / 4),
+            RenderTextureCopyLocation::PlacedFootprint(t.readback.get(), t.format, t.width, t.height, 1, t.rowPitch / FormatBytes(t.format)),
             RenderTextureCopyLocation::Subresource(t.color.get()));
     }
     list->end();
@@ -611,7 +694,11 @@ int main(int argc, char** argv)
     {
         const std::string path = dir + "/target_" + std::to_string(n++) + ".png";
         const auto* pixels = static_cast<const uint8_t*>(t.readback->map());
-        stbi_write_png(path.c_str(), t.width, t.height, 4, pixels, t.rowPitch);
+        std::vector<uint8_t> rgba(size_t(t.width) * t.height * 4);
+        for (uint32_t y = 0; y < t.height; ++y)
+            for (uint32_t x = 0; x < t.width; ++x)
+                ToRgba8(t.format, pixels + size_t(y) * t.rowPitch + size_t(x) * FormatBytes(t.format), &rgba[(size_t(y) * t.width + x) * 4]);
+        stbi_write_png(path.c_str(), t.width, t.height, 4, rgba.data(), t.width * 4);
         t.readback->unmap();
         printf("%s: %ux%u, %u draws (surface %08X color %08X depth %08X)\n", path.c_str(), t.width, t.height, t.draws,
             std::get<0>(key), std::get<1>(key), std::get<2>(key));
