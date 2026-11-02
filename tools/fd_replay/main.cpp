@@ -687,6 +687,7 @@ int main(int argc, char** argv)
         desc.renderTargetCount = 1;
         desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
         packPipeline = device->createGraphicsPipeline(desc);
+        fprintf(stderr, "fd_replay: depth pack pipeline %s (vs %zu bytes, ps %zu bytes)\n", packPipeline && static_cast<D3D12GraphicsPipeline*>(packPipeline.get())->d3d ? "ok" : "FAILED", packVsCode.size(), packPsCode.size());
     }
     constexpr uint32_t kMaxPacks = 64;
     auto packConstants = device->createBuffer(RenderBufferDesc::UploadBuffer(256 * kMaxPacks, RenderBufferFlag::CONSTANT));
@@ -758,6 +759,7 @@ int main(int argc, char** argv)
                         current = nullptr;
                         resolved[d.copyDest] = &p->surface;
                         resolvedSwap[d.copyDest] = false;
+                        if (getenv("FD_REPLAY_TRACE")) fprintf(stderr, "packed depth -> %08X (%ux%u, float %u)\n", d.copyDest, t.width, t.height, (d.copyDepth >> 16) & 1);
                         packed.push_back(std::move(p));
                     }
                     else if (source == 4 && t.ds.texture) resolved[d.copyDest] = &t.ds;
@@ -779,9 +781,16 @@ int main(int argc, char** argv)
         memcpy(shared + kSharedVertexFetch, d.vertexFetch, 512);
         // fdFetchScale (1536 + slot * 4): 1, or for a render target read in
         // place of its biased copy, 2^(copy bias + fetch exp_adjust).
+        // FD_ZERO_SLOTS=<ps>:<slot>[,<slot>...]: debug, zero those fetches of that pixel shader.
+        static const char* zeroSlots = getenv("FD_ZERO_SLOTS");
         for (uint32_t slot = 0; slot < 32; ++slot)
         {
-            const float one = 1.0f;
+            float one = 1.0f;
+            if (zeroSlots && d.ps == std::string(zeroSlots).substr(0, std::string(zeroSlots).find(':')))
+            {
+                const std::string list = "," + std::string(zeroSlots).substr(std::string(zeroSlots).find(':') + 1) + ",";
+                if (list.find("," + std::to_string(slot) + ",") != std::string::npos) one = 0.0f;
+            }
             memcpy(shared + kSharedFetchScale + slot * 4, &one, 4);
         }
         for (uint32_t slot = 0; slot < 32; ++slot)
@@ -830,8 +839,8 @@ int main(int argc, char** argv)
                 }
                 index = view != source.views.end() ? view->second.first : alias->second->descriptor;
                 ++aliasHits;
-                if (getenv("FD_REPLAY_TRACE") && d.ps == "130")
-                    fprintf(stderr, "final slot %u base %08X swz %o swap %d bias %d exp %d fmt %d\n", slot, alias->first,
+                if (getenv("FD_TRACE_PS") && ("," + std::string(getenv("FD_TRACE_PS")) + ",").find("," + d.ps + ",") != std::string::npos)
+                    fprintf(stderr, "ps %s draw %u slot %u base %08X swz %o swap %d bias %d exp %d fmt %d\n", d.ps.c_str(), i, slot, alias->first,
                         d.swizzles[slot], int(resolvedSwap[alias->first]), resolvedBias[alias->first], d.expAdjust[slot], int(source.format));
                 if (const int32_t bias = resolvedBias[alias->first])
                 {
