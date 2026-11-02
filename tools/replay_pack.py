@@ -14,7 +14,12 @@ replay.bin (little-endian):
   u32 element count, per element: u32 semantic length, semantic (e.g. POSITION0),
   4096 bytes vertex shader constants (float4 c0..c255, swapped),
   u32 index32, then u32 x STATE_REGISTERS (current values of those GPU
-  registers at the draw, tracked from every draw's register writes).
+  registers at the draw, tracked from every draw's register writes),
+  then i32 x 32: texture table index per fetch slot (0-15 pixel, 16-31
+  vertex samplers), -1 if none.
+
+textures.rgba: u32 count, per texture u32 width, u32 height, RGBA8 pixels
+(decoded by xenos_texture.py; unsupported formats become 1x1 white).
 """
 import os, struct, subprocess, sys
 
@@ -22,6 +27,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from analyze_capture import load
 from pm4_decode import packets
 from xenos_vfetch import decode_vfetch
+from xenos_fetch import decode_texture_fetch
+import xenos_texture
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DXC = os.path.join(ROOT, "XenosRecomp", "thirdparty", "dxc-bin", "bin", "x64", "dxc.exe")
@@ -147,6 +154,30 @@ def track_registers(regs, commands):
                 regs[base + k] = value
 
 
+def load_textures(path):
+    """Captured textures (frame_capture.cpp): base address -> (fetch words, bytes)."""
+    data, i, out = open(path, "rb").read(), 0, {}
+    while i < len(data):
+        fetch = list(struct.unpack_from("<6I", data, i + 4))
+        length = struct.unpack_from("<I", data, i + 28)[0]
+        out[fetch[1] & 0xFFFFF000] = (fetch, data[i + 32:i + 32 + length])
+        i += 32 + length
+    return out
+
+
+def build_texture_table(textures):
+    """Decode every captured texture to RGBA8; returns (base -> index, table bytes)."""
+    index, blobs = {}, []
+    for base, (fetch, raw) in textures.items():
+        try:
+            width, height, rgba = xenos_texture.decode_texture(raw, decode_texture_fetch(fetch))
+        except Exception:
+            width, height, rgba = 1, 1, bytes([255] * 4)
+        index[base] = len(blobs)
+        blobs.append(struct.pack("<2I", width, height) + bytes(rgba))
+    return index, struct.pack("<I", len(blobs)) + b"".join(blobs)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     open(os.path.join(OUT, "debug.ps.hlsl"), "w").write(DEBUG_PS)
@@ -156,6 +187,8 @@ def main():
             for p in os.listdir(os.path.join(ROOT, "build", "shaders_split")) if p.endswith(".bin")}
     objects = shader_objects(os.path.join(ROOT, "build", "shader_inits.bin"), bins)
     buffers = load_buffers(os.path.join(ROOT, "build", "buffers.bin"))
+    texture_index, table = build_texture_table(load_textures(os.path.join(ROOT, "build", "textures.bin")))
+    open(os.path.join(OUT, "textures.rgba"), "wb").write(table)
     draws = [r for r in load(os.path.join(ROOT, "build", "frame_capture.bin"), True) if r[0][1] != 3]
     compiled, records, skipped = {}, [], {}
     regs = {}
@@ -177,10 +210,6 @@ def main():
         if indices is None or vertices is None or not stride or not elements or prim != 4:
             skipped["missing data/layout"] = skipped.get("missing data/layout", 0) + 1
             continue
-        # No texture bindings yet: skip vertex shaders that fetch textures (terrain heightfield).
-        if uses_textures(name):
-            skipped["vs fetches textures"] = skipped.get("vs fetches textures", 0) + 1
-            continue
         semantics = hlsl_inputs(name)
         if any(v["format"] not in COMPONENTS for _, v in elements) or len(semantics) != len(elements):
             skipped["vertex format/semantics"] = skipped.get("vertex format/semantics", 0) + 1
@@ -201,6 +230,11 @@ def main():
         rec += struct.pack("<I", len(semantics)) + b"".join(struct.pack("<I", len(x)) + x.encode() for x in semantics)
         rec += constants + struct.pack("<I", index32)
         rec += struct.pack("<%dI" % len(STATE_REGISTERS), *(regs.get(r, 0) for r in STATE_REGISTERS))
+        slots = []
+        for slot in range(32):
+            fetch = struct.unpack_from(">6I", device, 0x480 + slot * 24)
+            slots.append(texture_index.get(fetch[1] & 0xFFFFF000, -1) if fetch[0] & 3 == 2 else -1)
+        rec += struct.pack("<32i", *slots)
         records.append(rec)
     with open(os.path.join(OUT, "replay.bin"), "wb") as f:
         f.write(struct.pack("<2I", 0x50524446, len(records)))

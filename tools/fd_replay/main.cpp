@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "plume_render_interface.h"
+#include "plume_d3d12.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -25,10 +26,55 @@ namespace plume
 extern std::unique_ptr<RenderInterface> CreateD3D12Interface();
 }
 
+// D3D12 Agility SDK (third_party/agility, DLLs in D3D12\ next to the exe): gives
+// the debug layer used by FD_REPLAY_DEBUG without installing Graphics Tools.
+extern "C" {
+__declspec(dllexport) extern const unsigned int D3D12SDKVersion = 614;
+__declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
+}
+
 using namespace plume;
 
 namespace
 {
+// FD_REPLAY_DEBUG=1: D3D12 debug layer, messages printed after pipeline creation.
+ID3D12InfoQueue* g_infoQueue = nullptr;
+
+void EnableDebugLayer()
+{
+    if (!getenv("FD_REPLAY_DEBUG")) return;
+    ID3D12Debug* debug = nullptr;
+    const HRESULT hr = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
+    if (SUCCEEDED(hr)) debug->EnableDebugLayer();
+}
+
+void AttachInfoQueue(RenderDevice* device)
+{
+    if (!getenv("FD_REPLAY_DEBUG")) return;
+    auto* d3d = static_cast<D3D12Device*>(device)->d3d;
+    d3d->QueryInterface(IID_PPV_ARGS(&g_infoQueue));
+    if (g_infoQueue)
+    {
+        g_infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
+        g_infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
+    }
+}
+
+void PrintDebugMessages(const char* context)
+{
+    if (!g_infoQueue) return;
+    for (UINT64 i = 0, n = g_infoQueue->GetNumStoredMessages(); i < n; ++i)
+    {
+        SIZE_T size = 0;
+        g_infoQueue->GetMessage(i, nullptr, &size);
+        std::vector<char> buffer(size);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(buffer.data());
+        if (SUCCEEDED(g_infoQueue->GetMessage(i, message, &size)) && message->Severity <= D3D12_MESSAGE_SEVERITY_WARNING)
+            fprintf(stderr, "[d3d12 %s] %s\n", context, message->pDescription);
+    }
+    g_infoQueue->ClearStoredMessages();
+}
+
 // Order of the per-draw registers written by replay_pack.py (STATE_REGISTERS).
 enum Reg
 {
@@ -70,7 +116,13 @@ struct Draw
     std::vector<std::string> semantics;
     const uint8_t* constants = nullptr; // 4096 bytes
     uint32_t regs[kRegCount] = {};
+    int32_t slots[32] = {}; // texture table index per fetch slot, -1 if none
 };
+
+// Shared constants layout of the patched XenosRecomp (shader_common.h).
+constexpr uint32_t kSharedTextureIndex = 0;   // + dimension * 128 + slot * 4
+constexpr uint32_t kSharedSamplerIndex = 384; // + slot * 4
+constexpr uint32_t kSharedSize = 1024;
 
 std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
 {
@@ -99,6 +151,7 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         d.constants = bytes(4096);
         d.index32 = u32();
         for (uint32_t& r : d.regs) r = u32();
+        for (int32_t& slot : d.slots) slot = int32_t(u32());
         draws.push_back(d);
     }
     return draws;
@@ -137,8 +190,10 @@ int main(int argc, char** argv)
     const std::vector<uint8_t> file = ReadFile(dir + "/replay.bin");
     const std::vector<Draw> draws = ParseReplay(file);
 
+    EnableDebugLayer();
     auto api = CreateD3D12Interface();
     auto device = api ? api->createDevice() : nullptr;
+    if (device) AttachInfoQueue(device.get());
     if (!device)
     {
         fprintf(stderr, "fd_replay: D3D12 initialization failed\n");
@@ -155,24 +210,116 @@ int main(int argc, char** argv)
         {1, 4, RenderRootDescriptorType::CONSTANT_BUFFER},
         {2, 4, RenderRootDescriptorType::CONSTANT_BUFFER},
     };
+    // Bindless heaps of XenosRecomp shaders: Texture2D[] space0, Texture3D[]
+    // space1, TextureCube[] space2, SamplerState[] space3 (plume: set = space).
+    const std::vector<uint8_t> textureFile = ReadFile(dir + "/textures.rgba");
+    uint32_t textureCount = 0;
+    if (textureFile.size() >= 4) memcpy(&textureCount, textureFile.data(), 4);
+    // RenderDescriptorRange(type, binding, count).
+    const RenderDescriptorRange textureRange(RenderDescriptorRangeType::TEXTURE, 0, (std::max)(textureCount, 1u));
+    const RenderDescriptorRange emptyRange(RenderDescriptorRangeType::TEXTURE, 0, 1);
+    const RenderDescriptorRange samplerRange(RenderDescriptorRangeType::SAMPLER, 0, 1);
+    const RenderDescriptorSetDesc setDescs[] = {
+        RenderDescriptorSetDesc(&textureRange, 1, true, (std::max)(textureCount, 1u)),
+        RenderDescriptorSetDesc(&emptyRange, 1, true, 1),
+        RenderDescriptorSetDesc(&emptyRange, 1, true, 1),
+        RenderDescriptorSetDesc(&samplerRange, 1, true, 1),
+    };
     RenderPipelineLayoutDesc layoutDesc;
     layoutDesc.rootDescriptorDescs = roots;
     layoutDesc.rootDescriptorDescsCount = 3;
+    layoutDesc.descriptorSetDescs = setDescs;
+    layoutDesc.descriptorSetDescsCount = 4;
     layoutDesc.allowInputLayout = true;
     auto layout = device->createPipelineLayout(layoutDesc);
+    std::unique_ptr<RenderDescriptorSet> sets[4];
+    for (int i = 0; i < 4; ++i) sets[i] = device->createDescriptorSet(setDescs[i]);
+    auto sampler = device->createSampler(RenderSamplerDesc());
+    sets[3]->setSampler(0, sampler.get());
     const std::vector<uint8_t> psCode = ReadFile(dir + "/debug.ps.dxil");
     auto pixelShader = device->createShader(psCode.data(), psCode.size(), "main", RenderShaderFormat::DXIL);
+
+    // FD_REPLAY_TEST=1: try pipelines with the test shaders in <dir>/tests.
+    if (getenv("FD_REPLAY_TEST"))
+    {
+        for (const char* name : {"a", "b", "c"})
+        {
+            const std::vector<uint8_t> code = ReadFile(dir + "/tests/" + name + ".vs.dxil");
+            auto vs = device->createShader(code.data(), code.size(), "main", RenderShaderFormat::DXIL);
+            RenderInputElement element("POSITION", 0, 0, RenderFormat::R32G32B32A32_FLOAT, 0, 0);
+            RenderInputSlot slot(0, 16);
+            RenderGraphicsPipelineDesc desc;
+            desc.inputSlots = &slot;
+            desc.inputSlotsCount = 1;
+            desc.inputElements = &element;
+            desc.inputElementsCount = 1;
+            desc.pipelineLayout = layout.get();
+            desc.vertexShader = vs.get();
+            desc.pixelShader = pixelShader.get();
+            desc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
+            desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            desc.renderTargetCount = 1;
+            desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+            auto pipeline = device->createGraphicsPipeline(desc);
+            const bool ok = pipeline && static_cast<D3D12GraphicsPipeline*>(pipeline.get())->d3d;
+            fprintf(stderr, "[test] %s: %s\n", name, ok ? "accepted" : "REJECTED");
+        }
+        return 0;
+    }
 
     // All per-draw data in a few upload buffers.
     size_t vertexTotal = 16, indexTotal = 16;
     for (const Draw& d : draws) vertexTotal += d.vertexBytes, indexTotal += d.indexBytes;
     auto vertexBuffer = device->createBuffer(RenderBufferDesc::VertexBuffer(vertexTotal, RenderHeapType::UPLOAD));
     auto indexBuffer = device->createBuffer(RenderBufferDesc::IndexBuffer(indexTotal, RenderHeapType::UPLOAD));
-    auto constantBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(4096 * (draws.size() + 1), RenderBufferFlag::CONSTANT));
+    // Per draw: 4096 bytes vertex constants, then kSharedSize shared constants.
+    constexpr uint32_t kPerDraw = 4096 + kSharedSize;
+    auto constantBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(kPerDraw * (draws.size() + 1), RenderBufferFlag::CONSTANT));
     auto* vertexMap = static_cast<uint8_t*>(vertexBuffer->map());
     auto* indexMap = static_cast<uint8_t*>(indexBuffer->map());
     auto* constantMap = static_cast<uint8_t*>(constantBuffer->map());
-    memset(constantMap, 0, 4096); // shared and pixel constants: zero for now
+    memset(constantMap, 0, kPerDraw); // pixel constants: zero for now
+
+    // Textures: RGBA8, uploaded through one staging buffer.
+    std::vector<std::unique_ptr<RenderTexture>> textures;
+    std::unique_ptr<RenderBuffer> staging;
+    {
+        size_t at = 4, stagingSize = 0;
+        std::vector<std::tuple<uint32_t, uint32_t, size_t, size_t>> layoutInfo; // w, h, file offset, staging offset
+        for (uint32_t i = 0; i < textureCount; ++i)
+        {
+            uint32_t w, h;
+            memcpy(&w, textureFile.data() + at, 4);
+            memcpy(&h, textureFile.data() + at + 4, 4);
+            layoutInfo.emplace_back(w, h, at + 8, stagingSize);
+            stagingSize += size_t((w * 4 + 255) & ~255u) * h;
+            stagingSize = (stagingSize + 511) & ~size_t(511);
+            at += 8 + size_t(w) * h * 4;
+        }
+        staging = device->createBuffer(RenderBufferDesc::UploadBuffer((std::max)(stagingSize, size_t(16))));
+        auto* map = static_cast<uint8_t*>(staging->map());
+        for (const auto& [w, h, from, to] : layoutInfo)
+        {
+            const uint32_t pitch = (w * 4 + 255) & ~255u;
+            for (uint32_t y = 0; y < h; ++y) memcpy(map + to + size_t(y) * pitch, textureFile.data() + from + size_t(y) * w * 4, w * 4);
+        }
+        staging->unmap();
+        list->begin();
+        for (uint32_t i = 0; i < textureCount; ++i)
+        {
+            const auto& [w, h, from, to] = layoutInfo[i];
+            textures.push_back(device->createTexture(RenderTextureDesc::Texture2D(w, h, 1, RenderFormat::R8G8B8A8_UNORM)));
+            list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(textures.back().get(), RenderTextureLayout::COPY_DEST));
+            list->copyTextureRegion(RenderTextureCopyLocation::Subresource(textures.back().get()),
+                RenderTextureCopyLocation::PlacedFootprint(staging.get(), RenderFormat::R8G8B8A8_UNORM, w, h, 1, ((w * 4 + 255) & ~255u) / 4, to));
+            list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(textures.back().get(), RenderTextureLayout::SHADER_READ));
+            sets[0]->setTexture(i, textures.back().get(), RenderTextureLayout::SHADER_READ);
+        }
+        list->end();
+        const RenderCommandList* uploads = list.get();
+        queue->executeCommandLists(&uploads, 1, nullptr, 0, nullptr, 0, fence.get());
+        queue->waitForCommandFence(fence.get());
+    }
 
     // Targets keyed by (surface info, color info, depth info).
     std::map<std::tuple<uint32_t, uint32_t, uint32_t>, Target> targets;
@@ -251,6 +398,8 @@ int main(int argc, char** argv)
         desc.cullMode = cullBack ? RenderCullMode::BACK : cullFront ? RenderCullMode::FRONT : RenderCullMode::NONE;
         desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
         if (vs) pipeline = device->createGraphicsPipeline(desc);
+        PrintDebugMessages(d.vs.c_str());
+        if (pipeline && !static_cast<D3D12GraphicsPipeline*>(pipeline.get())->d3d) { fprintf(stderr, "fd_replay: D3D12 rejected the pipeline for VS %s\n", d.vs.c_str()); pipeline.reset(); }
         if (!pipeline) fprintf(stderr, "fd_replay: no pipeline for VS %s\n", d.vs.c_str());
         return pipeline.get();
     };
@@ -263,7 +412,15 @@ int main(int argc, char** argv)
         const Draw& d = draws[i];
         memcpy(vertexMap + vertexAt, d.vertices, d.vertexBytes);
         memcpy(indexMap + indexAt, d.indices, d.indexBytes);
-        memcpy(constantMap + 4096 * (i + 1), d.constants, 4096);
+        uint8_t* drawConstants = constantMap + kPerDraw * (i + 1);
+        memcpy(drawConstants, d.constants, 4096);
+        uint8_t* shared = drawConstants + 4096;
+        memset(shared, 0, kSharedSize);
+        for (uint32_t slot = 0; slot < 32; ++slot)
+        {
+            const uint32_t index = d.slots[slot] >= 0 ? uint32_t(d.slots[slot]) : 0;
+            memcpy(shared + kSharedTextureIndex + slot * 4, &index, 4); // 2D heap; sampler index stays 0
+        }
         Target& target = targetFor(d);
         RenderPipeline* pipeline = pipelineFor(d);
         if (pipeline && d.primitive == 4)
@@ -272,6 +429,7 @@ int main(int argc, char** argv)
             {
                 list->setFramebuffer(target.framebuffer.get());
                 list->setGraphicsPipelineLayout(layout.get());
+                for (uint32_t set = 0; set < 4; ++set) list->setGraphicsDescriptorSet(sets[set].get(), set);
                 current = &target;
             }
             // Hardware viewport transform (PA_CL_VPORT_*): NDC -> pixels.
@@ -284,9 +442,9 @@ int main(int argc, char** argv)
             list->setViewports(viewport);
             list->setScissors(RenderRect(0, 0, target.width, target.height));
             list->setPipeline(pipeline);
-            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 4096 * (i + 1)), 0);
+            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1)), 0);
             list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 0), 1);
-            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), 0), 2);
+            list->setGraphicsRootDescriptor(RenderBufferReference(constantBuffer.get(), kPerDraw * (i + 1) + 4096), 2);
             RenderVertexBufferView vertexView(RenderBufferReference(vertexBuffer.get(), vertexAt), d.vertexBytes);
             RenderInputSlot slot(0, d.stride);
             list->setVertexBuffers(0, &vertexView, 1, &slot);
