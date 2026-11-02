@@ -135,6 +135,61 @@ void RecordTextures(uint32_t device)
     }
 }
 
+// Vertex and index buffer contents, once per (address, length) per frame, to
+// buffers.bin: u32 'FDBF', u32 physical address, u32 length, guest bytes.
+std::vector<std::pair<uint32_t, uint32_t>> g_dumpedBuffers;
+uint32_t g_indexDraws = 0;
+FILE* g_bufferFile = nullptr;
+
+void DumpBuffer(uint32_t physical, uint32_t length)
+{
+    physical &= 0x1FFFFFFF;
+    if (!length || length > (32u << 20) || physical + length > 0x20000000) return;
+    const std::pair key{physical, length};
+    if (std::find(g_dumpedBuffers.begin(), g_dumpedBuffers.end(), key) != g_dumpedBuffers.end()) return;
+    g_dumpedBuffers.push_back(key);
+    if (!g_bufferFile) g_bufferFile = fopen("buffers.bin", "wb");
+    if (!g_bufferFile) return;
+    const uint32_t head[3] = {0x46444246, physical, length};
+    fwrite(head, sizeof(head), 1, g_bufferFile);
+    fwrite(mem::Translate(mem::kPhysicalBase | physical), length, 1, g_bufferFile);
+}
+
+// Vertex fetch constants in the device copy of registers 0x4800+. Each 6-dword
+// slot holds one texture fetch (type 2) or three vertex fetches (type 3).
+void RecordVertexBuffers(uint32_t device)
+{
+    for (uint32_t slot = 0; slot < 32; ++slot)
+    {
+        const uint32_t base = device + 0x480 + slot * 24;
+        if ((mem::Read32(base) & 3) == 2) continue; // texture slot
+        for (uint32_t pair = 0; pair < 3; ++pair)
+        {
+            const uint32_t word0 = mem::Read32(base + pair * 8), word1 = mem::Read32(base + pair * 8 + 4);
+            if ((word0 & 3) == 3) DumpBuffer(word0 & ~3u, ((word1 >> 2) & 0xFFFFFF) * 4);
+        }
+    }
+}
+
+// Index buffers: DRAW_INDX packets in the draw's commands (type 3, opcode
+// 0x22): payload [viz, count << 16 | flags, index base, index size].
+void RecordIndexBuffers(const uint8_t* commands, uint32_t length)
+{
+    for (uint32_t i = 0; i + 4 <= length;)
+    {
+        const uint32_t header = __builtin_bswap32(*reinterpret_cast<const uint32_t*>(commands + i));
+        const uint32_t type = header >> 30, count = ((header >> 16) & 0x3FFF) + 1;
+        if (type == 3 && ((header >> 8) & 0x7F) == 0x22 && count >= 4 && i + 20 <= length)
+        {
+            const auto word = [&](uint32_t n) { return __builtin_bswap32(*reinterpret_cast<const uint32_t*>(commands + i + 4 + n * 4)); };
+            const uint32_t indices = word(1) >> 16;
+            const bool index32 = (word(1) >> 11) & 1, indexed = ((word(1) >> 6) & 3) == 0;
+            if (indexed) DumpBuffer(word(2), indices * (index32 ? 4 : 2)), ++g_indexDraws;
+        }
+        i += type == 2 ? 4 : type == 1 ? 12 : 4 + 4 * count;
+    }
+}
+
 // After the original draw: the command bytes it wrote (state flush + draw
 // packets), from the cursor at device+0x30 before the call to after it.
 // Block: u32 'FDCB', u32 length, guest bytes (length 0 if the buffer wrapped).
@@ -147,7 +202,14 @@ void RecordCommands(uint32_t device, uint32_t before)
     const uint32_t length = after > before && after - before < 0x40000 ? after - before : 0;
     const uint32_t head[2] = {0x46444342, length};
     fwrite(head, sizeof(head), 1, g_file);
-    if (length) fwrite(mem::Translate(before), length, 1, g_file);
+    if (length)
+    {
+        fwrite(mem::Translate(before), length, 1, g_file);
+        // The cursor points at the last written word: this draw's packets are
+        // [before + 4, after + 4).
+        RecordIndexBuffers(static_cast<const uint8_t*>(mem::Translate(before)) + 4, length);
+    }
+    RecordVertexBuffers(device);
 }
 
 // Frame boundary: arm at the first swap after the delay, capture until the next.
@@ -170,8 +232,10 @@ void OnSwap(PPCContext& ctx)
         fclose(g_file);
         g_file = nullptr;
         if (g_textureFile) fclose(g_textureFile), g_textureFile = nullptr;
+        if (g_bufferFile) fclose(g_bufferFile), g_bufferFile = nullptr;
         g_state = State::Done;
-        kernel::Log("frame capture: %u draws written to frame_capture.bin", g_draws);
+        kernel::Log("frame capture: %u draws written to frame_capture.bin (%u indexed, %zu buffers)", g_draws,
+            g_indexDraws, g_dumpedBuffers.size());
     }
 }
 }
