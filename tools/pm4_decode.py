@@ -1,32 +1,54 @@
-"""Split Xenos PM4 command bytes (big-endian) into packets.
-
-packets(data) -> list of (name, payload words). Type 0 = register writes
-("REG base xN"), type 3 = opcode (names from pm4_scan.OPCODES; "(p)" when
-predicated), type 2 = NOP.
-"""
 import struct
 from pm4_scan import OPCODES
 
 
 def packets(data):
-    words = struct.unpack(">%dI" % (len(data) // 4), data[: len(data) // 4 * 4])
-    out, i = [], 0
-    while i < len(words):
+    nwords = len(data) // 4
+    words = struct.unpack(f">{nwords}I", data[:nwords * 4])
+    total = len(words)
+    out = []
+    i = 0
+
+    while i < total:
         h = words[i]
-        kind = h >> 30
+        kind = (h >> 30) & 3
+        avail = total - i - 1
+
         if kind == 0:
             n = ((h >> 16) & 0x3FFF) + 1
-            out.append(("REG %04X x%d" % (h & 0x7FFF, n), words[i + 1:i + 1 + n]))
+            if n > avail:
+                n = avail
+            payload = words[i + 1:i + 1 + n]
+            out.append(("REG %04X x%d" % ((h & 0x7FFF), n), payload))
             i += 1 + n
-        elif kind == 3:
-            n = ((h >> 16) & 0x3FFF) + 1
-            op = (h >> 8) & 0x7F
-            out.append((OPCODES.get(op, "OP%02X" % op) + ("(p)" if h & 1 else ""), words[i + 1:i + 1 + n]))
+
+        elif kind == 1:
+            n = 2
+            if n > avail:
+                n = avail
+            payload = words[i + 1:i + 1 + n]
+            out.append(("TYPE1", payload))
             i += 1 + n
+
         elif kind == 2:
             out.append(("NOP", ()))
             i += 1
+
+        elif kind == 3:
+            n = ((h >> 16) & 0x3FFF) + 1
+            if n > avail:
+                n = avail
+            payload = words[i + 1:i + 1 + n]
+            op = (h >> 8) & 0x7F
+            name = OPCODES.get(op, "OP%02X" % op)
+            if h & 1:
+                name += "(p)"
+            out.append((name, payload))
+            i += 1 + n
+
         else:
-            out.append(("TYPE1", words[i + 1:i + 3]))
-            i += 3
+            # Defensive: 32-bit PM4 headers should only have kinds 0..3.
+            out.append(("BAD", ()))
+            i += 1
+
     return out
