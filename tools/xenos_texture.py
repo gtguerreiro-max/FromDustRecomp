@@ -164,43 +164,23 @@ def _decode_block(fmt, block, x0, y0, width, height, rgba):
             )
 
     elif fmt == "k_DXT2_3":
-        rgb = _dxt1_rgb_block(block)
-
-        # DXT2/DXT3 alpha: 16 4-bit values stored as two 32-bit words.
-        alpha_word0 = int.from_bytes(block[8:12], "little")
-        alpha_word1 = int.from_bytes(block[12:16], "little")
-
+        # BC2: 8 bytes of 4-bit alpha first, then a DXT1 colour block.
+        rgb = _dxt1_rgb_block(block[8:16])
+        alpha = int.from_bytes(block[0:8], "little")
         for p, (r, g, b) in enumerate(rgb):
-            word = alpha_word0 if p < 8 else alpha_word1
-            alpha_nibble = (word >> (4 * (p & 7))) & 0xF
-            _put_pixel(
-                rgba,
-                width,
-                height,
-                x0 + (p % 4),
-                y0 + (p // 4),
-                r,
-                g,
-                b,
-                alpha_nibble * 17,
-            )
+            _put_pixel(rgba, width, height, x0 + (p % 4), y0 + (p // 4), r, g, b, ((alpha >> (4 * p)) & 0xF) * 17)
 
     elif fmt == "k_DXT4_5":
-        palette = block[0:8]
-        for p in range(16):
-            idx = (block[8 + (p >> 1)] >> ((p & 1) * 4)) & 0xF
-            v = palette[idx]
-            _put_pixel(
-                rgba,
-                width,
-                height,
-                x0 + (p % 4),
-                y0 + (p // 4),
-                v,
-                v,
-                v,
-                255,
-            )
+        # BC3: alpha endpoints a0, a1 and 16 3-bit indices first, then a DXT1 colour block.
+        rgb = _dxt1_rgb_block(block[8:16])
+        a0, a1 = block[0], block[1]
+        if a0 > a1:
+            palette = [a0, a1] + [((7 - k) * a0 + k * a1) // 7 for k in range(1, 7)]
+        else:
+            palette = [a0, a1] + [((5 - k) * a0 + k * a1) // 5 for k in range(1, 5)] + [0, 255]
+        bits = int.from_bytes(block[2:8], "little")
+        for p, (r, g, b) in enumerate(rgb):
+            _put_pixel(rgba, width, height, x0 + (p % 4), y0 + (p // 4), r, g, b, palette[(bits >> (3 * p)) & 7])
 
     elif fmt == "k_DXN":
         # Two 4-bit channels, stored as two 8-byte planes: R then G.
