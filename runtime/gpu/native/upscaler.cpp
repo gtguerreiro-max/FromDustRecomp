@@ -12,6 +12,8 @@
 #include <nvsdk_ngx_helpers.h>
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -31,6 +33,18 @@ float Halton(uint32_t index, uint32_t base)
     return r;
 }
 }
+
+namespace
+{
+std::atomic<uint32_t> g_setting{0};
+std::mutex g_statusLock;
+UpscalerStatus g_status;
+}
+
+void SetUpscalerSetting(UpscalerMode mode) { g_setting = uint32_t(mode); }
+UpscalerMode UpscalerSetting() { return UpscalerMode(g_setting.load()); }
+UpscalerStatus GetUpscalerStatus() { std::lock_guard lock(g_statusLock); return g_status; }
+void PublishUpscalerStatus(const UpscalerStatus& status) { std::lock_guard lock(g_statusLock); g_status = status; }
 
 UpscalerMode ConfiguredUpscalerMode(UpscalerMode configured)
 {

@@ -36,11 +36,20 @@ struct Data {
     int anisotropy = -1;
     int presentation = 0; // bilinear, FSR, CAS
     int sharpness = 20;
+    int upscaler = 0; // native renderer: off, DLAA (live)
     int inputMode = 0; // automatic, keyboard/mouse, controller
     int sensitivity = 100;
     int deadzone = 15;
     bool invertY = false;
     bool mouseCamera = true;
+    // PC-style mouse: free movement drives the Breath (left stick), left /
+    // right buttons absorb / release (LT / RT), a held button turns the
+    // camera (right stick) and the wheel zooms.
+    bool mouseBreath = true;
+    int mouseSpeed = 100;
+    bool mouseButtons = true;
+    int cameraButton = 2; // 0 off, 1 right button, 2 middle button
+    int wheelZoom = 1;    // 0 off, 1 normal, 2 inverted
     bool vibration = true;
     int volume = 100;
     bool muteUnfocused = false;

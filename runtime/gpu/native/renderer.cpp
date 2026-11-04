@@ -1103,7 +1103,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     // colour resolve followed by a smaller (post-processing) pass; the scene
     // draws before it at that size receive the sub-pixel jitter. The camera's
     // world-to-clip matrix comes from the terrain shaders (VS_DustConst[8..11]).
-    const UpscalerMode upscaleMode=frame.continuous&&shaderCatalog?ConfiguredUpscalerMode(UpscalerMode::Off):UpscalerMode::Off;
+    const UpscalerMode upscaleMode=frame.continuous&&shaderCatalog?ConfiguredUpscalerMode(UpscalerSetting()):UpscalerMode::Off;
     size_t sceneResolve=SIZE_MAX;
     std::vector<uint8_t> jitterDraw;
     float jitterX=0,jitterY=0,sceneVP[16]{},sceneViewport[4]{},sceneDepth[2]{};
@@ -1487,6 +1487,20 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         if(snapIt==snapshots.end()||!t.ds||!t.ds->texture)return;
         Snapshot& snap=*snapIt->second;
         auto& up=upscale;
+        // Diagnostic frame dumps: scene before / after the upscaler and the
+        // motion vectors (resolve_<n>_DLSS0000 / DLSS0001 / DLSSMV00).
+        auto dumpTexture=[&](RenderTexture* texture,RenderFormat format,uint32_t width,uint32_t height,uint32_t tag,RenderTextureLayout restore){
+            if(dir.empty())return;
+            Dump dump;
+            dump.dest=tag;dump.order=colorDumpCount++;dump.format=format;dump.width=width;dump.height=height;
+            dump.rowPitch=(width*FormatBytes(format)+255)&~255u;
+            dump.buffer=device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(dump.rowPitch)*height));
+            list->barriers(RenderBarrierStage::COPY,RenderTextureBarrier(texture,RenderTextureLayout::COPY_SOURCE));
+            list->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(dump.buffer.get(),format,width,height,1,dump.rowPitch/FormatBytes(format)),
+                RenderTextureCopyLocation::Subresource(texture));
+            list->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(texture,restore));
+            dumps.push_back(std::move(dump));
+        };
         auto* d3dDevice=externalDevice?externalDevice.Get():static_cast<D3D12Device*>(device.get())->d3d;
         if(!up.ngx.Initialize(d3dDevice))return;
         const uint32_t w=snap.width,h=snap.height;
@@ -1549,6 +1563,8 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         list->drawInstanced(3,1,0,0);
         list->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(t.ds->texture.get(),RenderTextureLayout::DEPTH_WRITE));
         t.ds->shaderRead=false;
+        dumpTexture(snap.surface.texture.get(),snap.format,w,h,0xD1550000,RenderTextureLayout::SHADER_READ);
+        dumpTexture(up.motion.get(),RenderFormat::R16G16_FLOAT,w,h,0xD155AA00,RenderTextureLayout::COLOR_WRITE);
         // NGX reads in compute and writes the output as a UAV.
         list->barriers(RenderBarrierStage::COMPUTE,{
             RenderTextureBarrier(snap.surface.texture.get(),RenderTextureLayout::SHADER_READ),
@@ -1595,6 +1611,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             RenderTextureBarrier(up.motion.get(),RenderTextureLayout::COLOR_WRITE),
             RenderTextureBarrier(up.depth.get(),RenderTextureLayout::COLOR_WRITE)});
         snap.surface.shaderRead=true;
+        dumpTexture(snap.surface.texture.get(),snap.format,w,h,0xD1550001,RenderTextureLayout::SHADER_READ);
         if(sceneCamera)
         {
             std::copy(sceneVP,sceneVP+16,up.previousVP);
@@ -2317,6 +2334,14 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     completedDraws += frameDraws;
     ++completedFrames;
     if(sceneResolve!=SIZE_MAX)++upscale.frameIndex;
+    if(frame.continuous)
+    {
+        UpscalerStatus status;
+        status.available=upscale.ngx.Tried()?(upscale.ngx.Available()?1:0):-1;
+        status.active=upscaleMode;status.evaluatedFrames=upscale.evaluated;
+        status.sceneFound=sceneResolve!=SIZE_MAX;status.cameraFound=sceneCamera;
+        PublishUpscalerStatus(status);
+    }
     if(frame.continuous&&nativeOutput){outputTexture=static_cast<D3D12Texture*>(nativeOutput->texture.get());outputWidth=nativeWidth;outputHeight=nativeHeight;}
     return 0;
 }

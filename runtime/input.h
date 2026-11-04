@@ -12,6 +12,8 @@ struct State { uint32_t packet = 0; Gamepad pad; };
 static_assert(sizeof(Gamepad) == 12 && sizeof(State) == 16);
 void SetWindow(void* hwnd);
 void HandleKey(uint32_t key, bool down);
+void HandleWheel(int delta); // WHEEL_DELTA units, positive = away from the user
+bool MouseCaptured();         // PC mouse active: hide the cursor
 void ClearKeys();
 void SetBlocked(bool blocked);
 bool Blocked();

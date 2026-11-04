@@ -5,6 +5,9 @@
 #include "gpu.h"
 #include "frame_timing.h"
 #include "native/live_audit.h"
+#ifdef FD_NATIVE_RENDERER
+#include "native/upscaler.h"
+#endif
 #include <wrl/client.h>
 #include <algorithm>
 #include <chrono>
@@ -69,8 +72,27 @@ void ApplyLive() {
     config.SetCasAdditionalSharpness(d.sharpness / 100.0f);
     config.SetFsrSharpnessReduction(2.0f * (1.0f - d.sharpness / 100.0f));
     g_presenter->SetGuestOutputPaintConfigFromUIThread(config);
+#ifdef FD_NATIVE_RENDERER
+    gpu::native::SetUpscalerSetting(d.upscaler == 1 ? gpu::native::UpscalerMode::Dlaa : gpu::native::UpscalerMode::Off);
+#endif
     g_applied = d;
     g_appliedValid = true;
+}
+// Explanation shown when the previous widget is hovered.
+void Help(const char* text) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26);
+        ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+void Section(const char* title) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "%s", title);
+    ImGui::Separator();
+    ImGui::Spacing();
 }
 bool Restart() {
     std::wstring command = GetCommandLineW();
@@ -97,7 +119,7 @@ public:
         const char* open = getenv("FD_SETTINGS_OPEN");
         if (open && atoi(open)) Toggle();
         const char* tab=getenv("FD_SETTINGS_TAB");
-        selectRenderer_=tab&&!strcmp(tab,"renderer");
+        selectTab_=tab?tab:"";
         auto* provider=static_cast<xe::ui::d3d12::D3D12Provider*>(g_provider);
         adapterName_=provider->GetAdapterDescription();
         const auto luid=provider->GetDevice()->GetAdapterLuid();
@@ -117,7 +139,8 @@ private:
     uint64_t previousFrames_ = 0;
     float fps_ = 0;
     int appliedUiScale_=0;
-    bool selectRenderer_=false,memoryAvailable_=false;
+    bool memoryAvailable_=false;
+    std::string selectTab_;
     bool nativeBackend_=false;
     std::string adapterName_;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter_;
@@ -156,6 +179,9 @@ private:
         } else if (!visible_) pcinput::HandleKey(key, true);
     }
     void OnKeyUp(xe::ui::KeyEvent& e) override { pcinput::HandleKey(uint32_t(e.virtual_key()), false); }
+    void OnMouseWheel(xe::ui::MouseEvent& e) override {
+        if (!visible_) { pcinput::HandleWheel(e.scroll_y()); e.set_handled(true); }
+    }
     void OnLostFocus(xe::ui::UISetupEvent&) override {
         pcinput::ClearKeys();
         for (uint32_t user = 0; user < 4; ++user) pcinput::SetVibration(user, 0, 0);
@@ -173,6 +199,11 @@ private:
             if(!status.busy)native_=status;
         }
         auto d = settings::Get();
+        {
+            using Visibility = xe::ui::Window::CursorVisibility;
+            const auto wanted = !visible_ && pcinput::MouseCaptured() ? Visibility::kHidden : Visibility::kVisible;
+            if (g_window->GetCursorVisibility() != wanted) g_window->SetCursorVisibility(wanted);
+        }
         const float uiScale=d.uiScale/100.0f;
         io.FontGlobalScale=uiScale;
         if(appliedUiScale_!=d.uiScale){ImGui::GetStyle()=g_baseStyle;ImGui::GetStyle().ScaleAllSizes(uiScale);appliedUiScale_=d.uiScale;}
@@ -200,38 +231,60 @@ private:
         ImGui::Spacing();
         const auto before = d;
         if (ImGui::BeginTabBar("settings_tabs")) {
-            if (ImGui::BeginTabItem("Ecrã")) {
+            if (ImGui::BeginTabItem("Ecrã",nullptr,selectTab_=="screen"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("screen_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 int mode = d.fullscreen ? 1 : 0;
+                Section("JANELA");
                 if (ImGui::Combo("Modo de ecrã", &mode, "Janela\0Ecrã inteiro sem margens\0")) d.fullscreen = mode == 1;
+                Help("Ecrã inteiro sem margens ocupa o monitor sem mudar a sua resolução. Atalhos: F11 ou Alt+Enter.");
                 ImGui::BeginDisabled(d.fullscreen);
                 ImGui::Combo("Tamanho da janela", &d.windowPreset, "1280 × 720\0 1600 × 900\0 1920 × 1080\0 2560 × 1440\0 3840 × 2160\0");
                 ImGui::EndDisabled();
-                ImGui::TextDisabled("Ecrã inteiro usa a resolução do monitor. Atalho: F11.");
-                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+                Section("INTERFACE");
                 ImGui::Checkbox("Mostrar contador de FPS", &d.showFps);
                 ImGui::Checkbox("Mostrar tempo entre frames",&d.showFrameTime);
                 ImGui::Combo("Posição do HUD",&d.hudCorner,"Canto superior direito\0Canto superior esquerdo\0Canto inferior direito\0Canto inferior esquerdo\0");
                 ImGui::SliderInt("Tamanho da interface",&d.uiScale,75,150,"%d %%");
+                Section("APRESENTAÇÃO");
                 ImGui::Combo("Apresentação da imagem", &d.presentation, "Suave (bilinear)\0FSR — ampliar e definir\0CAS — realçar detalhes\0");
+                Help("Como a imagem do jogo é ampliada para o tamanho da janela. FSR e CAS realçam o detalhe; a nitidez ajusta a intensidade.");
                 ImGui::BeginDisabled(d.presentation == 0);
                 ImGui::SliderInt("Nitidez", &d.sharpness, 0, 100, "%d %%");
                 ImGui::EndDisabled();
                 ImGui::TextWrapped("Estas opções aplicam-se de imediato.");
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Gráficos")) {
+            if (ImGui::BeginTabItem("Gráficos",nullptr,selectTab_=="graphics"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("graphics_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
-                ImGui::TextWrapped("Estas opções são aplicadas ao reiniciar o jogo.");
-                ImGui::Spacing();
+                Section("ANTI-ALIASING E UPSCALING");
+                {
+#ifdef FD_NATIVE_RENDERER
+                    const auto status = gpu::native::GetUpscalerStatus();
+#endif
+                    ImGui::BeginDisabled(!nativeBackend_);
+                    ImGui::Combo("Anti-aliasing", &d.upscaler, "Original do jogo\0NVIDIA DLAA\0");
+                    ImGui::EndDisabled();
+                    Help("DLAA usa o DLSS da NVIDIA à resolução nativa para suavizar arestas e estabilizar a imagem. "
+                         "Precisa de uma GPU NVIDIA RTX e do renderer nativo. Aplica-se de imediato.");
+                    if (!nativeBackend_) ImGui::TextDisabled("Disponível com o renderer nativo (Jogar-nativo.cmd).");
+#ifdef FD_NATIVE_RENDERER
+                    else if (d.upscaler == 0) ImGui::TextDisabled("Desligado: imagem original do jogo.");
+                    else if (status.available == 0) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "DLSS indisponível: requer GPU NVIDIA RTX, driver recente e nvngx_dlss.dll.");
+                    else if (status.available < 0 || !status.sceneFound) ImGui::TextDisabled("Ativo quando houver uma cena 3D (menus e vídeos ficam iguais).");
+                    else ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "DLAA ativo  |  %llu frames  |  câmara %s", (unsigned long long)status.evaluatedFrames,
+                                            status.cameraFound ? "detetada" : "não detetada (sem vetores)");
+#endif
+                }
+                Section("RENDERIZAÇÃO (APLICA AO REINICIAR)");
                 int scale = nativeBackend_ ? 0 : d.scale - 1;
                 ImGui::BeginDisabled(nativeBackend_);
                 if (ImGui::Combo("Resolução interna", &scale, "Nativa (1×)\0Alta (2×)\0Muito alta (3×)\0")) d.scale = scale + 1;
                 ImGui::EndDisabled();
                 ImGui::TextDisabled(nativeBackend_ ? "Nesta versão do renderer nativo, a resolução interna é 1×." : "2× e 3× aumentam o detalhe e o trabalho da GPU.");
                 ImGui::Checkbox("Sincronização vertical (VSync)", &d.vsync);
+                Help("Sincroniza com o monitor e evita cortes na imagem. O jogo foi feito para 30 FPS; a física da água depende do ritmo dos frames.");
                 constexpr int limits[] = {30, 60, 120, 0};
                 int limit = int(std::find(std::begin(limits), std::end(limits), d.frameLimit) - std::begin(limits));
                 if (ImGui::Combo("Limite de FPS", &limit, "30\0 60\0 120\0Sem limite\0")) d.frameLimit = limits[limit];
@@ -244,17 +297,28 @@ private:
                 if(nativeBackend_)ImGui::TextDisabled("Nesta versão do renderer nativo, é usada a filtragem do jogo.");
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Controlos")) {
+            if (ImGui::BeginTabItem("Controlos",nullptr,selectTab_=="controls"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("controls_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 ImGui::Combo("Dispositivo", &d.inputMode, "Automático\0Teclado e rato\0Comando XInput\0");
+                Help("Automático aceita teclado, rato e comando ao mesmo tempo.");
+                Section("RATO (ESTILO PC)");
+                ImGui::Checkbox("Mover o Breath com o rato", &d.mouseBreath);
+                Help("O cursor fica escondido e o movimento do rato guia o Breath pelo terreno. F1 ou Esc mostram o cursor.");
+                ImGui::BeginDisabled(!d.mouseBreath);
+                ImGui::SliderInt("Velocidade do Breath", &d.mouseSpeed, 25, 300, "%d %%");
+                ImGui::EndDisabled();
+                ImGui::Checkbox("Botão esquerdo aspira, direito larga", &d.mouseButtons);
+                Help("Esquerdo = LT (aspirar matéria), direito = RT (largar). Mantém premido como nos gatilhos.");
+                ImGui::Combo("Rodar a câmara", &d.cameraButton, "Desligado\0Arrastar com o botão direito\0Arrastar com o botão do meio\0");
+                Help("Mantém o botão premido e move o rato para rodar a câmara.");
+                ImGui::Combo("Roda do rato", &d.wheelZoom, "Desligada\0Zoom\0Zoom invertido\0");
+                Section("CÂMARA E COMANDO");
                 ImGui::SliderInt("Sensibilidade da câmara", &d.sensitivity, 25, 300, "%d %%");
-                ImGui::SliderInt("Zona morta dos analógicos", &d.deadzone, 0, 30, "%d %%");
                 ImGui::Checkbox("Inverter eixo vertical da câmara", &d.invertY);
-                ImGui::Checkbox("Mover câmara com botão direito do rato premido", &d.mouseCamera);
+                ImGui::SliderInt("Zona morta dos analógicos", &d.deadzone, 0, 30, "%d %%");
                 ImGui::Checkbox("Vibração do comando", &d.vibration);
-                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-                ImGui::TextUnformatted("TECLADO");
+                Section("TECLADO");
                 ImGui::TextDisabled("Clica numa tecla para a alterar. Esc cancela a atribuição.");
                 if (capture_ >= 0) ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "Prime uma tecla para: %s", settings::kActionNames[capture_]);
                 if (ImGui::BeginTable("bindings", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
@@ -273,14 +337,14 @@ private:
                 }
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Som")) {
+            if (ImGui::BeginTabItem("Som",nullptr,selectTab_=="audio"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("audio_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 ImGui::SliderInt("Volume", &d.volume, 0, 100, "%d %%");
                 ImGui::Checkbox("Silenciar quando a janela não está ativa", &d.muteUnfocused);
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
-            if(ImGui::BeginTabItem("Renderer e estatísticas",nullptr,selectRenderer_?ImGuiTabItemFlags_SetSelected:0)) {
+            if(ImGui::BeginTabItem("Renderer e estatísticas",nullptr,selectTab_=="renderer"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("renderer_information",ImVec2(0,-116*uiScale));
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(.88f,.76f,.47f,1),"RENDERER ATIVO");
@@ -315,7 +379,7 @@ private:
                 } else ImGui::TextDisabled("Auditoria nativa: desligada nesta sessão.");
                 ImGui::EndChild();ImGui::EndTabItem();
             }
-            selectRenderer_=false;
+            selectTab_.clear();
             ImGui::EndTabBar();
         }
         if (d != before) Changed(d);
@@ -333,6 +397,8 @@ private:
         }
         if (restart) ImGui::SameLine();
         if (ImGui::Button("Fechar")) Toggle();
+        ImGui::SameLine();
+        ImGui::TextDisabled("F1 menu  ·  F11 ecrã inteiro  ·  Esc fechar");
         ImGui::End();
     }
 };

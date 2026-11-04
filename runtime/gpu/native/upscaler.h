@@ -24,9 +24,23 @@ enum class UpscalerMode : uint32_t
     UltraPerformance,
 };
 
+// The user's setting (F1 menu), applied from the next frame.
+void SetUpscalerSetting(UpscalerMode mode);
+UpscalerMode UpscalerSetting();
 // FD_NATIVE_UPSCALER=off|dlaa|quality|balanced|performance|ultra overrides the
 // configured mode (diagnostics and bounded sessions).
 UpscalerMode ConfiguredUpscalerMode(UpscalerMode configured);
+// Live state for the settings UI: availability (-1 not tried, 0 no, 1 yes),
+// the mode last applied and the number of evaluated frames.
+struct UpscalerStatus
+{
+    int available = -1;
+    UpscalerMode active = UpscalerMode::Off;
+    uint64_t evaluatedFrames = 0;
+    bool sceneFound = false, cameraFound = false;
+};
+UpscalerStatus GetUpscalerStatus();
+void PublishUpscalerStatus(const UpscalerStatus& status);
 // Render-size fraction of the output for a mode (1 for DLAA / off).
 double UpscalerRenderScale(UpscalerMode mode);
 const char* UpscalerModeName(UpscalerMode mode);
@@ -58,6 +72,7 @@ public:
     // (no RTX GPU / driver, or nvngx_dlss.dll missing); the reason is logged once.
     bool Initialize(ID3D12Device* device);
     bool Available() const { return available; }
+    bool Tried() const { return tried; }
     // Records the DLSS evaluation into `list`, (re)creating the feature when the
     // setup changes. The caller restores its own pipeline / descriptor state.
     bool Evaluate(ID3D12GraphicsCommandList* list, const UpscalerSetup& setup, const UpscalerFrame& frame);

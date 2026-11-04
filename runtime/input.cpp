@@ -21,6 +21,27 @@ std::array<State, 4> g_previous{};
 POINT g_mouse{};
 bool g_mouseValid = false;
 ULONGLONG g_mouseTick = 0;
+// PC-style mouse: the cursor is captured (hidden, kept at the window centre)
+// while the game has focus and the settings are closed; its movement drives
+// the Breath, a held button turns the camera and the wheel zooms.
+std::atomic<int> g_wheel{0};          // pending wheel notches (WHEEL_DELTA units)
+float g_breathX = 0, g_breathY = 0;   // smoothed mouse stick
+ULONGLONG g_wheelUntil = 0;
+int g_wheelDirection = 0;
+std::atomic<bool> g_captured{false}; // the settings UI hides the cursor while set
+void Capture(HWND, bool capture) {
+    if (capture == g_captured.exchange(capture)) return;
+    if (!capture) { ClipCursor(nullptr); g_mouseValid = false; }
+}
+bool WindowCentre(HWND window, POINT& centre, RECT& screen) {
+    RECT client{};
+    if (!GetClientRect(window, &client) || client.right <= client.left || client.bottom <= client.top) return false;
+    POINT topLeft{client.left, client.top}, bottomRight{client.right, client.bottom};
+    ClientToScreen(window, &topLeft); ClientToScreen(window, &bottomRight);
+    screen = {topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
+    centre = {(topLeft.x + bottomRight.x) / 2, (topLeft.y + bottomRight.y) / 2};
+    return true;
+}
 bool Focused() {
     HWND window = g_window.load();
     return window && GetForegroundWindow() == window;
@@ -60,6 +81,8 @@ void HandleKey(uint32_t key, bool down) {
     if (down && !g_down[key].exchange(true)) g_pressed[key] = true;
     if (!down) g_down[key] = false;
 }
+void HandleWheel(int delta) { g_wheel += delta; }
+bool MouseCaptured() { return g_captured.load(); }
 void ClearKeys() {
     for (size_t i = 0; i < g_down.size(); ++i) { g_down[i] = false; g_pressed[i] = false; }
 }
@@ -131,14 +154,54 @@ uint32_t GetState(uint32_t user, State& state) {
             state.pad.rightY = Axis(float(state.pad.rightY) + mapped.rightY);
             POINT mouse{};
             const ULONGLONG now = GetTickCount64();
+            HWND window = g_window.load();
+            const bool pcMouse = d.mouseBreath || d.mouseButtons || d.cameraButton || d.wheelZoom;
+            const int cameraKey = d.cameraButton == 1 ? VK_RBUTTON : d.cameraButton == 2 ? VK_MBUTTON : 0;
+            const bool turning = cameraKey && (GetAsyncKeyState(cameraKey) & 0x8000);
+            if (pcMouse && d.mouseBreath) Capture(window, true);
             if (GetCursorPos(&mouse)) {
-                if (d.mouseCamera && (GetAsyncKeyState(VK_RBUTTON) & 0x8000) && g_mouseValid) {
-                    const float elapsed = float(std::max<ULONGLONG>(1, now - g_mouseTick));
-                    state.pad.rightX = Axis(state.pad.rightX + (mouse.x - g_mouse.x) * 40000.0f / elapsed);
-                    state.pad.rightY = Axis(state.pad.rightY - (mouse.y - g_mouse.y) * 40000.0f / elapsed);
+                const float elapsed = float(std::max<ULONGLONG>(1, now - g_mouseTick));
+                const float dx = g_mouseValid ? float(mouse.x - g_mouse.x) : 0.0f;
+                const float dy = g_mouseValid ? float(mouse.y - g_mouse.y) : 0.0f;
+                if (turning) {
+                    state.pad.rightX = Axis(state.pad.rightX + dx * 40000.0f / elapsed);
+                    state.pad.rightY = Axis(state.pad.rightY - dy * 40000.0f / elapsed);
+                } else if (!d.mouseBreath && d.mouseCamera && (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) {
+                    // Legacy mode: right-button drag turns the camera.
+                    state.pad.rightX = Axis(state.pad.rightX + dx * 40000.0f / elapsed);
+                    state.pad.rightY = Axis(state.pad.rightY - dy * 40000.0f / elapsed);
                 }
+                if (d.mouseBreath && !turning) {
+                    // Mouse speed (px/ms) -> left stick; ~0.8 px/ms is full deflection at 100 %.
+                    const float gain = 32767.0f / 0.8f * (d.mouseSpeed / 100.0f) / elapsed;
+                    g_breathX = g_breathX * 0.35f + dx * gain * 0.65f;
+                    g_breathY = g_breathY * 0.35f - dy * gain * 0.65f;
+                    if (std::fabs(dx) < 0.5f && std::fabs(dy) < 0.5f) { g_breathX *= 0.5f; g_breathY *= 0.5f; }
+                    state.pad.leftX = Axis(state.pad.leftX + g_breathX);
+                    state.pad.leftY = Axis(state.pad.leftY + g_breathY);
+                } else { g_breathX = g_breathY = 0; }
                 g_mouse = mouse; g_mouseTick = now; g_mouseValid = true;
+                // Keep the hidden cursor inside the window so movement never stops at an edge.
+                POINT centre{}; RECT screen{};
+                if (g_captured && WindowCentre(window, centre, screen)) {
+                    ClipCursor(&screen);
+                    if (std::abs(mouse.x - centre.x) > (screen.right - screen.left) / 4 ||
+                        std::abs(mouse.y - centre.y) > (screen.bottom - screen.top) / 4) {
+                        SetCursorPos(centre.x, centre.y);
+                        g_mouse = centre;
+                    }
+                }
             }
+            if (d.mouseButtons) {
+                if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) state.pad.leftTrigger = 255;
+                if (cameraKey != VK_RBUTTON && (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) state.pad.rightTrigger = 255;
+            }
+            // Each wheel notch holds the camera's vertical axis (zoom) briefly.
+            if (const int wheel = g_wheel.exchange(0); wheel && d.wheelZoom) {
+                g_wheelDirection = (wheel > 0 ? 1 : -1) * (d.wheelZoom == 2 ? -1 : 1);
+                g_wheelUntil = now + ULONGLONG(90 * std::min(4, std::max(1, std::abs(wheel) / WHEEL_DELTA)));
+            }
+            if (now < g_wheelUntil) state.pad.rightY = Axis(state.pad.rightY + g_wheelDirection * 32767.0f);
         }
         state.pad.rightX = Axis(state.pad.rightX * (d.sensitivity / 100.0f));
         state.pad.rightY = Axis(state.pad.rightY * (d.sensitivity / 100.0f) * (d.invertY ? -1.0f : 1.0f));
@@ -147,6 +210,9 @@ uint32_t GetState(uint32_t user, State& state) {
     } else {
         ClearKeys();
         g_mouseValid = false;
+        g_breathX = g_breathY = 0;
+        g_wheel = 0;
+        if (g_captured) Capture(g_window.load(), false);
     }
     // Scripted presses for unattended diagnostic runs (see SchedulePad).
     if (user == 0) {
