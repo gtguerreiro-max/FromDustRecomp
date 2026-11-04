@@ -32,10 +32,10 @@ index 9c1e52b..11f34a2 100644
    static constexpr HANDLE kMappingHandleInvalid = nullptr;
  
 diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
-index 82076bc..660da8e 100644
+index 82076bc..c11a58f 100644
 --- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
 +++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
-@@ -42,6 +42,12 @@ DEFINE_bool(d3d12_submit_on_primary_buffer_end, true,
+@@ -42,6 +42,13 @@ DEFINE_bool(d3d12_submit_on_primary_buffer_end, true,
  DECLARE_bool(clear_memory_page_state);
  DECLARE_bool(readback_resolve_half_pixel_offset);
  
@@ -43,12 +43,13 @@ index 82076bc..660da8e 100644
 +// FromDust runtime (runtime/gpu/frame_capture.cpp): GPU events with the register
 +// file, 0 draw / copy, 2 swap.
 +extern "C" void (*fd_gpu_event_hook)(int event, const uint32_t* registers);
++extern "C" void (*fd_gpu_texture_hook)(uint32_t mask, const uint32_t* registers);
 +#endif
 +
  namespace xe {
  namespace gpu {
  namespace d3d12 {
-@@ -2246,6 +2252,10 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2246,6 +2253,10 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
  void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                        uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
@@ -59,7 +60,7 @@ index 82076bc..660da8e 100644
    SCOPE_profile_cpu_f("gpu");
    EndZPDFrame();
  
-@@ -2617,6 +2627,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+@@ -2617,6 +2628,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                        uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
@@ -71,6 +72,38 @@ index 82076bc..660da8e 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -2852,6 +2868,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+       (pixel_shader != nullptr
+            ? pixel_shader->GetUsedTextureMaskAfterTranslation()
+            : 0);
++#if defined(FROMDUST_GPU_SHIM)
++  if (fd_gpu_texture_hook) {
++    fd_gpu_texture_hook(used_texture_mask, register_file_->values);
++  }
++#endif
+   texture_cache_->RequestTextures(used_texture_mask);
+ 
+   // Bind the pipeline after configuring it and doing everything that may bind
+@@ -3166,6 +3187,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+     }
+     deferred_command_list_.D3DDrawInstanced(
+         primitive_processing_result.host_draw_vertex_count, 1, 0, 0);
++#if defined(FROMDUST_GPU_SHIM)
++    if (fd_gpu_event_hook) fd_gpu_event_hook(1, register_file_->values);
++#endif
+     if (predicate_buffer) {
+       deferred_command_list_.D3DSetPredication(nullptr, 0,
+                                                D3D12_PREDICATION_OP_EQUAL_ZERO);
+@@ -3239,6 +3263,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+     }
+     deferred_command_list_.D3DDrawIndexedInstanced(
+         primitive_processing_result.host_draw_vertex_count, 1, 0, 0, 0);
++#if defined(FROMDUST_GPU_SHIM)
++    if (fd_gpu_event_hook) fd_gpu_event_hook(1, register_file_->values);
++#endif
+     if (predicate_buffer) {
+       deferred_command_list_.D3DSetPredication(nullptr, 0,
+                                                D3D12_PREDICATION_OP_EQUAL_ZERO);
 diff --git a/src/xenia/gpu/d3d12/d3d12_graphics_system.cc b/src/xenia/gpu/d3d12/d3d12_graphics_system.cc
 index 3e851ef..b70bd3d 100644
 --- a/src/xenia/gpu/d3d12/d3d12_graphics_system.cc

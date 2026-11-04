@@ -1,0 +1,36 @@
+{
+  "934bba6679eeb8ff72809b2c9e83034270c0a9716b9639ee025ff2d46b975919": {
+    "reference_rgb_sha256": "231c0ba831582176378331c496c282dab6064354b75c436e23d2aced555771ab",
+    "regions": [
+      {
+        "name": "air-sparkle-upper-left",
+        "box": [54, 49, 79, 74],
+        "maximum_error": 4,
+        "mean_error": 1
+      },
+      {
+        "name": "sky-light-shaft",
+        "box": [220, 20, 260, 80],
+        "maximum_error": 4,
+        "mean_error": 1
+      }
+    ]
+  },
+  "cc662693904d9ac5c6ed0300d1c9eecb017b669db8922f9b5838c5191bbcb029": {
+    "reference_rgb_sha256": "5fdf9246a78f8d178dabc6a4ae9aba8481e141a074cbf28521910017c5058da8",
+    "regions": [
+      {
+        "name": "title-light-shaft",
+        "box": [480, 190, 540, 240],
+        "maximum_error": 4,
+        "mean_error": 1
+      },
+      {
+        "name": "title-light-shaft-left-attenuation",
+        "box": [210, 190, 250, 240],
+        "maximum_error": 4,
+        "mean_error": 1
+      }
+    ]
+  }
+}

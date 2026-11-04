@@ -1,5 +1,28 @@
 # Native renderer: research notes
 
+> Latest continuation (2026-11-04): interactive native execution now runs without
+> Xenia's GPU command processor. The regular launcher still selects Xenia while
+> fidelity / stability validation continues. Physical A/C/E aliases fixed query
+> readbacks and restored missing mesh colour. The first tutorial then exposed a
+> real BC3 volume, now supported by native base-level 3D decoding / upload and an
+> optional `volumes.rgba` replay sidecar. GPU tests sample every slice, test
+> swizzle / persistent reuse and reload the saved sidecar. Four earlier frames /
+> 3,160 draws remain exact RGB. See `NATIVE_LIVE_PROGRESS.md` for live results and
+> remaining limitations; older milestones below describe their original state.
+
+> Current priority (2026-11-03): finish the rendering base correctly. DLSS,
+> DLAA, neural rendering and other visual enhancements are deferred. The notes
+> about upscalers below are research, not implemented features. Latest verified
+> gameplay replays compare at 39.41, 36.03 and 40.24 dB. Four captures, including
+> the title and the elevated Breath tutorial, align all 3,160 submitted draws
+> and pass all 163 checked colour checkpoints. The game
+> still uses Xenia's GPU backend. See the current validation entry at the end.
+>
+> Debug-layer audit: earlier empty D3D12 logs did not prove that the debug layer
+> was active. Activation is now checked strictly. Windows Graphics Tools was
+> installed with the user's UAC approval on 2026-11-03; no restart was needed.
+> Production still uses Agility SDK 614. See the actual debug results below.
+
 > Shortcut found (2026-11-02): 96dot/Dragon-Age-Origins-Recomp (MIT, Xenia
 > BSD) adds DLSS (Streamline), FSR 4 / 3.1, XeSS and frame generation on top of
 > Xenia's D3D12 renderer, the path FromDust already uses. Its code is
@@ -46,7 +69,8 @@ DXIL after these XenosRecomp changes (`patches/xenosrecomp.patch`):
 - Inputs sharing one semantic are declared once (fix proposed by local Qwen).
 
 The scan must step by 2 bytes: containers in the .fxl are not 4-byte aligned.
-Compiling is not correctness: no shader has been checked against real output.
+Compilation alone does not establish correctness. Saved-frame output is now
+checked against exact RenderDoc events; see the latest base validation below.
 
 ## Findings about the game
 
@@ -260,12 +284,15 @@ Milestones:
 
 Workflow: capture a frame, replay it natively, compare every resolve with Xenia's.
 
-- Capture: `FD_FRAME_CAPTURE=<s>` (+ `run.ps1 -Capture build\xenia_*.png -CaptureSeconds <s>`).
-  Title screen: no `FD_AUTOPRESS`, 60 s. Gameplay: see the FD_AUTOPRESS sequence used before
-  (`40:0010` then `1000` every 4 s from 50 to 150, capture at 170).
+- Capture: `FD_FRAME_CAPTURE=<s>`. Decode the synchronized GPU reference with
+  `python tools/frame_reference.py`; a separately timed screenshot may capture a transition.
+  Title screen: no `FD_AUTOPRESS`, 60 s. In full-readback diagnostic mode, confirmed gameplay:
+  Start at 140 s, then A every four seconds from 145 to 260, capture at 280 s (run 296 s).
   Writes build/frame_capture.bin, textures.bin, buffers.bin, shader_inits.bin and
-  xenia_regs.bin (Xenia's register file at every GPU draw, via the FROMDUST_GPU_SHIM hook).
+  xenia_regs.bin (Xenia's register file at every GPU draw, via the FROMDUST_GPU_SHIM hook), and
+  frame_reference.bin (the captured frame's final resolve after GPU readback).
 - `python tools/replay_pack.py` then `build\fd_replay\fd_replay.exe build\replay`.
+  Optional `--capture-dir <dir> --out <dir>` keeps multiple captures reproducible.
 - `python tools/compare_resolves.py [--save]`: our copies (resolve_NN_ADDR.png/.raw) vs Xenia's
   (readback_resolve=full puts them in textures.bin). Note: textures.bin holds one version per
   address (when it was read), so for addresses copied several times only the last copy compares.
@@ -276,13 +303,708 @@ Workflow: capture a frame, replay it natively, compare every resolve with Xenia'
   triggers a capture of the same frame; tools/rdoc/rdc_info.py runs in qrenderdoc. Xenia draws
   EDRAM through a UAV, so per-draw images need its RTV mode.
 
-Where it stands: the title screen's final composite matches Xenia's scene (sky, terrain,
-grading; ~17-19 dB). Open:
-1. 2D layer (logo, "Press START"): records with lr 0x8250D964 (BeginVertices style) now get
-   their completed command region (FDUP block) and vertices. They draw, but appear as two yellow
-   dots: positions are pixel coordinates (e.g. 450, 28) with 32_32_FLOAT, so the VS probably
-   relies on PA_CL_VTE_CNTL / screen-space (viewport transform off) or the texture is wrong.
-2. DOF / statue: the statue on the left and the right pillar's detail are missing or dark.
-3. Gameplay frame needs a fresh capture to confirm the fixes (old capture was overwritten).
-4. Only part of the draws align with Xenia's register dump (alignment key: initiator, index
-   base, colour target); the rest use parsed state.
+Where it stands: the title screen's final composite reproduces Xenia's scene, lighting,
+depth of field, logo and "Press START" text. The final title capture compares at 29.71 dB,
+with 1.6% of pixels differing by more than 32 in any RGB channel. This is image fidelity,
+not a frame-rate measurement. Evidence is preserved under build/captures/title-final and
+build/title-final-replay; the reference is xenia_title_cube.png in the capture directory.
+
+2D layer fixed (2026-11-02):
+- Index upload offsets now stay aligned to four bytes when mixing R16_UINT and R32_UINT
+  views. Previously the three UI draws started at offsets congruent to 2 modulo 4, after
+  odd-sized 16-bit index lists. Their vertex-dependent shaders produced no visible geometry;
+  an SV_VertexID-only diagnostic triangle still rendered. Padding the allocation and each
+  draw's offset restores the real geometry without shader overrides.
+- Shader init matching now uses the container's physical section and its actual length,
+  with the stage checked. The old 32-byte prefix fallback confused short shaders, including
+  the 60-byte UI pixel shader (113 incorrectly selected as 003). All 557 captured objects
+  still match; 20 associations change. Some containers have identical physical sections.
+- Repacked the existing title capture: 185 records (138 draws, 47 resolves), all 45 required
+  shaders compile, and fd_replay builds and runs successfully. The final target_12.png now
+  shows the logo and text in the reference positions. Comparison with build/xenia_title.png
+  improves from 17.05 to 18.44 dB (full RGB image; other scene differences remain).
+- Regression command: `python -m unittest discover -s tests -p test_replay_pack.py -v`
+  (five synthetic cases; no game data needed).
+
+Further renderer corrections:
+- Pixel constant bank c0..255 is retained, including ps_ZBufferParam at c230. Truncating at
+  c223 made the DOF mask zero. Depth resolves now preserve both R32_FLOAT snapshots for
+  depth-format fetches and the existing packed RGBA bytes for raw-format fetches.
+- Texture capture covers full 32x32-block storage, and all six cube faces at their 4 KB-aligned
+  strides. Small BC textures must retain tiled bank bytes beyond pitch * logical height.
+  Cube SRVs and space2 indices restore ambient light (the statue and pillar were dark).
+- Samplers retain per-fetch addressing and min/mag/mip filtering. The previous universal WRAP
+  sampler wrapped colour LUT coordinates and produced green/red artifacts on bright pixels.
+- Clear calls retain flags, ARGB, floating depth and rectangles. Original D3D surface objects
+  identify their targets; D3D's temporary clear registers must not be replayed as real targets.
+  Pending clears also apply to targets allocated later, and clear-only resolves retain contents.
+  D32S8 host surfaces now retain stencil, including clears, reference/read/write masks,
+  comparisons and operations. Packed depth-byte copies still put zero in the stencil byte;
+  distinct back-face read/write masks are not supported by the host pipeline interface.
+- Indexed draws with damaged parsed target state can align by initiator/index address between
+  strict anchors. Repeated auto-indexed passes still require a target match. All 134 packed
+  title draws now align with Xenia's register dump. SQ_PROGRAM_CNTL also distinguishes
+  identical geometry in alpha/depth prepasses from the later colour pass. FDR6 includes
+  pixel centres, stencil masks, partial copy offsets and mip destinations;
+  the shader half-pixel offset is applied only for D3DZero draws.
+- Twenty-two synthetic regression checks pass. `FD_DUMP_DEPTH=1` writes float snapshot PNG/raw
+  pairs. `FD_NO_CLEARS=1` is an A/B diagnostic switch.
+
+Gameplay diagnosis (2026-11-03): the saved first-scene capture packs all 1,138 actual draws,
+50 resolves and 10 clears (three other CPU records have no draw). All 82 shaders compile.
+Snapshots preserve all colour formats, four shadow atlas regions and render-to-mip copies.
+The wall of water is visible after correcting alpha/colour pass alignment, but fidelity is
+still insufficient: 12.66 dB against the synchronized reference before the FDX2 capture.
+An earlier memory-snapshot comparison suggested the heightfield at record 6;
+that comparison alone cannot identify the first divergent checkpoint.
+FDX2 now captures actual GPU float constants. These agree with the device values in the
+first pass (apart from shader literals), so constants do not explain the initial mismatch.
+The fresh FDX2 gameplay frame compares at 12.17 dB; it does not pass the fidelity gate.
+See [the repeatable workflow](RENDER_DEBUG_WORKFLOW.md); do not use stale PNGs after a failure.
+
+RenderDoc: `FD_REPLAY_CAPTURE=1` while launching fd_replay under renderdoccmd records the
+offscreen draw sequence. The verified final title capture is build/rdoc/title-final/native_capture.rdc.
+For inspection without the GUI, convert with `renderdoccmd convert -f <rdc> -o <xml> -c zip.xml`,
+then run `python tools/rdoc/native_bindings.py <xml> --json <out>` to inspect actual GPU index
+views, pipelines and constant buffer bindings. The native capture verifies the index alignment.
+
+Next phase: finish the synchronized gameplay comparison, then extract the replay's resource/state
+handling into a live renderer and feed it from the engine hooks. The game still runs on Xenia's
+GPU backend; fd_replay is offline. Remaining fidelity differences must not
+be presented as a completed live renderer or DLSS integration.
+
+## Exact-event correction results — 2026-11-03
+
+The RenderDoc C++ inspector now indexes PSOs directly from the recorded API
+chunks, joins microcode hashes to packed records and exports intermediate RTVs
+and shader inputs in one session. This avoids a replay/GUI visit for every draw.
+Signed DDS casts, MRT selection and atlas offsets are retained. Ambiguous joins
+are rejected; optional prefix comparisons stop at the first unverified draw.
+
+The decisive error was in texture decompression, not the initial heightfield
+memory. The BC1 compressed bytes of the gameplay border mask matched Xenia
+exactly, while the former palette assigned the stored second endpoint to index
+3 rather than 1. The decoder now handles standard endpoint indices, BC1
+three-colour transparency, BC2/BC3 forced four-colour mode, and BC5's two BC4
+planes. The decoded border-mask image now matches the GPU input pixel for pixel.
+
+Two further corrections:
+
+- Fixed16 render targets use SNORM with the Xenos [-32,32] range and reciprocal
+  write/fetch scales. Half float could exceed the range and lose precision.
+- XenosRecomp retains `SetTextureLod` and explicit/register-LOD texture fetches.
+  Previously the normal-map downsample read an uninitialized mip through implicit
+  derivatives. Mip checkpoints now drop from about 0.564 MAE to 0.004/0.002/0.001.
+  The changes are preserved in `patches/xenosrecomp.patch`; regenerate HLSL with
+  `tools/regenerate_replay_shaders.py` and repack without renumbering containers.
+
+| Matching frame | Earlier replay | Corrected replay | Pixels with any RGB difference >32 |
+| --- | ---: | ---: | ---: |
+| `captures/gameplay-gated` (actual first scene) | 12.85 dB | 30.03 dB | 36.1% → 1.6% |
+| `captures/gameplay-used-textures` (second camera/frame) | 14.15 dB | 29.71 dB | 1.8% after correction |
+| `captures/rtv-title-reference` | 31.85 dB | 33.50 dB | 0.2% after correction |
+
+Depth surfaces are now keyed independently of colour-attachment combinations,
+following the storage-identity pattern used by NativeXRenderer. Rebinding colour
+attachments must preserve existing depth/stencil. The current saved gameplay
+image is unchanged by this resource-sharing correction.
+
+Current limitations remain explicit: remaining water/terrain edge differences,
+static texture mip capture, texture3D handling and some conditional-draw cases.
+The exact gameplay comparison verifies 1,067 draws and 24 checkpoints before
+two PS183 draws absent from the reference GPU action stream. It does not claim
+complete draw coverage. Thirty-three synthetic replay regressions pass, all 82
+gameplay shaders compile, and the native renderer and runtime build successfully.
+
+Evidence: `build/validation-title.txt`, `build/validation-second-gameplay.txt`,
+`build/compare-gameplay-lod.log`, `build/gameplay-gated-replay/validation-rdoc.json`,
+and the matching `build/rdoc/gameplay-gated/xenia_capture.rdc`. All are diagnostic
+artifacts, not gameplay performance measurements. Continue resolving the base
+differences before integrating live hooks; enhancement work remains deferred.
+
+[Reusable NativeXRenderer components](NATIVE_X_REUSE.md) are documented separately.
+
+## Base validation gate — latest result
+
+The later fixes supersede the earlier incomplete prefix comparison:
+
+- GPU capture records whether each guest call actually submitted a host draw.
+  `gpu_draws.bin` and `gpu_mips.bin` carry a hash of the matching register stream,
+  rejecting mixed-frame metadata. Two guest draws that the backend skipped are
+  now omitted explicitly, allowing a complete 984-draw RDC alignment.
+- Static 2D mip banks use Xenia's actual layout/packed-tail utilities, not guessed
+  offsets. Thirty chains (245 extra levels) are decoded and uploaded on the host.
+- FDR9 retains blend RGBA constants, complete texture fetch descriptors (LOD
+  ranges/bias/borders), and all context registers. Constant-factor blending now
+  uses the captured factor (the simulation uses 32/255), not D3D12's default.
+- A shorter use of a static index buffer no longer replaces a longer identical
+  snapshot. This recovered missing triangles in both shadows and the scene.
+  Insufficient index data and shader compilation failures now fail explicitly.
+- PA_CL_CLIP_CNTL controls host depth clipping. The former default depth clamp
+  drew geometry beyond the last shadow cascade's near plane. Its checkpoint
+  error falls from 0.133914 to 0.000010 after applying the captured clip state.
+
+`build/captures/base-submission-mips` now replays at **39.16 dB** RGB PSNR.
+Only **63/614400 pixels (0.010254%)** differ by more than 32 in any RGB channel.
+The first shadow depth image has no missing geometry and mean absolute depth
+error 0.00000373. All **41** exported colour checkpoints are below the chosen
+0.01 average normalized error threshold; no first divergence is reported.
+There are no D3D12 debug messages in this run.
+
+The repeatable validation command is:
+
+```powershell
+# Requires Windows Graphics Tools (installed on this development PC).
+$env:FD_REPLAY_DEBUG = '1'
+./tools/validate_replay.ps1 -ReplayDir build/base-submission-mips-replay -Reference build/rdoc/base-submission-mips/reference.png -CaptureDir build/captures/base-submission-mips -RenderDocCapture build/rdoc/base-submission-mips/xenia_capture.rdc -MinimumPsnr 35 -MaximumOutlierPercent 0.1 -RequirePassAgreement
+```
+
+Evidence: `build/validation-base-gate.log`, the replay directory's
+`validation-image.json` and `validation-rdoc.json`, and
+`build/compare-base-depth-clip.log`. This is a saved-frame base-renderer gate,
+not proof that every level/effect is correct or that live rendering is integrated.
+The next base work is extracting this validated renderer into the runtime and
+checking longer gameplay/resource lifetimes; DLSS/DLAA remain deferred.
+
+## Independent-frame regression — 2026-11-03
+
+A second fresh first-scene capture exposed two more source-selection bugs:
+depth resolves incorrectly depended on the colour attachment, and CPU command
+resynchronization could leave temporary or invalid copy-source registers.
+Depth copies now select depth storage by surface/depth identity. Resolve packing
+reads the source surface objects, as explicit clears already do. This restores
+the distant ice formation and terrain; the new frame improves from 20.53 to
+35.73 dB. All three captures were repacked and checked with the corrected code:
+
+| Capture under `build/captures/` | RGB PSNR | Pixels over 32 | Aligned draws | Colour checkpoints |
+| --- | ---: | ---: | ---: | ---: |
+| `base-submission-mips` | 39.16 dB | 63 (0.010254%) | 984 | 41 |
+| `gameplay-bright-complete` | 35.73 dB | 497 (0.080892%) | 1,084 | 41 |
+| `title-base-complete` | 34.37 dB | 68 (0.011068%) | 134 | 40 |
+
+The directory name `gameplay-bright-complete` is a capture label, not proof of
+scene coverage: both gameplay frames are from the introductory scene. All
+checkpoints have normalized MAE below 0.01, no draws or colour resolves remain
+unverified, and there are no D3D12 debug messages. Each capture excludes one
+clear-only colour copy from the draw-based comparison. Validation rejects a
+missing native readback or an unexplained colour-copy exclusion; D3D12 errors
+now make native execution fail before output images are accepted.
+
+Evidence: `build/validation-base-surface-regression.log`,
+`build/validation-bright-final-gate.log`, `build/validation-title-final-gate.log`,
+and each replay directory's `validation-image.json`/`validation-rdoc.json`.
+Image gates are at least 35 dB for the two gameplay frames and 34 dB for the
+title, with fewer than 0.1% outlier pixels in each case. These are saved-frame
+regression thresholds, not claims of pixel identity or full-game correctness.
+
+## Breath tutorial and predicate correction — latest result
+
+The elevated camera exposed an XenosRecomp `SETp_INV` error. The predicate became
+true for input 1, but the generated scalar result incorrectly stayed 1 instead
+of becoming 0. Terrain shaders use this predicate stack to select shadow
+cascades. Fixing that case raises the new Breath capture from 34.67 to 40.24 dB.
+The correction is retained in `patches/xenosrecomp.patch`.
+
+The native replay also retains the original scene's 2x MSAA, resolves colour
+before copies/readbacks, and selects the corresponding depth sample. Xenia's
+default host sample pattern is used for parity; its optional programmable Xenos
+pattern can be selected with `FD_XENOS_SAMPLE_POSITIONS`. Float depth snapshots
+retain D24FS8/UNORM24 quantization. MSAA was a separate omission, not the cause
+of the large terrain lighting difference.
+
+All 93 shader sources needed across the four captures were regenerated and
+repacked, including the depth helper shaders. The final enforced gates pass:
+
+| Capture | RGB PSNR | Pixels over 32 / 614400 | Aligned draws | Colour checkpoints |
+| --- | ---: | ---: | ---: | ---: |
+| `base-submission-mips` | 39.41 dB | 20 (0.003255%) | 984 | 41 |
+| `gameplay-bright-complete` | 36.03 dB | 409 (0.066569%) | 1,084 | 41 |
+| `title-base-complete` | 34.37 dB | 45 (0.007324%) | 134 | 40 |
+| `gameplay-breath-complete` | 40.24 dB | 505 (0.082194%) | 958 | 41 |
+
+No D3D12 messages, unmatched draws, unexplained colour resolves or divergent
+checkpoints occur. The C++ generated-expression test executes the actual output
+of a synthetic `SETp_INV` instruction: five scalar/stack values and two boolean
+round trips pass. Run `tools/test_predicate_codegen.ps1` in an x64 Visual Studio
+developer shell. The 44 Python replay tests also pass.
+
+Evidence: `build/validation-<capture>-predicate.log`, each corresponding replay
+directory's JSON reports, and `build/test-predicate-codegen.log`. The Breath
+capture was taken after Start at 140 seconds and LT held from 280 to 325 seconds,
+with capture delayed until 430 seconds. This adds another camera/tutorial state
+within the first level; later levels, long resource lifetimes and live native
+integration remain to be verified. DLSS/DLAA remain deferred.
+
+Final image export now uses opaque `frame.png`. The game's post-processing alpha
+was previously written as PNG transparency, making previews much darker on black
+backgrounds despite close RGB values. The final compatibility target PNG is also
+opaque; intermediate/raw alpha is unchanged. All four image/checkpoint gates pass
+again with opacity enforced, and 47 Python tests plus seven generated predicate
+cases pass. See `build/native-reference-opaque-comparison.png` for the direct
+reference/native comparison, with unchanged RGB bytes.
+
+## Shared native core and runtime diagnostic
+
+The validated implementation now lives in `runtime/gpu/native/renderer.cpp`;
+`tools/fd_replay/main.cpp` is a thin CLI. `gpu::native::Renderer` owns one
+device/queue/list/fence and waits for GPU completion before releasing a frame's
+resources. Debug state belongs to the context rather than process globals.
+Eight frames alternating all four captures (two cycles) complete with 6,320
+game draws on one device, preserving all four image/RDC gates.
+
+Configure `-DFD_NATIVE_RENDERER=ON` to link this same core into `FromDust.exe`.
+`FromDust.exe --native-replay <directory> [<directory> ...]` renders saved frames
+before guest workers start; four frames / 3,160 game draws have run successfully
+inside the game executable. Normal Xenia-backed startup also passes a bounded
+75-second smoke run. The option defaults off, and live guest draw submission is
+not connected yet. No new native gameplay/performance claim follows from this.
+
+Evidence: `build/validation-native-eight-frames.log`,
+`build/validation-runtime-native-core-stdout.log`,
+`build/smoke-normal-native-linked.log`, and
+`build/validation-<capture>-shared-core.log`. Four malformed replay inputs now
+fail before device initialization instead of allowing unchecked reads.
+
+The later debug audit supersedes all earlier "no D3D12 messages" claims as a
+validation result. `FD_REPLAY_DEBUG=1` now fails explicitly if layer activation or
+its info queue is unavailable. Both the bundled 614 SDK and an isolated official
+620 SDK test returned `DXGI_ERROR_SDK_COMPONENT_MISSING`; production remains on
+614. Windows Graphics Tools was subsequently installed through
+`tools/install_graphics_tools.ps1` with the user's UAC approval. DISM reports
+`Installed`, with `RestartNeeded: false` (`build/graphics-tools-result.json`).
+
+Optimized clear values reduce redundant clear warnings. This also exposed a
+Plume bug: depth optimized clears used a typeless resource format instead of
+the typed DSV format. `patches/plume.patch` fixes the format and explicitly
+initializes depth/stencil; resource-creation failures now stop with a diagnostic.
+Remaining warnings are retained in the logs: different later clear values and
+float-backed placeholders for generated uint vertex inputs (the affected
+fetches use shader pulling).
+
+Active debug validation passes all four captures: 3,160 submitted game draws,
+163 colour checkpoints, unchanged RGB metrics and zero D3D12 errors. Warnings
+remain visible and counted (10/21/8/20 for separate-process capture runs).
+Running inside `FromDust.exe` also exposed a binding-order assertion: clears
+must transition every framebuffer attachment, including sampled shared depth,
+before binding it. The corrected order passes the runtime's four saved frames
+and an eight-frame CLI sequence with debug active. Evidence:
+`build/validation-runtime-native-debug-active-stdout.log`,
+`build/validation-runtime-native-debug-active-stderr.log`,
+`build/validation-native-eight-frames-debug-active.log`, and
+`build/validation-<capture>-debug-active.log`. Live native gameplay remains pending.
+
+## Live shader identities and shared compiled assets
+
+`tools/build_native_shaders.py` regenerates all 554 extracted containers with
+the patched XenosRecomp and compiles actual VS/PS entry points with DXC. The
+fixed specialization function matches the saved-frame renderer. Output goes
+to ignored `build/native-shaders/`: HLSL, DXIL, a provenance manifest and one
+`catalog.bin`. An incremental key covers the source container, recompiler,
+common HLSL, DXC/DXIL libraries and flags; an unchanged rebuild compiles nothing.
+The builder publishes the catalog only after every shader compiles.
+
+The native core accepts `fd_replay --shader-catalog <catalog.bin> <replay-dir>`.
+Both shader bytecode and output metadata then come from that catalog; a missing
+entry fails before device creation, without falling back to replay-local assets.
+The four captures preserve their RGB metrics and all 163 colour checkpoints
+with the catalog selected and the D3D12 debug layer active. Execution reports
+explicitly confirm catalog use. Evidence: `build/validation-<capture>-native-catalog.log`.
+
+For live integration, initialization hooks register shader objects before D3D
+patches vertex fetch instructions. Pixel virtual metadata starts at object
+`+0x28`; vertex metadata starts at `+0x368`. The catalog compares full virtual
+metadata and full physical bytes, including stage and lengths. Several
+containers share physical code but have different metadata, so a physical
+prefix or physical-code-only hash cannot safely select a native shader.
+Unknown initialization erases any old object binding, including address reuse
+across stages. Matching pointers refer to immutable catalog entries.
+
+Set `FD_NATIVE_SHADER_CATALOG=<catalog.bin>` in an `FD_NATIVE_RENDERER=ON` build
+to audit the registry while the game runs. `FD_NATIVE_AUDIT_REPORT` selects the
+JSON report; its default is beside the catalog. Only complete CPU frames after
+the first swap enter coverage totals. These are engine call counts, including
+BeginVertices, rather than submitted GPU draw counts. The report explicitly
+identifies Xenia as the rendering backend and does not claim native gameplay.
+
+`tools/validate_native_live.ps1` launches a bounded unattended audit with the
+known Start/A schedule, checks process success and report freshness, then
+requires shader coverage and a scene-complexity threshold. Intro/menu-only
+coverage is insufficient for that scene gate. The renderer still needs a live
+frame/resource producer and presentation path; shader identities are its first
+validated input.
+
+The first bounded 300-second audit passed 7,471 complete CPU frames and
+1,190,827 engine draw calls, including 1,088,298 indexed calls. All 557 shader
+initializations matched; 75 catalog entries were used, with zero unresolved
+draws. The final complete scene frame contains 634 calls. An incomplete catalog
+fails explicitly, and the scene gate rejects an intro-only run even when its
+shader identities are fully covered. Evidence:
+`build/native-shaders/live-gameplay-audit.json`,
+`build/native-shaders/live-missing-shader-audit.json`, and
+`build/test-live-scene-gate.log`. This is validated live identity coverage, not
+live rendering by the native core.
+
+## Typed frame input, owned geometry and direct constants
+
+The renderer now accepts `FrameInput` directly through `Renderer::RenderFrame`.
+`ReplayFrame` is the file adapter; parsing and storage live in `replay_frame.cpp`.
+It cannot be copied, and its move preserves the storage referenced by draws.
+Frame inputs borrow immutable spans until the synchronous GPU fence completes.
+An empty diagnostic directory produces no frame files; `FrameOutput` returns
+opaque RGB and execution counts. Failure clears the output and does not count
+a completed frame. This readback path is for correctness checks, not the final
+native swapchain or an asynchronous performance design.
+
+The C++ geometry producer decodes live vertex fetches using complete catalog
+metadata, snapshots primary/pulled streams, converts formats and byte order,
+and expands rectangle lists. `Geometry::Bind` supplies owned data to a typed
+draw. `StreamArena` reuses identical stream snapshots while retaining different
+contents if a guest buffer changes at the same address. All 3,160 saved-frame
+draws match their validated vertices, indices, semantic layouts and pulled
+streams exactly. Four frames rendered from preloaded memory match baseline RGB
+exactly on one device; all four image/RDC gates still pass.
+
+`FD_NATIVE_GEOMETRY_CAPTURE=<seconds>` adds one live geometry snapshot to the
+shader audit. `FD_NATIVE_GEOMETRY_MIN_INDEXED` defaults to 500; the first eligible
+scene frame is copied. `FD_NATIVE_GEOMETRY_REPORT` chooses its JSON report.
+BeginVertices captures its shader/fetch inputs at reservation and reads completed
+data before the next draw, clear, resolve or swap. Wraps, missing inputs and
+unsupported draws fail explicitly. A captured batch remains owned and accessible
+through `audit::CapturedGeometry()`; it is not yet a complete renderable frame.
+The scope is one engine call's final draw packet, with no submitted-GPU-draw
+count claim. Full call expansion/state and resource handling must precede native
+backend activation.
+
+The 315-second scene run captured 615 geometry packets, zero failures,
+380,017,520 converted vertex bytes and 3,425,700 index bytes. These are diagnostic
+snapshot sizes, not an optimized per-frame upload or a performance claim.
+
+The constant producer copies both device float banks into each owned command.
+An independent check compares used float registers from Xenia's microcode
+analyzer against synchronized GPU state, excluding literals already embedded by
+XenosRecomp: 37,388 float4 comparisons across all four captures have zero
+differences. The same analyzer reports no memory export in all 554 catalog
+shaders. Run `FromDust.exe --native-shader-capabilities <catalog> <report.json>`
+to regenerate that analysis without starting the guest or creating a GPU device.
+
+Evidence: `build/test-memory-frames.log`, `build/test-native-geometry.log`,
+`build/test-native-geometry-unit.log`, `build/validation-<capture>-memory-core.log`,
+`build/native-shaders/live-geometry.json`, `build/native-shaders/capabilities.json`
+and each replay's `validation-device-constants.json`. Live texturing, complete
+state reconstruction, resource persistence and presentation still need connection.
+
+## Device state and native texture preparation
+
+`SnapshotDeviceState` copies the XDK device's register blocks, bool/loop bank,
+texture fetches and sampler metadata into an owned `Draw`. Index offset is an
+argument of the engine draw call, rather than the stale device shadow. Scissor
+bounds are explicit packet inputs: offline tests supply the synchronized GPU
+bounds, while the live observer records the logical window-helper arguments.
+Those logical bounds still need comparison with the submitted tiled draw state.
+All 3,160 saved-frame draws match the reconstructed state. This does not prove
+complete live call expansion or tiled scissor handling.
+
+`texture_decode.cpp` implements the captured formats, endian conversion, tiling,
+BC decompression, fixed-point expansion, cube faces and supplied mip layouts in
+C++. `TextureTables` owns immutable versions even if a guest address is reused,
+binds compatible fetches and packs the existing frame-input resource tables.
+Across the four captures, 264 base textures, seven cubemaps and 1,160 mip levels
+match the validated Python-produced bytes exactly. Replacing the resource tables
+with these C++ results renders four frames / 3,160 draws with exactly the existing
+native baseline RGB and no D3D12 debug errors. Baseline equality is not equality
+to the Xenia reference; the previously measured residual differences remain.
+
+The updated bounded Start/A schedule reaches the live complexity threshold after
+separate intro dismissal and title confirmation. The observer captures 617 owned
+commands: 617 geometry/state packets, 5,054,464 constant bytes and zero failures.
+It still explicitly reports `native_rendering: false` and
+`scope: engine-call-final-draw`; this is producer validation, not native gameplay.
+Evidence: `build/native-shaders/live-state-scene.json` and
+`build/native-shaders/live-state-scene-audit.json`. The final screenshot still
+shows the menu background, so this count alone is not proof of playable-level
+coverage. Earlier title-only runs below the threshold are rejected. Explicit
+scene identification remains necessary for unattended gameplay validation.
+
+Evidence: `build/test-native-state.log`, `build/test-native-state-unit.log`,
+`build/test-native-textures.log`, `build/test-native-texture-unit.log` and
+`build/test-native-resource-frames.log`. Live texture acquisition at the correct
+time, clear/resolve ordering, cross-frame resources and native presentation
+remain required before exclusive native gameplay.
+
+## Local visual test
+
+Double-click `Testar-render-nativo.cmd` to rerender all four saved frames with
+the shared catalog and active D3D12 debug layer. It checks fresh outputs and
+zero debug errors, then opens `build/teste-render-nativo/comparacao.html` with
+native/reference images side by side. `tools/testar_render_nativo.ps1 -NoOpen`
+runs the same diagnostic without opening the browser. This is a saved-frame
+comparison, not an interactive native renderer. `Testar-jogo.cmd` launches the
+current interactive runtime using Xenia and clears inherited diagnostic timers
+and scripted input first.
+
+## Air sparkles in the breath capture
+
+The reported missing sparkles were a native sampling difference, rather than
+animation at different times. Decoding the GPU-synchronized `frame_reference.bin`
+reproduces the selected Xenia reference RGB exactly. RenderDoc pixel history
+localizes the sparkle at (66,61) to event 7148, VS 182 / PS 183 (packed record
+951). Its `tfetch3D` instruction reads a plain non-stacked 64x64 2D texture.
+
+Xenos distinguishes an instruction's `k3DOrStacked` dimension from the actual
+fetch constant's dimension. The native shader previously always selected the
+unbound 3D heap and lost this contribution. The shared binding now tags plain
+2D descriptors with bit 31 in the 3D descriptor table; `tfetch3D` and its explicit
+LOD variant select the final 2D SRV, preserving its mip chain, swizzle and resolve
+alias. This does not implement volume or multi-slice stacked uploads. The Python
+packer now rejects stacked textures explicitly instead of retaining one slice.
+
+After rebuilding all 554 catalog shaders and runtime/local replay assets, the
+25x25 sparkle region's maximum RGB error falls from 31 to 1 (mean 1.702 to
+0.193). Whole-frame PSNR improves from 40.239822 to 40.833551 dB and outliers
+from 505 to 398. The other three frames retain their metrics; all 163 exact-event
+colour checkpoints still pass. Residual image differences remain elsewhere.
+
+`tests/native_effect_regions.json` pins small effect regions to exact capture
+and reference RGB hashes. `tools/validate_effect_regions.py` runs in both replay
+validation and the local visual launcher. The previous image fails this check;
+the corrected one passes. Whole-frame averages alone missed this visible effect.
+Evidence: `build/validation-particles.log`, `build/validation-effects-before.json`,
+the breath replay's `validation-effects.json`, and
+`build/validation-runtime-particles-{stdout,stderr}.log`.
+
+## Sky light shafts and conditional shader execution
+
+VS 117 / PS 118 draw the shafts in the title and scene captures. Their 16x64
+BC3 mask has its base mip at X=16 texels inside a packed tail. Extracting that
+region matches the RenderDoc texture exactly. Python and C++ now support packed
+base mips in tiled/linear storage; already extracted higher mips are not offset
+again. All four higher-mip tables remain byte-identical.
+
+The compiler also omitted conditional EXEC guards. VS 117 executed both
+alternatives of angular fade despite opposite boolean conditions. Boolean and
+predicate EXECs are now guarded, with conditional END inside the guard. The
+complete 256-bit boolean bank at shared offset 1680 preserves hardware indices,
+including pixel booleans starting at 128. Rebuild shaders and runtime together.
+These are translation/layout corrections, not added artistic lighting.
+
+Updated metrics, using the same references and gates:
+
+| Capture | PSNR (dB) | Pixels with error >32 |
+| --- | ---: | ---: |
+| base-submission-mips | 49.306323 | 20 |
+| gameplay-bright-complete | 48.326504 | 0 |
+| title-base-complete | 52.631946 | 0 |
+| gameplay-breath-complete | 43.996322 | 376 |
+
+All 3,160 draws and 163 exact-event colour checkpoints pass with debug active
+and zero errors. C++ rebuilding matches 264 base textures, seven cubes and 1,160
+mip levels, and renders exactly the updated native baselines. The title's left
+shaft region rejects both the original dim image and the intermediate incorrect
+attenuation. Its maximum/mean errors fall from 32 / 17.225 to 3 / 0.323. Other
+title/breath shaft regions and the sparkle region pass too. Residual breath
+differences elsewhere remain.
+
+Evidence: `build/validation-light-shafts.log`, `build/test-packed-base-unit.log`,
+`build/test-native-light-resources-final.log`, `build/effects-title-before-light.json`,
+`build/effects-title-before-conditional.json`, each `validation-effects.json`, and
+`build/validation-runtime-light-final-{stdout,stderr}.log`. All 554 shaders rebuild
+and all 49 Python tests pass. Layout/control-flow semantics were independently
+checked against Xenia's `texture_util.cc` and `shader_translator.cc`.
+
+## Ordered native clear and resolve production
+
+`operations.cpp` constructs owned clear/resolve commands from device surface
+bindings, explicit clear arguments and the copy registers committed by each XDK
+resolve call. Clear rectangles are copied before guest mutation. The parser
+walks complete PM4 packets, skips payloads and rejects missing/truncated copy
+state; it never treats a payload word as a register header. Null-texture XDK
+flush calls are excluded. Partial texture destinations and supported mip copies
+retain the existing replay semantics. Missing/noncontiguous command ranges and
+unsupported layouts fail explicitly.
+
+All 39 clears and 197 resolves across the four captures match the meaningful
+operation state; all 197 copy-register sources come from contiguous CPU packets,
+without synchronized GPU-register fixtures. Unused colour state in depth-only
+operations may differ from the old adapter's stale tracked registers. Replacing
+every saved operation with the C++ result renders all four frames / 3,160 draws
+with exactly the validated native baseline RGB and zero D3D12 debug errors.
+Unit checks cover packet payload isolation, truncated data, write-one-register
+headers, missing surfaces and clear-rectangle ownership.
+
+The bounded live observer now retains clears and resolves among geometry
+commands. A complex frame captured 615 geometry commands, 11 clears and 50
+resolves: 676 ordered owned commands, zero failures. This still has the explicit
+`engine-call-final-draw` scope and is not a complete playable-level proof or a
+native presentation path. Live textures at the right time, complete submitted
+draw expansion, persistent GPU resources and native presentation remain pending.
+The diagnostic copies 380 MB of converted vertices; these snapshots are not an
+optimized production upload path or a performance measurement.
+
+Evidence: `build/test-native-operation-unit.log`,
+`build/test-native-operation-frames.log` and
+`build/native-operations-live/live-geometry.json`.
+
+## Settings HUD and renderer information
+
+F1 opens the settings HUD. Window presets now include 1440p and 4K; the interface
+adds frame interval visibility, four HUD corners and a 75–150% interface scale.
+These choices are normalized and saved alongside existing settings. They apply
+without a graphics restart.
+
+The renderer tab reports the actual active Xenia / Direct3D 12 backend, adapter,
+physical window size, startup graphics settings, local DXGI memory usage/budget
+and optional native audit progress. It explicitly identifies native integration
+as incomplete. No unavailable renderer switch or DLSS option is exposed.
+
+Performance history contains up to 240 real guest swap intervals, measured
+after frame pacing, independently of HUD paints. It shows FPS, mean, P95 and
+maximum interval, a graph and draw requests per frame. These are delivery
+intervals, not GPU execution timestamps, and draw requests include internal
+operations rather than counting only submitted native draws. Native gameplay
+performance must be measured after live integration, with one game instance and
+diagnostic snapshots/readbacks disabled; saved-frame rendering cannot establish
+interactive FPS. The observed Xenia HUD FPS is not a native benchmark.
+
+The settings/input and frame timing tests pass, including round trips, bounds,
+restart requirements, history wrap, percentiles and reset. The live game HUD
+was also visually checked at 1280x720, including the renderer tab and scrolling.
+Both launchers clear inherited settings-open/tab diagnostic overrides so a
+normal launch or unattended validation does not accidentally block game input.
+
+## Optimized runtime build and performance baseline
+
+The existing CMake cache selected Release but had an empty
+`CMAKE_CXX_FLAGS_RELEASE`; generated build rules confirmed no C++ optimization,
+including the recompiled guest modules. `build_all.ps1` now explicitly pins
+`/O2 /Ob2 /DNDEBUG` when configuring Release. All runtime/guest/backend targets
+were rebuilt with those flags. This benefits the common CPU runtime and does
+not activate native presentation.
+
+A single offscreen Xenia instance at the title's Start prompt, using identical
+settings (verified SHA-256), improved from 18.7 FPS (18–19) to 39.7 FPS (38–41).
+Each result uses the last ten one-second swap-count samples, after profiling
+and the screenshot capture finished. Both screenshots were checked for the same
+screen. Faster loading required fewer scripted Start presses after optimization;
+the earlier optimized run reached the main menu and is explicitly excluded from
+this comparison. Animation frames and background workload are not locked.
+These are bounded title measurements, not native-backend or gameplay FPS, and
+do not establish a 60 FPS target. Evidence:
+`build/perf-title-before/measurement.json`,
+`build/perf-title-after-matched/measurement.json`, their `frame.png`/logs, and
+`build/build-optimized-runtime.log`. The bounded reproduction script is
+`build/measure-title.ps1`.
+
+The optimized runtime renders four native saved frames / 3,160 draws with the
+D3D12 debug layer active and zero errors. Their RGB also exactly matches the
+pre-optimization comparison HTML's embedded native images. Settings/input and
+frame timing checks pass with optimization enabled. Evidence:
+`build/validation-runtime-optimized-{stdout,stderr}.log` and each replay's fresh
+`native-report.json`. Native command reconstruction also passes all 236
+operations with the debug layer active (`build/test-native-operation-frames.log`).
+
+## First-use vertex declaration timing
+
+The optimized runtime reaches the rendered introduction more quickly. Its
+native observer exposed nine first-use vertex-layout failures that the earlier
+title/menu captures did not exercise. Small before/after shader dumps show the
+cause directly: the XDK patches zero format/stride placeholders during the draw
+flush. For example, VS 169 changes from format zero to formats 26/31 and a
+32-byte stride. Other skinning/particle shaders also reorder fetch destinations
+and select secondary streams while applying their declarations.
+
+The observer now copies completed vertex code in `End`, immediately after the
+guest draw call returns. Inline `BeginVertices` commands keep that owned shader
+snapshot while waiting for their reserved vertex bytes to be filled. Reading
+the code later, when flushing an inline command, could pick up a subsequent
+rebind. Device constants remain snapshots of their draw's input state.
+
+Diagnostic failures identify the shader, register and semantic and save owned
+before/after code under the report's filename. The optional
+`FD_NATIVE_GEOMETRY_MIN_PATCHED` / `validate_native_live.ps1
+-MinimumPatchedShaders` regression mode retains the first complete valid frame
+that exercises the requested number of layout updates. Valid frames without
+that coverage are counted and discarded; any conversion/order failure remains
+terminal. It retains the existing scene-complexity threshold and bounded run.
+`-Screenshot` captures the final runtime scene for manual identification; that
+image is not claimed to be the exact captured geometry frame.
+
+Evidence of the original failure: `build/native-operations-live-optimized`,
+`build/native-geometry-diagnostics/live-geometry.json`, its `.failure-*.bin`
+snapshots and `scene.png` (the rendered waterfall introduction, not a menu).
+The saved-frame geometry regression still matches all 3,160 draws exactly.
+
+The targeted run `build/native-first-bind-verified/live-geometry.json` now
+captures nine declaration updates and completes with zero failures: 711
+geometry commands, 11 clears, 50 resolves and 772 ordered commands in total.
+It owns 1,230,480 pulled-stream bytes as well as both constant banks. The
+required patch-coverage gate is enabled; no unpatched frame was skipped in this
+run. Evidence: `build/test-native-first-bind-verified.log` and
+`build/build-native-first-bind-final.log`. The full report remains explicitly
+`native_rendering: false`; this verifies completed input ownership, not native
+rendering of that introduction or a native playable level.
+
+## Native texture memory producer — 2026-11-04
+
+`texture_storage.cpp` now derives base/mip addresses, row pitches, aligned
+subresource offsets and packed-tail positions directly from fetch descriptors.
+It does not call Xenia layout utilities or consume captured mip descriptors.
+The rules are adapted from the local BSD-licensed texture utilities, with
+explicit physical-memory bounds and unsupported-view failures. Base 2D reads
+exclude unused trailing rows; cubemaps retain the existing six-aligned-slice
+decoder contract. Mip-bank extents match the independent GPU layout reference.
+
+`SnapshotTexture` reads and owns both banks. Packed level zero and its higher
+levels share one memory read when their addresses overlap. `TextureTables::Capture`
+decodes those banks using the fetch pitch, without the old capture adapter's
+tightly-repacked-image inference, and builds the native frame resource tables.
+Linear BC base rows are aligned in blocks as required by the storage layout.
+The caller must synchronize GPU-written memory before invoking this API.
+
+`FD_FRAME_CAPTURE=<seconds>` together with `FD_NATIVE_TEXTURE_CAPTURE=1`
+connects the producer to the GPU-consuming texture hook, after the diagnostic
+full resolve readbacks. It exports `native-{textures,cubes,mips}.rgba` plus
+`native-texture-report.json`, bound to the completed register stream hash.
+The exact scope is `gpu-consumer-first-use-per-address`, matching the existing
+raw capture's resource inventory. A base first used without mips can acquire
+its mip bank when first used later. Repeated unchanged descriptors do not
+recalculate the layout. This still relies on Xenia's consuming thread and
+readbacks; it is not an exclusive native resource or presentation path.
+
+The repeatable bounded command is:
+
+```powershell
+.\tools\validate_native_textures.ps1 -Screenshot
+```
+
+It uses isolated 1x settings, clears unrelated diagnostic overrides, checks
+fresh outputs and runs `validate_native_texture_capture.py`. The reference
+decoder reads the raw banks and independently captured GPU mip layouts. It
+rejects incomplete/failed reports, register-hash mismatches, wrong pixels,
+duplicate mip records and truncated tables. Explicit mip resource indices make
+record ordering immaterial. Normal interactive and native geometry launchers
+clear the new diagnostic override.
+
+The final 120-second title run acquires 49 base textures, one cubemap and 178
+mip levels with zero producer failures and exactly the independent reference
+pixels. `scene.png` was inspected and identifies the title's Start prompt.
+Evidence: `build/native-texture-live-final/native-texture-report.json`,
+`validation-textures.json`, `scene.png` and the runtime logs in that directory.
+The earlier successful run remains in `build/native-texture-live-title`.
+
+Across the four saved captures, 264 bases, seven cubes and 1,160 mip levels
+match the reference. All mip pitches/offsets/packed positions and bank extents
+are also checked against the GPU metadata. The production memory-reader entry
+point reconstructs every resource without being supplied those layouts. Four
+frames / 3,160 draws rendered from its tables retain exact native baseline RGB,
+with the D3D12 debug layer active and zero errors. Existing input-signature
+reinterpretation warnings remain. Evidence:
+`build/test-native-memory-textures-render.log` and
+`build/test-native-texture-storage-unit.log`.
+
+The ownership unit checks cover shared tails, guest mutation, pitched linear
+images, aligned linear BC rows, physical-memory bounds and unreadable banks.
+All 54 Python tests and both runtime CTests pass. Full per-draw resource version
+tracking, resource persistence across frames, complete submitted-draw expansion
+and native presentation remain pending. Mip-only views, 3D/stacked textures,
+cube mip chains, float mip tables and overlapping base rows fail explicitly;
+they are not silently replaced or inferred.

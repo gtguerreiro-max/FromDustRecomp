@@ -5,7 +5,7 @@ Usage: python tools/analyze_capture.py [capture] [--ranges] [--offset HEX...]
 """
 import struct, sys, collections
 
-KINDS = {0: "indexed", 1: "rect", 2: "rect'", 3: "swap", 4: "resolve"}
+KINDS = {0: "indexed", 1: "rect", 2: "rect'", 3: "swap", 4: "resolve", 5: "clear"}
 
 
 OBJECT_COUNT, OBJECT_SIZE, CODE_SIZE = 26, 0x80, 0x400  # frame_capture.cpp constants
@@ -48,6 +48,11 @@ def load(path, with_objects=False):
                 flags, texture = struct.unpack_from("<2I", data, i + 4)
                 objects["resolve"] = (flags, texture, data[i + 12:i + 12 + 0x40])
                 i += 12 + 0x40
+            if data[i:i + 4] == b"FDCL":
+                depth, count = struct.unpack_from("<fI", data, i + 4)
+                rectangles = [struct.unpack_from(">4i", data, i + 12 + r * 16) for r in range(count)]
+                objects["clear"] = (depth, rectangles)
+                i += 12 + count * 16
         records.append((header, snapshot, objects) if with_objects else (header, snapshot))
     return records
 

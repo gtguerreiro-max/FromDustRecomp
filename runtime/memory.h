@@ -15,8 +15,15 @@ namespace mem
     constexpr uint32_t kVirtualHeapEnd  = 0x7F000000;
     constexpr uint32_t kPhysicalBase    = 0xA0000000; // 512 MB, GPU visible
     constexpr uint32_t kPhysicalEnd     = 0xC0000000;
+    constexpr uint32_t kPhysicalSize    = 0x20000000;
+    // The 4 KB-page alias starts one physical page after A/C.
+    constexpr uint32_t PhysicalAddress(uint32_t address) {
+        return (address&(kPhysicalSize-1))+(address>=0xE0000000u?0x1000:0);
+    }
 
     bool Init();
+    // Apply write watches to every CPU alias of the physical range.
+    bool ProtectPhysical(uint32_t offset,uint32_t length,bool readOnly);
 
     // Allocations return guest addresses; 0 on failure.
     uint32_t AllocVirtual(uint32_t size, uint32_t alignment = 0x10000);

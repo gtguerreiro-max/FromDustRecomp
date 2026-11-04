@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "gpu.h"
+#include "native/live_audit.h"
 
 #include "../kernel/kernel.h"
 
@@ -125,6 +126,7 @@ KFUNC(VdSwap)
     const uint32_t buffer = ARG0, fetch = ARG1;
     const uint32_t fetchAddress = mem::Read32(fetch + 4);
     const uint32_t frontBuffer = (fetchAddress & 0xFFFFF000u) & 0x1FFFFFFFu;
+    gpu::native::audit::Swap(frontBuffer);
     // The presenter reads texture fetch slot 0. The D3D texture header holds
     // a virtual address, so translate that field to the GPU physical address.
     mem::Write32(buffer, (5u << 16) | 0x4800u); // type 0, six fetch dwords

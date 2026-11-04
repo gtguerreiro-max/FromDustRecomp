@@ -5,6 +5,7 @@ ppc/
 
 # Build outputs and logs.
 build/
+.local/
 *.log
 __pycache__/
 
@@ -15,4 +16,5 @@ XenosRecomp/
 research/
 third_party/plume/
 third_party/agility/
+third_party/agility-620/
 third_party/renderdoc_dl/

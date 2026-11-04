@@ -165,7 +165,7 @@ def _put_pixel(rgba, width, height, x, y, r, g, b, a):
         rgba[i + 3] = a & 0xFF
 
 
-def _dxt1_rgb_block(block):
+def _dxt1_rgb_block(block, force_four_colors=False):
     """Decode the 8-byte DXT1/BC1 color part to 16 RGB triples."""
     if len(block) < 8:
         block = block + b"\x00" * (8 - len(block))
@@ -174,41 +174,32 @@ def _dxt1_rgb_block(block):
     max16 = int.from_bytes(block[2:4], "little")
     index_word = int.from_bytes(block[4:8], "little")
 
-    min_r5 = (min16 >> 11) & 0x1F
-    min_g6 = (min16 >> 5) & 0x3F
-    min_b5 = min16 & 0x1F
-
-    max_r5 = (max16 >> 11) & 0x1F
-    max_g6 = (max16 >> 5) & 0x3F
-    max_b5 = max16 & 0x1F
-
-    c_min = _fields_to_rgb(min_r5, min_g6, min_b5)
-    c_max = _fields_to_rgb(max_r5, max_g6, max_b5)
-
-    if min16 == max16:
-        colors = [
-            c_min,
-            (0, 0, 0),
-            c_max,
-            (0, 0, 0),
-        ]
+    c_min = _expand_565(min16)
+    c_max = _expand_565(max16)
+    # Stored endpoints are palette entries 0 and 1, not the extremes of an
+    # ordered four-entry ramp. BC2/BC3 always use four colours, even c0 <= c1.
+    if min16 > max16 or force_four_colors:
+        colors = [c_min, c_max,
+                  tuple((2 * a + b) // 3 for a, b in zip(c_min, c_max)),
+                  tuple((a + 2 * b) // 3 for a, b in zip(c_min, c_max))]
     else:
-        c1 = _fields_to_rgb(
-            (2 * min_r5 + max_r5) // 3,
-            (2 * min_g6 + max_g6) // 3,
-            (2 * min_b5 + max_b5) // 3,
-        )
-        c2 = _fields_to_rgb(
-            (min_r5 + 2 * max_r5) // 3,
-            (min_g6 + 2 * max_g6) // 3,
-            (min_b5 + 2 * max_b5) // 3,
-        )
-        colors = [c_min, c1, c2, c_max]
+        colors = [c_min, c_max, tuple((a + b) // 2 for a, b in zip(c_min, c_max)), (0, 0, 0)]
 
     out = []
     for i in range(16):
         out.append(colors[(index_word >> (2 * i)) & 0x3])
     return out
+
+
+def _bc4_channel(block):
+    """An unsigned BC4 block (also BC3 alpha and each of the two BC5 planes)."""
+    a0, a1 = block[0], block[1]
+    if a0 > a1:
+        palette = [a0, a1] + [((7 - k) * a0 + k * a1) // 7 for k in range(1, 7)]
+    else:
+        palette = [a0, a1] + [((5 - k) * a0 + k * a1) // 5 for k in range(1, 5)] + [0, 255]
+    bits = int.from_bytes(block[2:8], "little")
+    return [palette[(bits >> (3 * p)) & 7] for p in range(16)]
 
 
 def _decode_block(fmt, block, x0, y0, width, height, rgba):
@@ -221,11 +212,10 @@ def _decode_block(fmt, block, x0, y0, width, height, rgba):
         min16 = int.from_bytes(block[0:2], "little")
         max16 = int.from_bytes(block[2:4], "little")
         index_word = int.from_bytes(block[4:8], "little")
-        equal = min16 == max16
 
         for p, (r, g, b) in enumerate(rgb):
             idx = (index_word >> (2 * p)) & 0x3
-            a = 0 if (equal and idx in (1, 3)) else 255
+            a = 0 if (min16 <= max16 and idx == 3) else 255
             _put_pixel(
                 rgba,
                 width,
@@ -240,39 +230,32 @@ def _decode_block(fmt, block, x0, y0, width, height, rgba):
 
     elif fmt == "k_DXT2_3":
         # BC2: 8 bytes of 4-bit alpha first, then a DXT1 colour block.
-        rgb = _dxt1_rgb_block(block[8:16])
+        rgb = _dxt1_rgb_block(block[8:16], True)
         alpha = int.from_bytes(block[0:8], "little")
         for p, (r, g, b) in enumerate(rgb):
             _put_pixel(rgba, width, height, x0 + (p % 4), y0 + (p // 4), r, g, b, ((alpha >> (4 * p)) & 0xF) * 17)
 
     elif fmt == "k_DXT4_5":
         # BC3: alpha endpoints a0, a1 and 16 3-bit indices first, then a DXT1 colour block.
-        rgb = _dxt1_rgb_block(block[8:16])
-        a0, a1 = block[0], block[1]
-        if a0 > a1:
-            palette = [a0, a1] + [((7 - k) * a0 + k * a1) // 7 for k in range(1, 7)]
-        else:
-            palette = [a0, a1] + [((5 - k) * a0 + k * a1) // 5 for k in range(1, 5)] + [0, 255]
-        bits = int.from_bytes(block[2:8], "little")
+        rgb = _dxt1_rgb_block(block[8:16], True)
+        alpha = _bc4_channel(block[:8])
         for p, (r, g, b) in enumerate(rgb):
-            _put_pixel(rgba, width, height, x0 + (p % 4), y0 + (p // 4), r, g, b, palette[(bits >> (3 * p)) & 7])
+            _put_pixel(rgba, width, height, x0 + (p % 4), y0 + (p // 4), r, g, b, alpha[p])
 
     elif fmt == "k_DXN":
-        # Two 4-bit channels, stored as two 8-byte planes: R then G.
-        r_plane = block[0:8]
-        g_plane = block[8:16]
+        # BC5: independent endpoint/interpolant blocks, R then G (not nibbles).
+        r_plane = _bc4_channel(block[0:8])
+        g_plane = _bc4_channel(block[8:16])
 
         for p in range(16):
-            r_nibble = (r_plane[p >> 1] >> ((p & 1) * 4)) & 0xF
-            g_nibble = (g_plane[p >> 1] >> ((p & 1) * 4)) & 0xF
             _put_pixel(
                 rgba,
                 width,
                 height,
                 x0 + (p % 4),
                 y0 + (p // 4),
-                r_nibble * 17,
-                g_nibble * 17,
+                r_plane[p],
+                g_plane[p],
                 0,
                 255,
             )
@@ -426,6 +409,38 @@ def _choose_stride_texels(length, height, width, pitch, bytes_per_texel):
     return width
 
 
+def _extract_packed_base(raw, fetch):
+    """Return tight blocks when mip zero lives inside the packed mip tail.
+
+    Offsets follow Xenia's GetPackedMipOffset for level zero. Input bytes have
+    already had their endian conversion; this also applies to linear storage.
+    """
+    width, height = int(fetch['width']), int(fetch['height'])
+    if not fetch.get('packed_mips') or fetch.get('dimension', 1) == 0 or min(width, height) > 16:
+        return None
+    fmt = fetch['format_name']
+    block = 4 if fmt in _BLOCK_BYTES else 1
+    size = (_BLOCK_BYTES if block == 4 else _BYTES_PER_TEXEL)[fmt]
+    columns, rows = (width + block - 1) // block, (height + block - 1) // block
+    pitch = max(columns, int(fetch.get('pitch', width) or width) // block)
+    tiled = bool(fetch.get('tiled'))
+    # Guest base layouts align rows to 32 blocks, including linear BC data.
+    pitch = (pitch + 31) & ~31
+    wide = (width - 1).bit_length() > max((height - 1).bit_length(), 1)
+    x0, y0 = (0, 16 // block) if wide else (16 // block, 0)
+    from xenos_tiling import tiled_2d
+    result = bytearray(columns * rows * size)
+    for y in range(rows):
+        for x in range(columns):
+            source = (tiled_2d(x + x0, y + y0, pitch, size.bit_length() - 1) if tiled
+                      else ((y + y0) * pitch + x + x0) * size)
+            if source + size > len(raw):
+                raise ValueError('Packed base mip is outside captured storage')
+            target = (y * columns + x) * size
+            result[target:target + size] = raw[source:source + size]
+    return result
+
+
 def decode_texture(data, fetch):
     """Decode mip level 0 to RGBA8.
 
@@ -447,6 +462,9 @@ def decode_texture(data, fetch):
 
     raw = _fix_endian(bytes(data), endian)
     is_block = fmt in _BLOCK_BYTES
+    packed = _extract_packed_base(raw, fetch)
+    if packed is not None:
+        raw, pitch, tiled = packed, width, False
 
     if tiled:
         from xenos_tiling import untile_2d
@@ -466,7 +484,9 @@ def decode_texture(data, fetch):
         if len(raw) < expected:
             raw += b"\x00" * (expected - len(raw))
 
-        raw = bytes(untile_2d(raw[:expected], width_blocks, height_blocks, pitch_blocks, bytes_per_block))
+        # Small tiled textures can reference bytes beyond pitch * height
+        # (bank/pipe bits). Keep the full padded storage captured by the runtime.
+        raw = bytes(untile_2d(raw, width_blocks, height_blocks, pitch_blocks, bytes_per_block))
 
     rgba = bytearray(width * height * 4)
 

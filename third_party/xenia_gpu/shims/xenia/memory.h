@@ -34,7 +34,7 @@ class PhysicalHeap {
   xe::memory::PageAccess QueryRangeAccess(uint32_t low_address, uint32_t high_address) {
     return xe::memory::PageAccess::kReadWrite;
   }
-  uint32_t GetPhysicalAddress(uint32_t address) const { return address & 0x1FFFFFFF; }
+  uint32_t GetPhysicalAddress(uint32_t address) const { return (address&0x1FFFFFFF)+(address>=0xE0000000u?0x1000:0); }
   bool QueryRegionInfo(uint32_t address, HeapAllocationInfo* info) {
     if (address >= 0x20000000) return false;
     info->base_address = 0;
@@ -69,7 +69,7 @@ class Memory {
   uint32_t HostToGuestVirtual(const void* host_address) const {
     return uint32_t(static_cast<const uint8_t*>(host_address) - virtual_membase_);
   }
-  uint32_t GetPhysicalAddress(uint32_t address) const { return address & 0x1FFFFFFF; }
+  uint32_t GetPhysicalAddress(uint32_t address) const { return (address&0x1FFFFFFF)+(address>=0xE0000000u?0x1000:0); }
 
   // MMIO is plain memory in FromDust; register traffic is bridged separately.
   bool AddVirtualMappedRange(uint32_t, uint32_t, uint32_t, void*, cpu::MMIOReadCallback, cpu::MMIOWriteCallback) {
@@ -97,7 +97,8 @@ class Memory {
     draws_ = draws;
   }
   void SetGpuFramePacer(void (*pacer)()) { frame_pacer_ = pacer; }
-  void OnGpuSwap() { if (frame_pacer_) frame_pacer_(); if (frames_) ++*frames_; }
+  void SetGpuFrameObserver(void (*observer)()) { frame_observer_ = observer; }
+  void OnGpuSwap() { if (frame_pacer_) frame_pacer_(); if (frame_observer_) frame_observer_(); if (frames_) ++*frames_; }
   void OnGpuDraw() { if (draws_) ++*draws_; }
 
  private:
@@ -110,6 +111,7 @@ class Memory {
   std::atomic<uint64_t>* frames_ = nullptr;
   std::atomic<uint64_t>* draws_ = nullptr;
   void (*frame_pacer_)() = nullptr;
+  void (*frame_observer_)() = nullptr;
 };
 
 }  // namespace xe

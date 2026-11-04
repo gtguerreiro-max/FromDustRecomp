@@ -1,5 +1,5 @@
 diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
-index 1c74034..5c481e6 100644
+index 1c74034..c57a816 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
 @@ -15,6 +15,9 @@
@@ -12,7 +12,7 @@ index 1c74034..5c481e6 100644
  #ifdef __spirv__
  
  struct PushConstants
-@@ -26,10 +29,13 @@ struct PushConstants
+@@ -26,10 +29,14 @@ struct PushConstants
  
  [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
  
@@ -27,10 +27,11 @@ index 1c74034..5c481e6 100644
 +#define g_LoopConstant(INDEX)      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 544 + (INDEX) * 4)
 +#define fdFetchScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1536 + (INDEX) * 4)
 +#define fdColorScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1664 + (INDEX) * 4)
++#define fdBoolean(INDEX)           ((vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 1680 + ((INDEX) / 32) * 4) & (1u << ((INDEX) % 32))) != 0)
  
  [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
  
-@@ -38,15 +44,98 @@ struct PushConstants
+@@ -38,15 +45,100 @@ struct PushConstants
  #else
  
  #define DEFINE_SHARED_CONSTANTS() \
@@ -45,11 +46,13 @@ index 1c74034..5c481e6 100644
 +    uint4 g_LoopConstants[8] : packoffset(c34); \
 +    uint4 g_VertexFetch[32] : packoffset(c64); \
 +    float4 g_FetchScales[8] : packoffset(c96); \
-+    float4 g_ColorScales : packoffset(c104);
++    float4 g_ColorScales : packoffset(c104); \
++    uint4 g_AllBooleans[2] : packoffset(c105);
 +
 +#define g_LoopConstant(INDEX) g_LoopConstants[(INDEX) / 4][(INDEX) % 4]
 +#define fdFetchScale(INDEX) g_FetchScales[(INDEX) / 4][(INDEX) % 4]
 +#define fdColorScale(INDEX) g_ColorScales[INDEX]
++#define fdBoolean(INDEX) ((g_AllBooleans[(INDEX) / 128][((INDEX) / 32) % 4] & (1u << ((INDEX) % 32))) != 0)
  
  uint g_SpecConstants();
  
@@ -133,7 +136,7 @@ index 1c74034..5c481e6 100644
  Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
  Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
  TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
-@@ -59,10 +148,15 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+@@ -59,10 +151,26 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
      return dimensions;
  }
  
@@ -147,10 +150,21 @@ index 1c74034..5c481e6 100644
      Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
 -    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
 +    return XE_SAMPLE(texture, g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
++}
++
++float4 tfetch1DLevel(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float texCoord, float lod)
++{
++    return g_Texture2DDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], float2(texCoord, 0.5), lod);
++}
++
++float4 tfetch2DLevel(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float lod)
++{
++    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
++    return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), lod);
  }
  
  float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
-@@ -135,17 +229,17 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+@@ -135,17 +243,29 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
      float h1y = h1(fy);
  
      float4 r =
@@ -169,21 +183,38 @@ index 1c74034..5c481e6 100644
  float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
  {
 -    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
++    // Xenos tfetch3D also addresses a non-stacked 2D fetch constant. The
++    // native binding tags that case with bit 31 and supplies the 2D view,
++    // including its mip chain and component swizzle. It has one slice.
++    if (resourceDescriptorIndex & 0x80000000u)
++        return XE_SAMPLE(g_Texture2DDescriptorHeap[resourceDescriptorIndex & 0x7FFFFFFFu], g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord.xy);
 +    return XE_SAMPLE(g_Texture3DDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
++}
++
++float4 tfetch3DLevel(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float lod)
++{
++    if (resourceDescriptorIndex & 0x80000000u)
++        return g_Texture2DDescriptorHeap[resourceDescriptorIndex & 0x7FFFFFFFu].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord.xy, lod);
++    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, lod);
  }
  
  struct CubeMapData
-@@ -156,7 +250,7 @@ struct CubeMapData
+@@ -156,7 +276,12 @@ struct CubeMapData
  
  float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
  {
 -    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
 +    return XE_SAMPLE(g_TextureCubeDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
++}
++
++float4 tfetchCubeLevel(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float lod)
++{
++    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], lod);
  }
  
  float4 tfetchR11G11B10(uint4 value)
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 698a418..195f796 100644
+index 698a418..061c72d 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -179,6 +179,20 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
@@ -217,7 +248,39 @@ index 698a418..195f796 100644
      out += '.';
      printDstSwizzle(instr.dstSwizzle, true);
  
-@@ -253,6 +270,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -225,7 +242,8 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+ 
+ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
+ {
+-    if (instr.opcode != FetchOpcode::TextureFetch && instr.opcode != FetchOpcode::GetTextureWeights)
++    if (instr.opcode != FetchOpcode::TextureFetch && instr.opcode != FetchOpcode::GetTextureWeights &&
++        instr.opcode != FetchOpcode::SetTextureLod)
+         return;
+ 
+     if (instr.isPredicated)
+@@ -246,6 +264,21 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+                 out += SWIZZLES[((instr.srcSwizzle >> (i * 2))) & 0x3];
+         };
+ 
++    if (instr.opcode == FetchOpcode::SetTextureLod)
++    {
++        indent();
++        out += "fdTextureLod = ";
++        printSrcRegister(1);
++        out += ";\n";
++        if (instr.isPredicated)
++        {
++            --indentation;
++            indent();
++            out += "}\n";
++        }
++        return;
++    }
++
+     std::string constName;
+     const char* constNamePtr = nullptr;
+ #ifdef UNLEASHED_RECOMP
+@@ -253,6 +286,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
  #endif
  
      auto findResult = samplers.find(instr.constIndex);
@@ -227,7 +290,7 @@ index 698a418..195f796 100644
      if (findResult != samplers.end())
      {
          constNamePtr = findResult->second;
-@@ -282,6 +302,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -282,6 +318,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
      printDstSwizzle(instr.dstSwizzle, false);
  
      out += " = ";
@@ -238,7 +301,16 @@ index 698a418..195f796 100644
      switch (instr.opcode)
      {
      case FetchOpcode::TextureFetch:
-@@ -331,7 +355,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -325,13 +365,18 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+     }
+ 
+     out += dimension;
++    const bool explicitLod = instr.opcode == FetchOpcode::TextureFetch &&
++        (instr.useRegLod || (!instr.useCompLod && !instr.useRegGradients));
++    if (explicitLod) out += "Level";
+ 
+ #ifdef UNLEASHED_RECOMP
+     if (bicubic)
          out += "Bicubic";
  #endif
  
@@ -249,9 +321,12 @@ index 698a418..195f796 100644
      printSrcRegister(componentCount);
  
      switch (instr.dimension)
-@@ -344,7 +370,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -343,8 +388,13 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+         out += ", cubeMapData";
          break;
      }
++    if (explicitLod)
++        print(", {} + {}", instr.useRegLod ? "fdTextureLod" : "0.0", float(instr.lodBias) / 16.0f);
  
 -    out += ").";
 +    if (instr.opcode == FetchOpcode::TextureFetch)
@@ -261,7 +336,16 @@ index 698a418..195f796 100644
  
      printDstSwizzle(instr.dstSwizzle, true);
  
-@@ -1105,11 +1134,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -949,7 +999,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             break;
+ 
+         case AluScalarOpcode::SetpInv:
+-            print("{0} == 0.0 ? 1.0 : {0}", op(SCALAR_0));
++            print("p0 ? 0.0 : ({0} == 0.0 ? 1.0 : {0})", op(SCALAR_0));
+             break;
+ 
+         case AluScalarOpcode::SetpPop:
+@@ -1105,11 +1155,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
      assert(shaderContainer->constantTableOffset != NULL);
  
@@ -278,7 +362,7 @@ index 698a418..195f796 100644
      const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
      constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
  
-@@ -1174,11 +1206,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1174,11 +1227,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
@@ -292,7 +376,7 @@ index 698a418..195f796 100644
  
              samplers.emplace(constantInfo->registerIndex, constantName);
              break;
-@@ -1233,11 +1265,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1233,11 +1286,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",
@@ -306,7 +390,7 @@ index 698a418..195f796 100644
          }
      }
  
-@@ -1288,6 +1320,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1288,6 +1341,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "#endif\n";
  
          auto pixelShader = reinterpret_cast<const PixelShader*>(shader);
@@ -314,7 +398,7 @@ index 698a418..195f796 100644
          if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
              out += ",\n\tout float4 oC0 : SV_Target0";
          if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR1)
-@@ -1322,19 +1355,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1322,19 +1376,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              }
          #endif
  
@@ -355,7 +439,7 @@ index 698a418..195f796 100644
  
              vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
          }
-@@ -1347,6 +1394,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1347,6 +1415,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
      #endif
  
@@ -366,7 +450,7 @@ index 698a418..195f796 100644
          out += "\tout float4 oPos : SV_Position";
  
          for (auto& [usage, usageIndex] : INTERPOLATORS)
-@@ -1418,6 +1469,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1418,6 +1490,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\n";
      }
  
@@ -382,7 +466,7 @@ index 698a418..195f796 100644
      bool printedRegisters[32]{};
  
      uint32_t interpolatorCount = (shader->interpolatorInfo >> 5) & 0x1F;
-@@ -1471,6 +1531,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1471,6 +1552,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              {
                  out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
              }
@@ -394,7 +478,54 @@ index 698a418..195f796 100644
          #endif
              else
              {
-@@ -1809,6 +1874,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1482,6 +1568,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     out += "\tint a0 = 0;\n";
+     out += "\tint aL = 0;\n";
+     out += "\tbool p0 = false;\n";
++    out += "\tfloat fdTextureLod = 0.0;\n";
+     out += "\tfloat ps = 0.0;\n";
+     if (isPixelShader)
+     {
+@@ -1630,7 +1717,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 address = cfInstr.condExec.address;
+                 count = cfInstr.condExec.count;
+                 sequence = cfInstr.condExec.sequence;
+-                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
++                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd);
++                indent();
++                println("if ({}fdBoolean({}))", cfInstr.condExec.condition ? "" : "!", uint32_t(cfInstr.condExec.boolAddress));
++                indent(); out += "{\n";
++                ++indentation;
++                shouldCloseCurlyBracket = true;
+                 break;
+ 
+             case ControlFlowOpcode::CondExecPred:
+@@ -1639,6 +1731,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 count = cfInstr.condExecPred.count;
+                 sequence = cfInstr.condExecPred.sequence;
+                 shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd);
++                indent();
++                println("if ({}p0)", cfInstr.condExecPred.condition ? "" : "!");
++                indent(); out += "{\n";
++                ++indentation;
++                shouldCloseCurlyBracket = true;
+                 break;
+ 
+             case ControlFlowOpcode::LoopStart:
+@@ -1694,11 +1791,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     }
+                     else
+                     {
+-                        auto findResult = boolConstants.find(cfInstr.condJmp.boolAddress);
+-                        if (findResult != boolConstants.end())
+-                            println("if ((g_Booleans & {}) {}= 0)", findResult->second, cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+-                        else
+-                            println("if (b{} {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
++                        println("if ({}fdBoolean({}))", cfInstr.condJmp.condition ^ simpleControlFlow ? "" : "!", uint32_t(cfInstr.condJmp.boolAddress));
+                     }
+ 
+                     if (simpleControlFlow)
+@@ -1809,6 +1902,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      indent();
                      out += "}";
  

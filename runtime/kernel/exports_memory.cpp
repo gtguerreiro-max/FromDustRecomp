@@ -77,7 +77,7 @@ KFUNC(MmAllocatePhysicalMemoryEx)
 }
 
 KFUNC(MmFreePhysicalMemory) { mem::Free(ARG1); RETURN(0); }
-KFUNC(MmGetPhysicalAddress) { RETURN(ARG0 & 0x1FFFFFFF); }
+KFUNC(MmGetPhysicalAddress) { RETURN(mem::PhysicalAddress(ARG0)); }
 KFUNC(MmQueryAddressProtect) { RETURN(PAGE_READWRITE); }
 KFUNC(MmSetAddressProtect) { RETURN(0); }
 KFUNC(MmQueryAllocationSize) { RETURN(mem::AllocationSize(ARG0)); }

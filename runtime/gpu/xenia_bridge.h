@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+namespace gpu::native {class Renderer;}
+struct ID3D12Device;
 
 namespace gpu::xenia {
 bool Initialize();
@@ -14,4 +16,9 @@ void NotifyWritePointer();
 // Windows I/O validates destination pages before writing and doesn't deliver
 // the write faults used by the GPU texture cache.
 void PrepareHostWrite(uint32_t address, uint32_t length);
+void WatchPhysical(uint32_t address,uint32_t length);
+uint64_t PhysicalRevision(uint32_t address,uint32_t length);
+uint64_t PhysicalWriteSerial();
+ID3D12Device* NativeDevice();
+bool PresentNative(gpu::native::Renderer& renderer);
 }

@@ -34,6 +34,8 @@ if ($LASTEXITCODE) { throw 'import stub generation failed' }
 $gpuBuild = if ($NoGraphics) { 'OFF' } else { 'ON' }
 # -FuncCounters: diagnostic build that counts guest D3D library calls (FD_FUNC_COUNTS).
 $counters = if ($FuncCounters) { 'ON' } else { 'OFF' }
-Invoke-VS $root "cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release -DFD_XENIA_GPU=$gpuBuild -DFD_FUNC_COUNTERS=$counters -DPython3_EXECUTABLE=`"$py`"" "$root\configure_runtime.log"
+# A reused cache may contain empty Release flags. Pin the optimized production
+# flags so selecting Release cannot silently leave the PPC runtime at -O0.
+Invoke-VS $root "cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE=`"/O2 /Ob2 /DNDEBUG`" -DFD_XENIA_GPU=$gpuBuild -DFD_FUNC_COUNTERS=$counters -DPython3_EXECUTABLE=`"$py`"" "$root\configure_runtime.log"
 Invoke-VS $root "cmake --build build --target FromDust" "$root\build_runtime.log"
 "FromDust.exe built"

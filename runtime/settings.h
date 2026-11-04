@@ -21,12 +21,15 @@ inline constexpr const char* kActionNames[] = {
     "Câmara: esquerda", "Câmara: direita", "Direcional: cima", "Direcional: baixo",
     "Direcional: esquerda", "Direcional: direita"
 };
-inline constexpr int kWindowWidths[] = {1280, 1600, 1920};
-inline constexpr int kWindowHeights[] = {720, 900, 1080};
+inline constexpr int kWindowWidths[] = {1280, 1600, 1920, 2560, 3840};
+inline constexpr int kWindowHeights[] = {720, 900, 1080, 1440, 2160};
 struct Data {
     bool fullscreen = false;
     int windowPreset = 0;
     bool showFps = false;
+    bool showFrameTime = false;
+    int uiScale = 100;
+    int hudCorner = 0; // top right, top left, bottom right, bottom left
     int scale = 1;
     bool vsync = true;
     int frameLimit = 60;

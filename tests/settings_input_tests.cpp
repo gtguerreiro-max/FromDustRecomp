@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
         auto d = settings::Get();
         d.fullscreen = true; d.scale = 2; d.frameLimit = 30;
         d.presentation = 1; d.sensitivity = 175; d.showFps = true;
+        d.windowPreset=4;d.uiScale=125;d.hudCorner=3;d.showFrameTime=true;
         settings::Set(d);
         Check(settings::Bind(settings::Start, 'X'), "valid key bind rejected");
         Check(settings::Get().keys[settings::X] == VK_RETURN, "duplicate bind must swap old assignment");
@@ -44,12 +45,17 @@ int main(int argc, char** argv) {
         settings::Set(settings::Data{});
         settings::Load(path);
         Check(settings::Get() == saved, "preferences or key bindings were lost on reload");
+        auto interfaceOnly=saved;interfaceOnly.uiScale=100;interfaceOnly.hudCorner=0;
+        Check(!settings::GraphicsChanged(saved,interfaceOnly),"Interface changes must not request graphics restart");
         Check(WritePrivateProfileStringW(L"Graphics", L"Scale", L"99", path.c_str()), "test INI write failed");
         Check(WritePrivateProfileStringW(L"Graphics", L"FrameLimit", L"999", path.c_str()), "test INI write failed");
         Check(WritePrivateProfileStringW(L"Controls", L"Sensitivity", L"0", path.c_str()), "test INI write failed");
+        Check(WritePrivateProfileStringW(L"Interface",L"Scale",L"999",path.c_str()),"test INI write failed");
+        Check(WritePrivateProfileStringW(L"Display",L"WindowPreset",L"999",path.c_str()),"test INI write failed");
         settings::Load(path);
         Check(settings::Get().scale == 3 && settings::Get().frameLimit == 60 &&
               settings::Get().sensitivity == 25, "invalid persisted values weren't normalized");
+        Check(settings::Get().uiScale==150&&settings::Get().windowPreset==4,"Interface/display bounds weren't normalized");
 
         d = settings::Data{}; d.keys[settings::Start] = 'P';
         std::array<bool, 256> keys{};

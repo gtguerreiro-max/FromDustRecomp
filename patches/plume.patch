@@ -1,0 +1,26 @@
+diff --git a/plume_d3d12.cpp b/plume_d3d12.cpp
+index b15a280..0646bec 100644
+--- a/plume_d3d12.cpp
++++ b/plume_d3d12.cpp
+@@ -2874,10 +2874,18 @@ namespace plume {
+         allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+         allocationDesc.CustomPool = (pool != nullptr) ? pool->d3d : nullptr;
+ 
+-        D3D12_CLEAR_VALUE optimizedClearValue;
++        D3D12_CLEAR_VALUE optimizedClearValue = {};
+         if (desc.optimizedClearValue != nullptr) {
+-            optimizedClearValue.Format = toDXGI(desc.optimizedClearValue->format);
+-            memcpy(optimizedClearValue.Color, desc.optimizedClearValue->color.rgba, sizeof(optimizedClearValue.Color));
++            if (depthTarget) {
++                // The resource may be typeless; an optimized depth clear must
++                // use the typed DSV format, not the resource/SRV format.
++                optimizedClearValue.Format = toDXGIDepthStencilView(desc.optimizedClearValue->format);
++                optimizedClearValue.DepthStencil.Depth = desc.optimizedClearValue->depth.depth;
++                optimizedClearValue.DepthStencil.Stencil = 0;
++            } else {
++                optimizedClearValue.Format = toDXGI(desc.optimizedClearValue->format);
++                memcpy(optimizedClearValue.Color, desc.optimizedClearValue->color.rgba, sizeof(optimizedClearValue.Color));
++            }
+         }
+ 
+         HRESULT res = device->allocator->CreateResource(&allocationDesc, &resourceDesc, resourceStates, (desc.optimizedClearValue != nullptr) ? &optimizedClearValue : nullptr, &allocation, IID_PPV_ARGS(&d3d));

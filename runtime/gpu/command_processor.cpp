@@ -1,14 +1,19 @@
 // PM4 command processor: consumes the ring buffer the game's D3D writes,
 // updates the register file, services fences/waits/interrupts and swaps.
-// Rendering is not hooked up yet: draws and frames are only counted.
+// Native rendering executes the collected engine operations at VdSwap; this
+// service handles the guest-visible ring, query reports and completion events.
 
 #include <chrono>
+#include <bit>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include "gpu.h"
 #include "xenia_bridge.h"
+#include "occlusion_report.h"
+#include "native/live_audit.h"
 
 #include "../kernel/kernel.h"
 #include "../kernel/thread.h"
@@ -62,6 +67,10 @@ namespace gpu
 
         uint32_t g_regs[reg::kCount];
         std::mutex g_regLock;
+        VisibleSampleCounter g_visibleSamples;
+        std::atomic<uint32_t> g_vblankCounter{0};
+        int g_traceVS=-1,g_tracePS=-1;
+        uint32_t g_traceDraws=0,g_traceMesh=0,g_traceTerrain=0,g_traceDepth=0;
 
         uint32_t g_ringBase = 0;     // guest address
         uint32_t g_ringDwords = 0;
@@ -184,7 +193,7 @@ namespace gpu
             {
                 // initiator, address, value (bit 31 of initiator: write a counter instead)
                 const uint32_t initiator = arg(0), address = arg(1);
-                const uint32_t value = (initiator >> 31) ? uint32_t(g_stats.frames.load()) : arg(2);
+                const uint32_t value = (initiator >> 31) ? g_vblankCounter.load(std::memory_order_relaxed) : arg(2);
                 GpuWrite(address, value);
                 break;
             }
@@ -193,7 +202,14 @@ namespace gpu
             {
                 // Screen extents for occlusion queries: report "everything visible".
                 const uint32_t address = arg(1);
-                const uint16_t extents[] = { 0, 0x3FFF, 0, 0x3FFF, 0, 1 };
+                // Coordinates are in eight-pixel units (8192 / 8), matching
+                // Xenos' maximum 2D extent rather than an unscaled bit mask.
+                const uint16_t extents[] = { 0, 1024, 0, 1024, 0, 1 };
+                if (getenv("FD_GPU_EVENT_TRACE"))
+                {
+                    static unsigned traces = 0;
+                    if (traces++ < 8) kernel::Log("native EXT report: address %08X", address);
+                }
                 for (int i = 0; i < 6; i++)
                     *mem::Ptr<be<uint16_t>>(PhysToGuest(address & ~3u) + i * 2) = extents[i];
                 break;
@@ -201,12 +217,24 @@ namespace gpu
 
             case PM4_EVENT_WRITE_ZPD:
             {
-                // Occlusion sample count: report a large visible count.
+                // Eight little-endian lanes, not a big-endian uint64. D3D
+                // waits on ZPass / StencilFail completion words and computes
+                // interval counts by subtracting successive snapshots.
                 const uint32_t address = ReadRegister(reg::RB_SAMPLE_COUNT_ADDR);
+                const auto report=address?g_visibleSamples.Complete():g_visibleSamples.Report();
+                if (getenv("FD_GPU_EVENT_TRACE"))
+                {
+                    static unsigned traces = 0;
+                    if (traces++ < 8) kernel::Log("native ZPD report: address %08X, pass %u", address,
+                        report[4] + report[5]);
+                }
                 if (address)
                 {
-                    *mem::Ptr<be<uint32_t>>(PhysToGuest(address) + 0) = 0;
-                    *mem::Ptr<be<uint32_t>>(PhysToGuest(address) + 4) = 0x10000;
+                    static_assert(std::endian::native == std::endian::little);
+                    auto* destination = mem::Ptr<uint8_t>(PhysToGuest(address & ~3u));
+                    memcpy(destination, report.data(), 16);
+                    std::atomic_thread_fence(std::memory_order_release);
+                    memcpy(destination + 16, report.data() + 4, 16);
                 }
                 break;
             }
@@ -261,6 +289,10 @@ namespace gpu
             case PM4_DRAW_INDX:
             case PM4_DRAW_INDX_2:
                 ++g_stats.draws;
+                if(getenv("FD_TRACE_FRAME_COUNTS"))
+                {
+                    ++g_traceDraws;g_traceMesh+=g_tracePS==86;g_traceTerrain+=g_tracePS==146;g_traceDepth+=g_traceVS==67;
+                }
                 break;
 
             case PM4_INTERRUPT:
@@ -276,10 +308,23 @@ namespace gpu
             }
 
             case PM4_XE_SWAP:
+                if(getenv("FD_TRACE_FRAME_COUNTS"))
+                {
+                    if(g_traceDraws>500&&g_stats.frames.load()%60==0)
+                        kernel::Log("native CP frame %llu: %u draws, mesh %u terrain %u mesh-depth %u",g_stats.frames.load()+1,g_traceDraws,g_traceMesh,g_traceTerrain,g_traceDepth);
+                    g_traceDraws=g_traceMesh=g_traceTerrain=g_traceDepth=0;
+                }
                 ++g_stats.frames;
                 break;
 
             case PM4_IM_LOAD:
+                if(getenv("FD_TRACE_FRAME_COUNTS")&&count>=2)
+                {
+                    const uint32_t address=arg(0),stage=address&3;
+                    const int shader=native::audit::TraceShaderCode(stage,address&~3u);
+                    if(stage==0)g_traceVS=shader;else if(stage==1)g_tracePS=shader;
+                }
+                break;
             case PM4_IM_LOAD_IMMEDIATE:
             case PM4_ME_INIT:
             case PM4_NOP:
@@ -384,8 +429,9 @@ namespace gpu
             {
                 next += std::chrono::microseconds(16667);
                 std::this_thread::sleep_until(next);
+                ++g_vblankCounter;
                 // D3D's vblank handler checks the vblank status register first.
-                mem::Write32(kMmioBase + reg::D1MODE_VBLANK_STATUS * 4, 1);
+                mem::Write32(kMmioBase + reg::D1MODE_VBLANK_VLINE_STATUS * 4, 1);
                 DispatchInterrupt(0, 2);
                 if (++ticks % 60 == 0)
                 {

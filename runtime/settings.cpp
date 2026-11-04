@@ -15,7 +15,9 @@ constexpr const wchar_t* kKeyNames[] = {
     L"LookLeft", L"LookRight", L"DpadUp", L"DpadDown", L"DpadLeft", L"DpadRight"
 };
 void Normalize(Data& d) {
-    d.windowPreset = std::clamp(d.windowPreset, 0, 2);
+    d.windowPreset = std::clamp(d.windowPreset, 0, int(std::size(kWindowWidths))-1);
+    d.uiScale = std::clamp(d.uiScale, 75, 150);
+    d.hudCorner = std::clamp(d.hudCorner, 0, 3);
     d.scale = std::clamp(d.scale, 1, 3);
     if (d.frameLimit != 0 && d.frameLimit != 30 && d.frameLimit != 60 && d.frameLimit != 120)
         d.frameLimit = 60;
@@ -42,6 +44,9 @@ void Load(const std::filesystem::path& path) {
     d.fullscreen = read(L"Display", L"Fullscreen", d.fullscreen) != 0;
     d.windowPreset = read(L"Display", L"WindowPreset", d.windowPreset);
     d.showFps = read(L"Display", L"ShowFPS", d.showFps) != 0;
+    d.showFrameTime = read(L"Interface", L"ShowFrameTime", d.showFrameTime) != 0;
+    d.uiScale = read(L"Interface", L"Scale", d.uiScale);
+    d.hudCorner = read(L"Interface", L"HudCorner", d.hudCorner);
     d.scale = read(L"Graphics", L"Scale", d.scale);
     d.vsync = read(L"Graphics", L"VSync", d.vsync) != 0;
     d.frameLimit = read(L"Graphics", L"FrameLimit", d.frameLimit);
@@ -77,6 +82,9 @@ bool Save() {
     write(L"Display", L"Fullscreen", d.fullscreen);
     write(L"Display", L"WindowPreset", d.windowPreset);
     write(L"Display", L"ShowFPS", d.showFps);
+    write(L"Interface", L"ShowFrameTime", d.showFrameTime);
+    write(L"Interface", L"Scale", d.uiScale);
+    write(L"Interface", L"HudCorner", d.hudCorner);
     write(L"Graphics", L"Scale", d.scale);
     write(L"Graphics", L"VSync", d.vsync);
     write(L"Graphics", L"FrameLimit", d.frameLimit);

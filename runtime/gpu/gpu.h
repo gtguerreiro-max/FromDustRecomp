@@ -13,9 +13,9 @@ namespace gpu
         constexpr uint32_t SCRATCH_UMSK = 0x01DC;
         constexpr uint32_t SCRATCH_ADDR = 0x01DD;
         constexpr uint32_t SCRATCH_REG0 = 0x0578;
-        constexpr uint32_t COHER_STATUS_HOST = 0x0A2F;
-        constexpr uint32_t RB_SAMPLE_COUNT_ADDR = 0x2311;
-        constexpr uint32_t D1MODE_VBLANK_STATUS = 0x1951;
+        constexpr uint32_t COHER_STATUS_HOST = 0x0A31;
+        constexpr uint32_t RB_SAMPLE_COUNT_ADDR = 0x2325;
+        constexpr uint32_t D1MODE_VBLANK_VLINE_STATUS = 0x1951;
         constexpr uint32_t kCount = 0x5003;
     }
 

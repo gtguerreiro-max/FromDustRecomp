@@ -3,12 +3,16 @@
 #include "../settings.h"
 #include "../input.h"
 #include "gpu.h"
+#include "frame_timing.h"
+#include "native/live_audit.h"
+#include <wrl/client.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/ui/graphics_provider.h"
+#include "xenia/ui/d3d12/d3d12_provider.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/window_win.h"
 
@@ -32,12 +36,14 @@ X_RESULT InputSystem::GetState(uint32_t, uint32_t, X_INPUT_STATE* state) {
 namespace settingsui {
 namespace {
 xe::ui::Window* g_window;
-xe::gpu::GraphicsSystem* g_graphics;
+xe::ui::GraphicsProvider* g_provider;
+xe::ui::Presenter* g_presenter;
 xe::ui::WindowedAppContext* g_context;
 std::unique_ptr<xe::ui::ImmediateDrawer> g_immediate;
 std::unique_ptr<xe::ui::ImGuiDrawer> g_imgui;
 settings::Data g_applied;
 bool g_appliedValid = false;
+ImGuiStyle g_baseStyle;
 
 void ApplyLive() {
     const auto d = settings::Get();
@@ -57,12 +63,12 @@ void ApplyLive() {
                          SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
-    auto config = g_graphics->presenter()->GetGuestOutputPaintConfigFromUIThread();
+    auto config = g_presenter->GetGuestOutputPaintConfigFromUIThread();
     using Effect = xe::ui::Presenter::GuestOutputPaintConfig::Effect;
     config.SetEffect(d.presentation == 1 ? Effect::kFsr : d.presentation == 2 ? Effect::kCas : Effect::kBilinear);
     config.SetCasAdditionalSharpness(d.sharpness / 100.0f);
     config.SetFsrSharpnessReduction(2.0f * (1.0f - d.sharpness / 100.0f));
-    g_graphics->presenter()->SetGuestOutputPaintConfigFromUIThread(config);
+    g_presenter->SetGuestOutputPaintConfigFromUIThread(config);
     g_applied = d;
     g_appliedValid = true;
 }
@@ -84,10 +90,25 @@ class Overlay final : public xe::ui::ImGuiDialog, public xe::ui::WindowInputList
                       public xe::ui::WindowListener {
 public:
     explicit Overlay(xe::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer), startup_(settings::Get()) {
+        const char* backend=getenv("FD_RENDERER");
+        nativeBackend_=backend&&!strcmp(backend,"native");
         g_window->AddInputListener(this, 2);
         g_window->AddListener(this);
         const char* open = getenv("FD_SETTINGS_OPEN");
         if (open && atoi(open)) Toggle();
+        const char* tab=getenv("FD_SETTINGS_TAB");
+        selectRenderer_=tab&&!strcmp(tab,"renderer");
+        auto* provider=static_cast<xe::ui::d3d12::D3D12Provider*>(g_provider);
+        adapterName_=provider->GetAdapterDescription();
+        const auto luid=provider->GetDevice()->GetAdapterLuid();
+        for(UINT i=0;;++i) {
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+            if(FAILED(provider->GetDXGIFactory()->EnumAdapters1(i,&adapter)))break;
+            DXGI_ADAPTER_DESC1 desc{};
+            if(SUCCEEDED(adapter->GetDesc1(&desc))&&desc.AdapterLuid.HighPart==luid.HighPart&&desc.AdapterLuid.LowPart==luid.LowPart) {
+                adapter.As(&adapter_);break;
+            }
+        }
     }
 private:
     bool visible_ = false, saveFailed_ = false, restartFailed_ = false;
@@ -95,6 +116,14 @@ private:
     settings::Data startup_;
     uint64_t previousFrames_ = 0;
     float fps_ = 0;
+    int appliedUiScale_=0;
+    bool selectRenderer_=false,memoryAvailable_=false;
+    bool nativeBackend_=false;
+    std::string adapterName_;
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter_;
+    DXGI_QUERY_VIDEO_MEMORY_INFO memory_{};
+    gpu::FrameTimingSnapshot timing_;
+    gpu::native::audit::Status native_;
     std::chrono::steady_clock::time_point sample_ = std::chrono::steady_clock::now();
     void Toggle() {
         visible_ = !visible_;
@@ -138,20 +167,29 @@ private:
             const auto frames = gpu::g_stats.frames.load();
             fps_ = float(frames - previousFrames_) / elapsed;
             previousFrames_ = frames; sample_ = now;
+            timing_=gpu::FrameTimings().Snapshot();
+            memoryAvailable_=adapter_&&SUCCEEDED(adapter_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&memory_));
+            const auto status=gpu::native::audit::GetStatus();
+            if(!status.busy)native_=status;
         }
         auto d = settings::Get();
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 18, 18), ImGuiCond_Always, ImVec2(1, 0));
+        const float uiScale=d.uiScale/100.0f;
+        io.FontGlobalScale=uiScale;
+        if(appliedUiScale_!=d.uiScale){ImGui::GetStyle()=g_baseStyle;ImGui::GetStyle().ScaleAllSizes(uiScale);appliedUiScale_=d.uiScale;}
+        const bool left=d.hudCorner==1||d.hudCorner==3,bottom=d.hudCorner>=2;
+        ImGui::SetNextWindowPos(ImVec2(left?18:io.DisplaySize.x-18,bottom?io.DisplaySize.y-18:18),ImGuiCond_Always,ImVec2(left?0:1,bottom?1:0));
         ImGui::SetNextWindowBgAlpha(0.88f);
         constexpr auto hudFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove;
         ImGui::Begin("##pc_hud", nullptr, hudFlags);
         if (ImGui::Button(visible_ ? "Fechar  [F1]" : "Definições  [F1]")) Toggle();
         if (d.showFps) { ImGui::SameLine(); ImGui::Text("%.0f FPS", fps_); }
+        if(d.showFrameTime&&timing_.count){ImGui::SameLine();ImGui::Text("%.1f ms",timing_.meanMs);}
         ImGui::End();
         if (!visible_) return;
 
         ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
-        const ImVec2 size(std::min(780.0f, io.DisplaySize.x - 36), std::min(650.0f, io.DisplaySize.y - 88));
+        const ImVec2 size(std::min(820.0f*uiScale, io.DisplaySize.x - 36), std::min(680.0f*uiScale, io.DisplaySize.y - 88));
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * .5f, io.DisplaySize.y * .5f + 12), ImGuiCond_Always, ImVec2(.5f, .5f));
         ImGui::SetNextWindowSize(size, ImGuiCond_Always);
         constexpr auto panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -163,16 +201,19 @@ private:
         const auto before = d;
         if (ImGui::BeginTabBar("settings_tabs")) {
             if (ImGui::BeginTabItem("Ecrã")) {
-                ImGui::BeginChild("screen_options", ImVec2(0, -116));
+                ImGui::BeginChild("screen_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 int mode = d.fullscreen ? 1 : 0;
                 if (ImGui::Combo("Modo de ecrã", &mode, "Janela\0Ecrã inteiro sem margens\0")) d.fullscreen = mode == 1;
                 ImGui::BeginDisabled(d.fullscreen);
-                ImGui::Combo("Tamanho da janela", &d.windowPreset, "1280 × 720\0 1600 × 900\0 1920 × 1080\0");
+                ImGui::Combo("Tamanho da janela", &d.windowPreset, "1280 × 720\0 1600 × 900\0 1920 × 1080\0 2560 × 1440\0 3840 × 2160\0");
                 ImGui::EndDisabled();
                 ImGui::TextDisabled("Ecrã inteiro usa a resolução do monitor. Atalho: F11.");
                 ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
                 ImGui::Checkbox("Mostrar contador de FPS", &d.showFps);
+                ImGui::Checkbox("Mostrar tempo entre frames",&d.showFrameTime);
+                ImGui::Combo("Posição do HUD",&d.hudCorner,"Canto superior direito\0Canto superior esquerdo\0Canto inferior direito\0Canto inferior esquerdo\0");
+                ImGui::SliderInt("Tamanho da interface",&d.uiScale,75,150,"%d %%");
                 ImGui::Combo("Apresentação da imagem", &d.presentation, "Suave (bilinear)\0FSR — ampliar e definir\0CAS — realçar detalhes\0");
                 ImGui::BeginDisabled(d.presentation == 0);
                 ImGui::SliderInt("Nitidez", &d.sharpness, 0, 100, "%d %%");
@@ -181,25 +222,30 @@ private:
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Gráficos")) {
-                ImGui::BeginChild("graphics_options", ImVec2(0, -116));
+                ImGui::BeginChild("graphics_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 ImGui::TextWrapped("Estas opções são aplicadas ao reiniciar o jogo.");
                 ImGui::Spacing();
-                int scale = d.scale - 1;
+                int scale = nativeBackend_ ? 0 : d.scale - 1;
+                ImGui::BeginDisabled(nativeBackend_);
                 if (ImGui::Combo("Resolução interna", &scale, "Nativa (1×)\0Alta (2×)\0Muito alta (3×)\0")) d.scale = scale + 1;
-                ImGui::TextDisabled("2× e 3× aumentam o detalhe e o trabalho da GPU.");
+                ImGui::EndDisabled();
+                ImGui::TextDisabled(nativeBackend_ ? "Nesta versão do renderer nativo, a resolução interna é 1×." : "2× e 3× aumentam o detalhe e o trabalho da GPU.");
                 ImGui::Checkbox("Sincronização vertical (VSync)", &d.vsync);
                 constexpr int limits[] = {30, 60, 120, 0};
                 int limit = int(std::find(std::begin(limits), std::end(limits), d.frameLimit) - std::begin(limits));
                 if (ImGui::Combo("Limite de FPS", &limit, "30\0 60\0 120\0Sem limite\0")) d.frameLimit = limits[limit];
                 ImGui::TextDisabled("Com VSync, 'Sem limite' mantém o ritmo de 60 Hz.");
                 constexpr int filters[] = {-1, 2, 3, 4, 5};
-                int filter = int(std::find(std::begin(filters), std::end(filters), d.anisotropy) - std::begin(filters));
+                int filter = nativeBackend_ ? 0 : int(std::find(std::begin(filters), std::end(filters), d.anisotropy) - std::begin(filters));
+                ImGui::BeginDisabled(nativeBackend_);
                 if (ImGui::Combo("Filtragem de texturas", &filter, "Original do jogo\0Anisotrópica 2×\0Anisotrópica 4×\0Anisotrópica 8×\0Anisotrópica 16×\0")) d.anisotropy = filters[filter];
+                ImGui::EndDisabled();
+                if(nativeBackend_)ImGui::TextDisabled("Nesta versão do renderer nativo, é usada a filtragem do jogo.");
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Controlos")) {
-                ImGui::BeginChild("controls_options", ImVec2(0, -116));
+                ImGui::BeginChild("controls_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 ImGui::Combo("Dispositivo", &d.inputMode, "Automático\0Teclado e rato\0Comando XInput\0");
                 ImGui::SliderInt("Sensibilidade da câmara", &d.sensitivity, 25, 300, "%d %%");
@@ -228,12 +274,48 @@ private:
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Som")) {
-                ImGui::BeginChild("audio_options", ImVec2(0, -116));
+                ImGui::BeginChild("audio_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 ImGui::SliderInt("Volume", &d.volume, 0, 100, "%d %%");
                 ImGui::Checkbox("Silenciar quando a janela não está ativa", &d.muteUnfocused);
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
+            if(ImGui::BeginTabItem("Renderer e estatísticas",nullptr,selectRenderer_?ImGuiTabItemFlags_SetSelected:0)) {
+                ImGui::BeginChild("renderer_information",ImVec2(0,-116*uiScale));
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(.88f,.76f,.47f,1),"RENDERER ATIVO");
+                ImGui::TextUnformatted(nativeBackend_ ? "Nativo / Direct3D 12" : "Xenia / Direct3D 12");
+                ImGui::TextWrapped("GPU: %s",adapterName_.empty()?"Indisponível":adapterName_.c_str());
+                ImGui::Text("Janela: %u × %u px  |  Escala interna: %d×",g_window->GetActualPhysicalWidth(),g_window->GetActualPhysicalHeight(),nativeBackend_?1:startup_.scale);
+                ImGui::Text("VSync: %s  |  Limite: %s",startup_.vsync?"ligado":"desligado",startup_.frameLimit?std::to_string(startup_.frameLimit).c_str():"sem limite");
+                if(memoryAvailable_)ImGui::Text("Memória GPU local: %.0f / %.0f MiB (uso / orçamento)",memory_.CurrentUsage/1048576.0,memory_.Budget/1048576.0);
+                else ImGui::TextDisabled("Memória GPU local: indisponível");
+                ImGui::Spacing();ImGui::Separator();ImGui::Spacing();
+                ImGui::TextUnformatted("DESEMPENHO");
+                if(timing_.count) {
+                    ImGui::Text("%.1f FPS  |  Média %.2f ms  |  P95 %.2f ms",timing_.fps,timing_.meanMs,timing_.p95Ms);
+                    ImGui::Text("Maior intervalo: %.2f ms  |  Pedidos de desenho/frame: %.0f",timing_.maxMs,timing_.drawsPerFrame);
+                    ImGui::PlotLines("##frame_intervals",timing_.milliseconds.data(),int(timing_.count),0,"Intervalos entre frames (ms)",0,(std::max)(40.0f,float(timing_.maxMs)*1.1f),ImVec2(-1,90*uiScale));
+                } else ImGui::TextDisabled("A recolher tempos entre frames…");
+                ImGui::TextDisabled("Até 240 frames do jogo; estes valores não medem o tempo de execução da GPU.");
+                ImGui::Text("Frames processados: %llu  |  Pedidos de desenho: %llu",gpu::g_stats.frames.load(),gpu::g_stats.draws.load());
+                if(ImGui::Button("Limpar histórico")){gpu::FrameTimings().Reset();timing_={};}
+                ImGui::Spacing();ImGui::Separator();ImGui::Spacing();
+                ImGui::TextUnformatted("INTEGRAÇÃO NATIVA");
+#ifdef FD_NATIVE_RENDERER
+                ImGui::TextWrapped(nativeBackend_ ? "Esta sessão usa o renderer nativo, em integração." : "O renderer nativo está disponível para testes. Esta sessão usa Xenia.");
+#else
+                ImGui::TextWrapped("O motor nativo não está incluído nesta compilação.");
+#endif
+                if(native_.enabled) {
+                    ImGui::Text("Shaders no catálogo: %llu  |  Inicializações reconhecidas: %llu / %llu",native_.catalogShaders,native_.matchedShaders,native_.shaderInitializations);
+                    ImGui::Text("Desenhos sem shader identificado: %llu",native_.unresolvedDraws);
+                    if(native_.captureEnabled)ImGui::Text("Captura: %s  |  Geometria %llu  |  Limpezas %llu  |  Cópias %llu",native_.captureComplete?"concluída":"a aguardar / em curso",native_.geometryPackets,native_.clearPackets,native_.resolvePackets);
+                    if(native_.captureFailures)ImGui::TextColored(ImVec4(1,.5f,.4f,1),"Falhas na captura: %llu",native_.captureFailures);
+                } else ImGui::TextDisabled("Auditoria nativa: desligada nesta sessão.");
+                ImGui::EndChild();ImGui::EndTabItem();
+            }
+            selectRenderer_=false;
             ImGui::EndTabBar();
         }
         if (d != before) Changed(d);
@@ -273,15 +355,15 @@ void ConfigureGraphics() {
     if (const char* halfPixel = getenv("FD_GPU_HALF_PIXEL"); halfPixel && *halfPixel)
         cvars::half_pixel_offset = atoi(halfPixel) != 0;
 }
-bool Initialize(xe::ui::Window* window, xe::gpu::GraphicsSystem* graphics,
+bool Initialize(xe::ui::Window* window, xe::ui::GraphicsProvider* provider,xe::ui::Presenter* presenter,
                 xe::ui::WindowedAppContext* context) {
-    g_window = window; g_graphics = graphics; g_context = context;
+    g_window = window; g_provider=provider;g_presenter=presenter;g_context = context;
     pcinput::SetWindow(static_cast<xe::ui::Win32Window*>(window)->hwnd());
-    g_immediate = graphics->provider()->CreateImmediateDrawer();
+    g_immediate = provider->CreateImmediateDrawer();
     if (!g_immediate) return false;
-    g_immediate->SetPresenter(graphics->presenter());
+    g_immediate->SetPresenter(presenter);
     g_imgui = std::make_unique<xe::ui::ImGuiDrawer>(window, 1);
-    g_imgui->SetPresenterAndImmediateDrawer(graphics->presenter(), g_immediate.get());
+    g_imgui->SetPresenterAndImmediateDrawer(presenter, g_immediate.get());
     auto& io = g_imgui->GetIO();
     io.IniFilename = nullptr;
     auto& style = ImGui::GetStyle();
@@ -297,6 +379,7 @@ bool Initialize(xe::ui::Window* window, xe::gpu::GraphicsSystem* graphics,
     style.Colors[ImGuiCol_ButtonHovered] = ImVec4(.25f, .33f, .36f, 1);
     style.Colors[ImGuiCol_CheckMark] = ImVec4(.88f, .76f, .47f, 1);
     style.Colors[ImGuiCol_SliderGrab] = ImVec4(.88f, .76f, .47f, 1);
+    g_baseStyle=style;
     g_overlay = std::make_unique<Overlay>(g_imgui.get());
     ApplyLive();
     return true;

@@ -18,6 +18,11 @@ Set-Location F:\FromDustRecomp
 The executable can also be opened directly from `build/`: it finds the sibling
 `game/` directory automatically and opens a normal Windows game window.
 
+The experimental native D3D12 renderer can be selected with `Jogar-nativo.cmd`
+or `.\play.ps1 -Renderer native`, using `build/native-shaders-live/catalog.bin`.
+It now reaches the Breath tutorial, but visual fidelity, transitions and speed
+are still being validated. The regular launcher keeps Xenia as its default.
+
 ## PC settings panel
 
 Press **F1**, or click **Definições** in the top-right corner. The panel is in
@@ -25,7 +30,8 @@ Portuguese and saves preferences automatically to `build/user/settings.ini`.
 Game input is blocked while it is open; F1 or Escape closes it. The game keeps
 rendering while the panel is open.
 
-- **Ecrã:** window or borderless fullscreen, window size, FPS counter, bilinear /
+- **Ecrã:** window or borderless fullscreen, five window sizes through 4K, FPS
+  and frame interval counters, HUD corner, 75–150% interface scale, bilinear /
   FSR / CAS presentation, and sharpness. Changes apply immediately. **F11** or
   Alt+Enter toggles fullscreen.
 - **Gráficos:** 1× / 2× / 3× internal resolution, VSync, 30 / 60 / 120 / unlimited
@@ -36,6 +42,12 @@ rendering while the panel is open.
   sensitivity, stick deadzone, invert Y, mouse camera and controller vibration.
   Click any keyboard binding, then press the new key. Escape cancels. Reusing a
   key swaps the two assignments. F1, F11 and Escape are reserved for the panel.
+- **Renderer e estatísticas:** active backend, GPU, local memory usage/budget,
+  active graphics settings, frame interval history with mean/P95/maximum,
+  draw requests and native integration status. These intervals are not GPU
+  execution timings. The selected backend is shown; the experimental native
+  renderer uses the game's 1x resolution and filtering, so its unavailable
+  internal scaling / anisotropy overrides are disabled in the panel.
 
 Default keyboard controls:
 
@@ -51,9 +63,9 @@ Default keyboard controls:
 | LT / RT | Z / C |
 | Back / select | Tab |
 
-Controller input is only passed to the game while its window has focus. The
-original game's local profile / sign-in flow still needs implementation; the
-new Start binding reaches that request, but full gameplay isn't validated yet.
+Controller input is only passed to the game while its window has focus. A local
+Player profile is available and level 1 has been reached. Complete progression
+and an in-game save point still need validation.
 
 Omit `-SkipRecomp` to regenerate the CPU modules using XenonRecomp as well. The
 Direct3D 12 backend is enabled by default. `-NoGraphics` builds the earlier
@@ -129,3 +141,25 @@ The checks exercise preference reload and invalid values, duplicate key swaps,
 keyboard-to-controller translation, blocked input, big-endian output and empty
 event handling. Interactive validation logs are in
 `build/validation-settings-ui.log` and `build/validation-settings-ui-gpu.log`.
+
+## Native renderer diagnostics
+
+The native C++ renderer is being integrated; interactive play still uses Xenia.
+Four saved frames / 3,160 draws render with the native texture memory producer
+and retain the validated native baseline RGB. Its 264 base textures, seven
+cubemaps and 1,160 mip levels match the independent reference bytes.
+
+With `FD_NATIVE_RENDERER=ON` in the build, run:
+
+```powershell
+.\tools\validate_native_textures.ps1 -Screenshot
+```
+
+This bounded test acquires textures inside the game after GPU resolve readback,
+derives their layouts natively, and compares them with independent raw captures.
+The verified title run acquires 49 textures, one cubemap and 178 mip levels with
+zero differences. It uses isolated settings and writes evidence under
+`build/native-texture-validation/`. This first-use-per-address capture is a
+diagnostic stage; resource versions, complete draw expansion and native
+presentation remain pending. See `docs/NATIVE_RENDERER.md` and
+`tests/VALIDATION.md` for scope and evidence.
