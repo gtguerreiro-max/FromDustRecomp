@@ -48,7 +48,7 @@ if(FD_XENIA_GPU)
 endif()
 
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/*.cpp)
-list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/gpu/native/(renderer|shader_catalog|replay_frame|geometry|device_state|texture_decode|texture_storage|texture_tables|operations|frame_builder)\\.cpp$")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/gpu/native/(renderer|shader_catalog|replay_frame|geometry|device_state|texture_decode|texture_storage|texture_tables|operations|frame_builder|upscaler)\\.cpp$")
 option(FD_NATIVE_RENDERER "Link the validated native renderer diagnostic into the runtime" OFF)
 if(FD_NATIVE_RENDERER)
     add_subdirectory(runtime/gpu/native)

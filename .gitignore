@@ -19,3 +19,6 @@ third_party/agility/
 third_party/agility-620/
 third_party/renderdoc_dl/
 third_party/xenia_canary_ref/
+third_party/streamline/
+third_party/streamline_dl/
+third_party/dlss_sdk/
