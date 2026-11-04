@@ -600,3 +600,21 @@ index 31a86cd..529ea25 100644
  inline simde__m128i simde_mm_vsr(simde__m128i a, simde__m128i b)
  {
      b = simde_mm_srli_epi64(simde_mm_slli_epi64(b, 61), 61);
+diff --git a/thirdparty/disasm/ppc-dis.c b/thirdparty/disasm/ppc-dis.c
+index 3e224b4..1b72c5c 100644
+--- a/thirdparty/disasm/ppc-dis.c
++++ b/thirdparty/disasm/ppc-dis.c
+@@ -5350,7 +5350,13 @@ powerpc_dialect(struct disassemble_info* info)
+ 
+     if (info->disassembler_options
+         && strstr(info->disassembler_options, "cell") != NULL)
++    {
+         dialect |= PPC_OPCODE_POWER4 | PPC_OPCODE_CELL | PPC_OPCODE_ALTIVEC | PPC_OPCODE_VMX_128;
++        /* Xenon has no PPC403/405 multiply-accumulate instructions. Their
++           opcode-4 encodings overlap VMX128 (e.g. mullhwu. vs vsldoi128),
++           and as they precede VMX128 in the table they would win. */
++        dialect &= ~PPC_OPCODE_403;
++    }
+ 
+     if (info->disassembler_options
+         && strstr(info->disassembler_options, "power6") != NULL)

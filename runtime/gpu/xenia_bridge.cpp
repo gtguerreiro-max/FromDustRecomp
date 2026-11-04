@@ -18,6 +18,7 @@
 #include "../settings.h"
 #include "../kernel/kernel.h"
 #include "../kernel/thread.h"
+#include "../kernel/debug.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -68,9 +69,24 @@ LONG WINAPI PhysicalWriteFault(EXCEPTION_POINTERS* info) {
       record->NumberParameters < 2 || record->ExceptionInformation[0] != 1 || !g_memory)
     return EXCEPTION_CONTINUE_SEARCH;
   const uintptr_t guest = record->ExceptionInformation[1] - reinterpret_cast<uintptr_t>(mem::g_base);
-  if (guest < mem::kPhysicalBase || guest >= 0x100000000ull ||
-      !g_memory->OnPhysicalWrite(mem::PhysicalAddress(uint32_t(guest)),1))
+  if (guest < mem::kPhysicalBase || guest >= 0x100000000ull)
     return EXCEPTION_CONTINUE_SEARCH;
+  const uint32_t physical = mem::PhysicalAddress(uint32_t(guest));
+  // FD_TRACE_WRITE_PHYS=<hex start>:<hex length> logs which guest function
+  // writes a watched physical range (diagnostic only).
+  static const auto traceRange = [] {
+    std::pair<uint32_t, uint32_t> range{0, 0};
+    if (const char* value = getenv("FD_TRACE_WRITE_PHYS")) {
+      char* end = nullptr;
+      range.first = uint32_t(strtoul(value, &end, 16));
+      range.second = end && *end == ':' ? uint32_t(strtoul(end + 1, nullptr, 16)) : 0x1000;
+    }
+    return range;
+  }();
+  const bool traced = traceRange.second && physical - traceRange.first < traceRange.second;
+  if (!g_memory->OnPhysicalWrite(physical,1))
+    return EXCEPTION_CONTINUE_SEARCH;
+  if (traced) kernel::debug::TraceGuestWriter(info->ContextRecord, physical);
   return EXCEPTION_CONTINUE_EXECUTION;
 }
 

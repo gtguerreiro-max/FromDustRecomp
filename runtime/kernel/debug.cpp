@@ -199,6 +199,34 @@ namespace kernel::debug
 
     void InstallCrashHandler() { AddVectoredExceptionHandler(1, CrashHandler); }
 
+    void TraceGuestWriter(void* hostContext, uint32_t physicalAddress)
+    {
+        static std::mutex traceLock;
+        static std::vector<uint64_t> seen;
+        std::lock_guard trace(traceLock);
+        {
+            std::lock_guard lock(g_lock);
+            BuildRanges();
+        }
+        CONTEXT context = *static_cast<CONTEXT*>(hostContext);
+        uint32_t chain[4] = {};
+        for (int depth = 0, found = 0; depth < 32 && context.Rip && found < 4; depth++)
+        {
+            if (const uint32_t guest = GuestFromHost(context.Rip)) chain[found++] = guest;
+            DWORD64 imageBase;
+            PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+            if (!fn) { context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp); context.Rsp += 8; continue; }
+            void* handlerData; DWORD64 establisher;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, fn, &context, &handlerData, &establisher, nullptr);
+        }
+        const uint64_t key = (uint64_t(chain[0]) << 32) | chain[1];
+        if (std::find(seen.begin(), seen.end(), key) != seen.end() || seen.size() > 256) return;
+        seen.push_back(key);
+        const GuestThread* thread = CurrentThread();
+        Log("write-trace phys %08X thread %u: sub_%08X <- sub_%08X <- sub_%08X <- sub_%08X", physicalAddress,
+            thread ? thread->id : 0, chain[0], chain[1], chain[2], chain[3]);
+    }
+
     // Sampling profiler for the main guest thread: counts, per function, how
     // often it is on top of the stack (self) and anywhere in it (inclusive).
     void StartProfiler(unsigned seconds)

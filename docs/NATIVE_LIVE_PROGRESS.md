@@ -1,5 +1,28 @@
 # Active native integration work
 
+## Water stripes fixed (2026-11-04)
+
+The striped / spiky water seen with **both** the native and the Xenia backends
+came from the CPU, not from a renderer. The heightfield texture (physical
+0x0AC3A000, k_16_16) is written by `sub_89199A98` in
+`GalileoSimulatorWater_9_9.xex` (found with `FD_TRACE_WRITE_PHYS=0AC3A000:100000`,
+which logs the guest writer of a watched physical range).
+
+Root cause: XenonRecomp disassembles with `"cell 64"`, whose default dialect
+still includes `PPC_OPCODE_403` (PPC405). The 405 multiply-accumulate entries
+share opcode 4 with VMX128 and precede it in the table, so two `vsldoi128`
+(neighbour shifts at the tile halo) were decoded as `mullhwu.` and became a
+scalar multiply. A third case in `dustai.x360.f` clobbered r1. The dialect now
+drops PPC_OPCODE_403 for cell (patches/xenonrecomp.patch); regenerating the two
+modules changes exactly those three instructions. The heightfield no longer has
+vertical stripes.
+
+`tools/vmx_conformance/run.ps1 [-Modules <ppc dirs>]` compares every distinct
+VMX instruction form of a recompiled module against an independent
+big-endian reference. For the water module all 389 forms pass except the sign
+of zero in `vmaxfp`/`vminfp` (SSE returns the second operand for ±0); that
+remains a known, separate difference.
+
 ## Latest continuation status (2026-11-04)
 
 The persistent goal tool currently reports **usageLimited**, not complete. The
