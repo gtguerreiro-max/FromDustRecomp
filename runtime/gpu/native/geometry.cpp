@@ -174,12 +174,18 @@ struct Fetch
     uint32_t destination, constant, format, stride;
     int32_t offset, exponent;
     bool signedValue, integer, mini,rounded=false;
+    // The XDK patches a fetch whose element the vertex declaration lacks to
+    // write only constants (destination swizzle 0 / 1 / masked).
+    bool fixedValue=false;
 };
 Fetch Decode(uint32_t w0, uint32_t w1, uint32_t w2)
 {
-    return {w0 >> 12 & 63, (w0 >> 20 & 31) * 3 + (w0 >> 25 & 3), w1 >> 16 & 63, w2 & 255,
+    Fetch fetch{w0 >> 12 & 63, (w0 >> 20 & 31) * 3 + (w0 >> 25 & 3), w1 >> 16 & 63, w2 & 255,
         Signed(w2 >> 8 & 0x7FFFFF, 23), Signed(w1 >> 24 & 63, 6),
         bool(w1 & 0x1000), bool(w1 & 0x2000), bool(w1 & 0x40000000),bool(w1&0x8000)};
+    fetch.fixedValue=true;
+    for(uint32_t component=0;component<4;++component)if((w1>>(3*component)&7)<4)fetch.fixedValue=false;
+    return fetch;
 }
 std::vector<Fetch> Fetches(std::span<const uint8_t> code,bool inheritMini=false)
 {
@@ -308,7 +314,7 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
             auto* descriptor = result.fetches.data() + ordinal * 4;
             descriptor[0] = Stream(arena, word0 & 0x1FFFFFFC, bytes);
             descriptor[1] = fetch.stride * 4 | uint32_t(fetch.offset) * 4 << 16;
-            descriptor[2] = uint32_t(bytes.size());
+            descriptor[2] = fetch.fixedValue ? 0u : uint32_t(bytes.size());
             descriptor[3] = fetch.format | uint32_t(fetch.signedValue) << 8 | uint32_t(fetch.integer) << 9 |
                 (uint32_t(fetch.exponent) & 63) << 10 | (pullPrimary?uint32_t(fetch.rounded)<<16:0) | 1u << 31;
         }
@@ -392,6 +398,7 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
     for (size_t vertex = 0; !pullPrimary&&vertex < vertexCount; ++vertex)
         for (const auto& input : inputs)
             if (input.pulled) result.vertices.insert(result.vertices.end(), 16, 0);
+            else if (input.fetch.fixedValue) { for (float value : {0.0f, 0.0f, 0.0f, 1.0f}) Float(result.vertices, value); }
             else Element(result.vertices, primary, vertex * primaryStride + size_t(input.fetch.offset) * 4, input.fetch);
     result.primitive = primitive;
     result.indexCount = count;

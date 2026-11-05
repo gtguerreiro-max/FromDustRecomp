@@ -1221,16 +1221,34 @@ First level, RTX 5060 Ti, DLAA (input -> present / Reflex sim -> GPU end):
 Frame generation on top of the game's 30 FPS is the case that feels slow;
 with the fixed-rate world both the base rate and the latency improve.
 
-## Island beams in the intro (open)
+## Island beams in the intro (fixed)
 
-The coloured planes over the island in the first level's intro come from
-draws of VS 182 / PS 183 ("spherical billboards"): `tfetch3D` of a plain 2D
-64x64 mask, mask x vertex colour. That draw's vertex declaration lacks
-TEXCOORD1 / TEXCOORD5, which the XDK patches to offset 0 as 8_8_8_8, so the
-third coordinate is position bytes. Treating tfetch3D-of-2D as a null texture
-(`FD_TFETCH3D_2D_NULL=1`, Xenia's `AreDimensionsCompatible` rule) removes the
-planes and matches Xenia's live image of that scene. It breaks the breath
-frame's air-sparkle effect region, though, which Xenia's synchronized
-reference renders with the same shader. Not changed yet. Diagnostics added
-for this: `FD_SKIP_DRAWS`, `FD_TRACE_FETCH`, `FD_DUMP_TEXTURE`,
-`FD_TRACE_VFETCH`, and blend / colour info in `FD_TRACE_DRAWS`.
+The coloured planes over the island in the first level's intro were draws of
+VS 182 / PS 183 ("spherical billboards") read with the wrong vertex layout.
+The intro draws that shader twice in a row with two vertex declarations: a
+32-byte one and the shader's own 44-byte one. The XDK patches the shader
+object's microcode in place for the first, and sends the patch for the second
+inline in the command buffer (`IM_LOAD_IMMEDIATE`, type-3 opcode 0x2B). The
+GPU runs the microcode it loaded, so the object's memory no longer holds the
+second draw's program. The live capture read that memory and fetched the
+44-byte vertices with a 32-byte stride: position garbage became the large
+planes, and the overdraw dropped the intro to a few FPS.
+
+`live_geometry.cpp` now follows the vertex shader loads in each draw's
+commands, per device. When the latest load for the draw's shader is inline,
+its microcode replaces the code region (at `VertexProgram::codeOffset`) of the
+snapshot used to decode the vertex fetches. Xenia's shader dump of the same
+moment (`FD_XENIA_DUMP_SHADERS=<dir>`) shows both patched variants, and the
+native intro now matches Xenia's frame at the same subtitle.
+
+The 32-byte declaration lacks TEXCOORD1 / TEXCOORD5. The XDK patches those
+fetches to write only constants (destination swizzle `00__` / `0001`).
+`geometry.cpp` now honours that: a fetch whose destination swizzle has only
+constant or masked components reads (0, 0, 0, 1), and not bytes of the
+position. Treating `tfetch3D` of a 2D texture as a null texture was a wrong
+lead and has been removed. Xenia samples a non-stacked 2D texture through `tfetch3D` as a one-layer
+stack, as the native path does.
+
+Diagnostics: `FD_TRACE_IMLOAD=1` (draws that use inline microcode),
+`FD_TRACE_FETCH=<draw>` (fetches, indices, PS / VS constants of a replay draw),
+`FD_SKIP_DRAWS`, `FD_DUMP_TEXTURE`, `FD_TRACE_VFETCH`.

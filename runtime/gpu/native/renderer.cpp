@@ -2093,6 +2093,30 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                     fprintf(stderr, "   v%u: %08X %08X (%g %g)\n", v, a, b, std::bit_cast<float>(a), std::bit_cast<float>(b));
                 }
             }
+            if (d.indices && d.indexBytes)
+            {
+                const bool wide = d.index32;
+                const size_t n = d.indexBytes / (wide ? 4 : 2);
+                uint32_t lo = ~0u, hi = 0;
+                for (size_t k = 0; k < n; ++k)
+                {
+                    uint32_t v = 0; memcpy(&v, d.indices + k * (wide ? 4 : 2), wide ? 4 : 2);
+                    lo = (std::min)(lo, v); hi = (std::max)(hi, v);
+                    if (k < 24) fprintf(stderr, "%s%u", k ? " " : "indices: ", v);
+                }
+                fprintf(stderr, " ... (%zu, range %u..%u)\n", n, lo, hi);
+            }
+            if (d.psConstants)
+                for (uint32_t k = 0; k < 8; ++k)
+                {
+                    float c[4]; memcpy(c, d.psConstants + 16 * k, 16);
+                    fprintf(stderr, "ps c%u: %g %g %g %g\n", k, c[0], c[1], c[2], c[3]);
+                }
+            for (uint32_t k = 0; k < 32; ++k)
+            {
+                float c[4]; memcpy(c, d.constants + 16 * k, 16);
+                fprintf(stderr, "vs c%u: %.9g %.9g %.9g %.9g\n", k, c[0], c[1], c[2], c[3]);
+            }
         }
         // FD_SKIP_DRAWS=<first>-<last>: debug, skip those draw records.
         if (const char* skip = CachedEnv("FD_SKIP_DRAWS"))
@@ -2279,7 +2303,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                 }
             }
             if (d.hasFetchMetadata && (d.textureFetches[slot][5] >> 9 & 3) == 1 &&
-                !(d.textureFetches[slot][1] & 0x400) && !CachedEnv("FD_TFETCH3D_2D_NULL"))
+                !(d.textureFetches[slot][1] & 0x400))
                 volumeIndex = 0x80000000u | index;
             memcpy(shared + kSharedTextureIndex + 128 + slot * 4, &volumeIndex, 4);
             if (traceDrawOption && i <= traceDrawThrough && slot < 4)

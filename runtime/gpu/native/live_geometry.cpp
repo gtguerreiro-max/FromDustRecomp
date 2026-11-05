@@ -75,6 +75,8 @@ struct LiveGeometryCapture::Impl
     std::optional<PendingResolve> resolve;
     GeometryBatch batch;
     std::map<std::string, VertexProgram> programs;
+    struct VertexLoad{const NativeShader* shader=nullptr;bool immediate=false;uint32_t start=0;std::vector<uint8_t> code;};
+    std::map<uint32_t,VertexLoad> vertexLoads; // per device: the vertex microcode the GPU last loaded
     bool reportFailed = false;
     bool pullPrimary=false;
     std::function<void(Draw&)> onCommand;
@@ -171,6 +173,20 @@ struct LiveGeometryCapture::Impl
             {
                 const uint32_t header=packet.header,type=header>>30,opcode=header>>8&127,count=uint32_t(packet.payload.size()/4);
                 auto valueAt=[&](uint32_t index){return CommandWord(packet.payload,index*4);};
+                // Vertex shader loads: the GPU keeps the microcode it loaded.
+                // When one shader is used with several vertex declarations in
+                // a frame, the XDK patches the object's microcode in place
+                // and sends later patches inline (IM_LOAD_IMMEDIATE), so the
+                // object's memory no longer holds the program the draw runs.
+                if(type==3&&(opcode==0x27||opcode==0x2B)&&count>=2&&(valueAt(0)&3)==0)
+                {
+                    auto& load=vertexLoads[pending.device];
+                    load.shader=pending.shader;load.code.clear();
+                    const uint32_t dwords=valueAt(1)&0xFFFF;
+                    load.immediate=opcode==0x2B;load.start=valueAt(1)>>16;
+                    if(load.immediate&&count>=2+dwords)load.code.assign(packet.payload.begin()+8,packet.payload.begin()+8+size_t(dwords)*4);
+                    else if(load.immediate)load.shader=nullptr;
+                }
                 if(type==0&&header)
                     for(uint32_t i=0;i<count;++i)if(((header&0x7FFF)+(header&0x8000?0:i))==0x2102)indexOffset=valueAt(i);
                 if(type!=3||(opcode!=0x22&&opcode!=0x36)||count>8)continue;
@@ -195,6 +211,14 @@ struct LiveGeometryCapture::Impl
             if (program == programs.end()) program = programs.emplace(pending.shader->name, VertexProgram::FromShader(*pending.shader)).first;
             if(!pending.completedShader||pending.physical.empty())
                 throw std::runtime_error("Missing completed native vertex shader");
+            if(auto load=vertexLoads.find(pending.device);load!=vertexLoads.end()&&load->second.shader==pending.shader&&load->second.immediate)
+            {
+                const size_t at=size_t(program->second.codeOffset)+size_t(load->second.start)*4;
+                if(at+load->second.code.size()>pending.physical.size())throw std::runtime_error("Inline vertex shader exceeds its object");
+                std::copy(load->second.code.begin(),load->second.code.end(),pending.physical.begin()+at);
+                static const bool trace=getenv("FD_TRACE_IMLOAD")!=nullptr;
+                if(trace)kernel::Log("native geometry: vs %s draw %llu uses its inline microcode (%zu bytes at %zu)",pending.shader->name.c_str(),(unsigned long long)calls,load->second.code.size(),at);
+            }
             GeometryReader reader = [](uint32_t address, uint32_t size) -> std::span<const uint8_t> {
                 if (!size || size > 32u << 20 || uint64_t(address) + size > 0x20000000) return {};
                 return {mem::Ptr<uint8_t>(mem::kPhysicalBase | address), size};
