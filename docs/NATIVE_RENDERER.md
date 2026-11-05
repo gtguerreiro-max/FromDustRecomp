@@ -1194,3 +1194,43 @@ capture, write-watch protection). Rendering off the game thread and the
 present without a CPU wait (`FD_NATIVE_PRESENT_WAIT=1` restores it) brought
 the render worker to ~17 ms per frame. Unverified: the Breath cursor's rate
 in play, the in-game pause menu, and level transitions.
+
+## Input latency — 2026-11-05
+
+`runtime/latency.{h,cpp}` measures, in play, the time from a changed pad
+state reaching the game (`XamInputGetState`, including the PC mouse and
+keyboard mapping) to the return of the `Present` call for the first frame
+captured after it. It is logged every 10 s ("input latency") and shown in
+the HUD next to the frame time. With frame generation,
+`frame_generation.cpp` also logs Streamline's Reflex reports ("reflex
+latency": simulation start -> GPU render end). Neither includes scan-out or,
+with frame generation, the pacer holding back the real frame (about half a
+base frame).
+
+Reflex markers now follow the game: the game thread opens a frame (token,
+`slReflexSleep`, simulation start) right after VdSwap hands the previous one
+to the render worker, and closes it at the next VdSwap. The worker marks
+render submit start / end and tags that token.
+
+First level, RTX 5060 Ti, DLAA (input -> present / Reflex sim -> GPU end):
+- 30 FPS: ~53 ms.
+- 30 FPS + FG 2x (60 shown): ~48 ms / 50 ms, plus the pacer hold (~16 ms).
+- Fixed-rate world, ~48 FPS: ~37 ms.
+- Fixed-rate world + FG 2x (~85-95 shown): ~32 ms / 39 ms, plus ~10 ms.
+
+Frame generation on top of the game's 30 FPS is the case that feels slow;
+with the fixed-rate world both the base rate and the latency improve.
+
+## Island beams in the intro (open)
+
+The coloured planes over the island in the first level's intro come from
+draws of VS 182 / PS 183 ("spherical billboards"): `tfetch3D` of a plain 2D
+64x64 mask, mask x vertex colour. That draw's vertex declaration lacks
+TEXCOORD1 / TEXCOORD5, which the XDK patches to offset 0 as 8_8_8_8, so the
+third coordinate is position bytes. Treating tfetch3D-of-2D as a null texture
+(`FD_TFETCH3D_2D_NULL=1`, Xenia's `AreDimensionsCompatible` rule) removes the
+planes and matches Xenia's live image of that scene. It breaks the breath
+frame's air-sparkle effect region, though, which Xenia's synchronized
+reference renders with the same shader. Not changed yet. Diagnostics added
+for this: `FD_SKIP_DRAWS`, `FD_TRACE_FETCH`, `FD_DUMP_TEXTURE`,
+`FD_TRACE_VFETCH`, and blend / colour info in `FD_TRACE_DRAWS`.

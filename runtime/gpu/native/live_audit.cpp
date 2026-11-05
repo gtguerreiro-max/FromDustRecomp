@@ -21,6 +21,8 @@
 #include <condition_variable>
 #include <thread>
 #include "replay_frame.h"
+#include "frame_generation.h"
+#include "../../latency.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -52,6 +54,8 @@ struct RenderJob
     std::vector<std::shared_ptr<TextureResource>> textures;
     uint32_t frontBuffer = 0;
     bool dump = false;
+    uint64_t frame = 0; // latency::CapturedFrames() at hand-over
+    void* token = nullptr; // Streamline frame token (frame generation / Reflex)
 };
 class RenderWorker
 {
@@ -62,7 +66,7 @@ public:
         if (!sync) thread = std::thread([this] { Run(); });
     }
     // Game thread: waits for the previous frame, then takes this frame's data.
-    void Submit(GeometryBatch& batch, std::span<const std::shared_ptr<TextureResource>> textures, uint32_t frontBuffer, bool dump)
+    void Submit(GeometryBatch& batch, std::span<const std::shared_ptr<TextureResource>> textures, uint32_t frontBuffer, bool dump, void* token)
     {
         std::unique_lock lock(mutex);
         idle.wait(lock, [&] { return !pending && !busy; });
@@ -75,6 +79,8 @@ public:
         job.textures.assign(textures.begin(), textures.end());
         job.frontBuffer = frontBuffer;
         job.dump = dump;
+        job.frame = latency::CapturedFrames();
+        job.token = token;
         if (sync)
         {
             lock.unlock();
@@ -137,6 +143,7 @@ struct Context
     std::unique_ptr<Renderer> renderer;
     LiveResources resources;
     std::unique_ptr<RenderWorker> worker;
+    void* gameToken = nullptr; // the Reflex frame the game thread is building
     uint64_t dumpAt=UINT64_MAX;
     double packMs=0,renderMs=0,presentMs=0;
     uint64_t frames = 0, initializations = 0, matched = 0, invalid = 0;
@@ -271,11 +278,15 @@ bool Initialize()
                     }
                     const bool dump=GetTickCount64()>=c->dumpAt;
                     if(dump)c->dumpAt=UINT64_MAX;
-                    c->worker->Submit(batch,c->resources.FrameResources(),c->frontBuffer,dump);
+                    fg::GameFrameEnd(c->gameToken);
+                    c->worker->Submit(batch,c->resources.FrameResources(),c->frontBuffer,dump,c->gameToken);
+                    // Next frame: Reflex may sleep here, before the game samples input.
+                    c->gameToken=fg::GameFrameBegin();
                     c->resources.BeginFrame();
                 });
                 created->worker=std::make_unique<RenderWorker>([c](RenderJob& job){
                     if(!c->renderer->CompletedFrames()&&!c->renderer->UseDevice(xenia::NativeDevice()))throw std::runtime_error("Native UI device unavailable");
+                    fg::RenderBegin(job.token);
                     const auto started=std::chrono::steady_clock::now();
                     std::vector<gpu::native::Draw> draws;draws.reserve(job.commands.size());
                     for(const auto& command:job.commands){gpu::native::Draw draw;command.BindGeometryAndConstants(draw);draws.push_back(std::move(draw));}
@@ -297,6 +308,7 @@ bool Initialize()
                     const auto packed=std::chrono::steady_clock::now();
                     if(c->renderer->RenderFrame(input,diagnostic))throw std::runtime_error("Native frame execution failed");
                     const auto rendered=std::chrono::steady_clock::now();
+                    latency::FrameDelivered(job.frame);
                     if(!xenia::PresentNative(*c->renderer))throw std::runtime_error("Native presentation failed");
                     const auto presented=std::chrono::steady_clock::now();
                     c->packMs+=std::chrono::duration<double,std::milli>(packed-started).count();
@@ -404,6 +416,7 @@ void Swap(uint32_t frontBuffer)
     if(!c.native&&frontBuffer)return;
     if(c.native&&!frontBuffer)return; // Finalize at VdSwap once its front buffer is known.
     c.frontBuffer=frontBuffer;
+    latency::FrameCaptured();
     try {if (c.geometry) c.geometry->Swap(c.pending.calls[0]);}
     catch(const std::exception& error){kernel::Log("native frame: %s",error.what());c.geometry->Finish();ExitProcess(1);}
     if (c.started)

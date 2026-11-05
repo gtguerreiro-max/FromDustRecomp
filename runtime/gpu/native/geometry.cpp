@@ -253,6 +253,7 @@ VertexProgram VertexProgram::FromShader(const NativeShader& shader)
     for (std::sregex_iterator i(shader.source.begin(), shader.source.end(), pattern), end; i != end; ++i)
         result.inputs.push_back({uint32_t(std::stoul((*i)[1].str())), (*i)[2].str()});
     if (result.inputs.empty()) throw std::runtime_error("Vertex shader has no native fetch metadata");
+    result.name = shader.name;
     return result;
 }
 
@@ -264,6 +265,21 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
         throw std::runtime_error("Unsupported native geometry draw");
     const bool pullPrimary=bounds&&bounds->pullPrimary&&primitive==4;
     const auto live = Fetches(livePhysical.subspan(program.codeOffset),pullPrimary);
+    // FD_TRACE_VFETCH=<vertex shader>: debug, its live (patched) vertex fetches, once.
+    if (const char* traceShader = getenv("FD_TRACE_VFETCH"); traceShader && program.name == traceShader)
+    {
+        static std::vector<std::vector<uint32_t>> seen;
+        std::vector<uint32_t> key;
+        for (const auto& f : live) key.insert(key.end(), {f.destination, f.format, f.stride, uint32_t(f.offset), uint32_t(f.mini)});
+        if (std::find(seen.begin(), seen.end(), key) == seen.end() && seen.size() < 16)
+        {
+            seen.push_back(key);
+            fprintf(stderr, "vfetch set %zu (count %u):\n", seen.size(), count);
+            for (const auto& f : live)
+                fprintf(stderr, "vfetch %s: r%u const %u format %u stride %u offset %d exp %d signed %d int %d mini %d\n", program.name.c_str(),
+                    f.destination, f.constant, f.format, f.stride, f.offset, f.exponent, int(f.signedValue), int(f.integer), int(f.mini));
+        }
+    }
     struct Input { Fetch fetch; std::string semantic; bool pulled; };
     std::vector<Input> inputs;
     std::vector<bool> used(live.size());

@@ -30,10 +30,16 @@ void GuestOutputPainted(ID3D12GraphicsCommandList* list, ID3D12Resource* backBuf
 bool BeforePresent();
 void AfterPresent();
 
-// Renderer, once per continuous frame: BeginFrame before recording, Tag after
+// Renderer, once per continuous frame: RenderBegin before recording, Tag after
 // the motion pass (resources in the render target state), Delivered after the
 // frame has been handed to the presenter.
-void BeginFrame();
+// Reflex / PCL frame boundaries. The game thread opens a frame (token,
+// slReflexSleep, simulation start) right after handing the previous one over
+// at VdSwap, so the sleep delays its input sampling; it closes the
+// simulation at the next VdSwap. The render worker then renders that token.
+void* GameFrameBegin();
+void GameFrameEnd(void* token);
+void RenderBegin(void* token);
 bool WantsInputs();
 struct FrameInputs
 {

@@ -2,6 +2,7 @@
 #include "kernel.h"
 #include "../input.h"
 #include "../game_loop.h"
+#include "../latency.h"
 #include <cstring>
 
 namespace {
@@ -33,7 +34,7 @@ KFUNC(XamInputGetState) {
             state.pad.leftTrigger = held[ARG0].leftTrigger;
             state.pad.rightTrigger = held[ARG0].rightTrigger;
         }
-        if (memcmp(&shown[ARG0], &state.pad, sizeof(state.pad))) { shown[ARG0] = state.pad; ++packets[ARG0]; }
+        if (memcmp(&shown[ARG0], &state.pad, sizeof(state.pad))) { shown[ARG0] = state.pad; ++packets[ARG0]; latency::InputChanged(); }
         state.packet = packets[ARG0];
     }
     if (!result && ARG2) {

@@ -262,22 +262,27 @@ void DeviceCreated(ID3D12Device* device)
 
 bool WantsInputs() { return g_deviceReady && g_frames.load() > 0; }
 
-void BeginFrame()
+void* GameFrameBegin()
 {
-    if (!g_deviceReady) return;
+    if (!g_deviceReady) return nullptr;
     const uint32_t index = ++g_frameIndex;
     sl::FrameToken* token = nullptr;
-    if (SL_FAILED(result, slGetNewFrameToken(token, &index)) || !token)
-    {
-        g_renderToken = nullptr;
-        return;
-    }
-    g_renderToken = token;
-    g_renderTagged = false;
+    if (SL_FAILED(result, slGetNewFrameToken(token, &index)) || !token) return nullptr;
     slReflexSleep(*token);
     slPCLSetMarker(sl::PCLMarker::eSimulationStart, *token);
-    slPCLSetMarker(sl::PCLMarker::eSimulationEnd, *token);
-    slPCLSetMarker(sl::PCLMarker::eRenderSubmitStart, *token);
+    return token;
+}
+
+void GameFrameEnd(void* token)
+{
+    if (g_deviceReady && token) slPCLSetMarker(sl::PCLMarker::eSimulationEnd, *static_cast<sl::FrameToken*>(token));
+}
+
+void RenderBegin(void* token)
+{
+    g_renderToken = static_cast<sl::FrameToken*>(token);
+    g_renderTagged = false;
+    if (g_deviceReady && g_renderToken) slPCLSetMarker(sl::PCLMarker::eRenderSubmitStart, *g_renderToken);
 }
 
 void Tag(const FrameInputs& in)
@@ -342,7 +347,7 @@ void Delivered()
     std::lock_guard lock(g_lock);
     g_readyToken = g_renderToken;
     g_readyTagged = g_renderTagged;
-    g_readyIndex = g_frameIndex;
+    g_readyIndex = uint32_t(*g_renderToken);
 }
 
 void GuestOutputPainted(ID3D12GraphicsCommandList* list, ID3D12Resource* backBuffer, int32_t x, int32_t y, uint32_t width, uint32_t height)
@@ -414,6 +419,27 @@ void AfterPresent()
                 fprintf(stderr, "frame generation: %s, %u frames per present, status 0x%X, %llu tagged\n",
                     g_appliedOn ? "on" : "off", state.numFramesActuallyPresented, uint32_t(state.status),
                     (unsigned long long)g_status.taggedFrames);
+        }
+    }
+    // Reflex latency reports: simulation start -> GPU render end of real frames.
+    if (g_presents % 600 == 0)
+    {
+        static sl::ReflexState reflex{};
+        if (SL_SUCCEEDED(result, slReflexGetState(reflex)) && reflex.latencyReportAvailable)
+        {
+            double total = 0, worst = 0, queue = 0;
+            uint32_t count = 0;
+            for (const auto& report : reflex.frameReport)
+                if (report.simStartTime && report.gpuRenderEndTime > report.simStartTime && report.gpuRenderEndTime - report.simStartTime < 1000000)
+                {
+                    const double ms = (report.gpuRenderEndTime - report.simStartTime) / 1000.0;
+                    total += ms; worst = (std::max)(worst, ms); ++count;
+                    if (report.gpuRenderStartTime > report.presentEndTime && report.presentEndTime)
+                        queue += (report.gpuRenderStartTime - report.presentEndTime) / 1000.0;
+                }
+            if (count)
+                fprintf(stderr, "reflex latency: simulation start -> GPU end %.1f ms average, %.1f ms worst; present -> GPU start %.1f ms (%u frames)\n",
+                    total / count, worst, queue / count, count);
         }
     }
     const auto now = std::chrono::steady_clock::now();

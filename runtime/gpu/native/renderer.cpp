@@ -800,6 +800,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             const size_t bytes = size_t(w) * h * FormatBytes(textureFormats.back());
             if (!w || !h || (liveResources?frame.resources[i]->image.pixels.size()!=bytes:at + 8 + bytes > textureFile.size())) return 1;
             dimensions.emplace_back(w, h);
+            // FD_DUMP_TEXTURE=<table index>: debug, write that texture's base level.
+            if(const char* dumpIndex=CachedEnv("FD_DUMP_TEXTURE");dumpIndex&&uint32_t(atoi(dumpIndex))==i&&textureFormats.back()==RenderFormat::R8G8B8A8_UNORM)
+            {
+                const uint8_t* pixels=liveResources?frame.resources[i]->image.pixels.data():textureFile.data()+at+8;
+                stbi_write_png(("texture_"+std::to_string(i)+".png").c_str(),int(w),int(h),4,pixels,int(w*4));
+            }
             if(versioned)
             {
                 const auto found=storage.staticTextures.find(versions[i]);
@@ -1131,7 +1137,6 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     const UpscalerMode upscaleMode=frame.continuous&&shaderCatalog?ConfiguredUpscalerMode(UpscalerSetting()):UpscalerMode::Off;
     // DLSS Frame Generation needs the same depth / motion vectors (no jitter).
     const bool frameGen=frame.continuous&&shaderCatalog&&fg::WantsInputs();
-    if(frame.continuous)fg::BeginFrame();
     // Internal resolution: screen-size targets (the front buffer's size) are
     // rendered at outputScale; with DLSS Super Resolution the scene before its
     // copy renders at renderScale and DLSS brings it to outputScale.
@@ -2069,6 +2074,32 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             if (i == sceneResolve && best) runUpscale(d, const_cast<Target&>(*best));
             continue;
         }
+        // FD_TRACE_FETCH=<draw>: debug, the draw's vertex fetch descriptors and
+        // the first raw dwords each one reads from the stream space.
+        if (const char* traceFetch = CachedEnv("FD_TRACE_FETCH"); traceFetch && size_t(atoi(traceFetch)) == i && d.vertexFetch)
+        {
+            const uint32_t* fetch = reinterpret_cast<const uint32_t*>(d.vertexFetch);
+            for (uint32_t k = 0; k < 32; ++k)
+            {
+                const uint32_t* f = fetch + k * 4;
+                if (!(f[3] >> 31)) continue;
+                fprintf(stderr, "fetch %u: base %u stride %u offset %u size %u format %u signed %u int %u exp %d\n", k, f[0], f[1] & 0xFFFF, f[1] >> 16, f[2],
+                    f[3] & 0x3F, (f[3] >> 8) & 1, (f[3] >> 9) & 1, int32_t(f[3] << 16) >> 26);
+                for (uint32_t v = 0; v < 6; ++v)
+                {
+                    const size_t at = size_t(f[0]) + size_t(v) * (f[1] & 0xFFFF) + (f[1] >> 16);
+                    if (at + 8 > streamFile.size()) break;
+                    uint32_t a, b; memcpy(&a, streamFile.data() + at, 4); memcpy(&b, streamFile.data() + at + 4, 4);
+                    fprintf(stderr, "   v%u: %08X %08X (%g %g)\n", v, a, b, std::bit_cast<float>(a), std::bit_cast<float>(b));
+                }
+            }
+        }
+        // FD_SKIP_DRAWS=<first>-<last>: debug, skip those draw records.
+        if (const char* skip = CachedEnv("FD_SKIP_DRAWS"))
+        {
+            const size_t first = size_t(atoi(skip)), last = strchr(skip, '-') ? size_t(atoi(strchr(skip, '-') + 1)) : first;
+            if (i >= first && i <= last) continue;
+        }
         memcpy(vertexMap + vertexAt, d.vertices, d.vertexBytes);
         memcpy(indexMap + indexAt, d.indices, d.indexBytes);
         uint8_t* drawConstants = constantMap + kPerDraw * (i + 1);
@@ -2248,11 +2279,13 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                 }
             }
             if (d.hasFetchMetadata && (d.textureFetches[slot][5] >> 9 & 3) == 1 &&
-                !(d.textureFetches[slot][1] & 0x400))
+                !(d.textureFetches[slot][1] & 0x400) && !CachedEnv("FD_TFETCH3D_2D_NULL"))
                 volumeIndex = 0x80000000u | index;
             memcpy(shared + kSharedTextureIndex + 128 + slot * 4, &volumeIndex, 4);
             if (traceDrawOption && i <= traceDrawThrough && slot < 4)
-                fprintf(stderr, "draw %zu slot %u: table %d base %08X -> heap %u\n", i, slot, d.slots[slot], d.bases[slot], index);
+                fprintf(stderr, "draw %zu slot %u: table %d base %08X -> heap %u (dim %u stacked %u volume %u -> %08X, fetch %08X %08X %08X %08X %08X %08X)\n", i, slot, d.slots[slot], d.bases[slot], index,
+                    d.textureFetches[slot][5] >> 9 & 3, (d.textureFetches[slot][1] & 0x400) != 0, d.slots[slot]>=0&&volumesByIndex[d.slots[slot]]?1u:0u, volumeIndex,
+                    d.textureFetches[slot][0], d.textureFetches[slot][1], d.textureFetches[slot][2], d.textureFetches[slot][3], d.textureFetches[slot][4], d.textureFetches[slot][5]);
         }
         Target& target = targetFor(d);
         if(profile)
@@ -2318,10 +2351,10 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                 float v[8] = {};
                 memcpy(v, d.vertices, (std::min)(sizeof(v), size_t(d.vertexBytes)));
                 fprintf(stderr, "draw %zu vs %s ps %s: %u indices (%u bytes, idx32 %u) stride %u vbytes %u sem0 %s v0 (%g %g %g %g) v1 (%g %g %g %g) "
-                    "viewport %g %g %g %g z %g..%g target %ux%u depthctl %08X offset %d\n", i, d.vs.c_str(), d.ps.c_str(), count, d.indexBytes,
+                    "viewport %g %g %g %g z %g..%g target %ux%u depthctl %08X offset %d blend %08X mask %08X colorinfo %08X\n", i, d.vs.c_str(), d.ps.c_str(), count, d.indexBytes,
                     d.index32, d.stride, d.vertexBytes, d.semantics.empty() ? "-" : d.semantics[0].c_str(), v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
                     viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth, viewport.maxDepth, target.width, target.height,
-                    d.regs[RB_DEPTHCONTROL], int32_t(d.regs[VGT_INDX_OFFSET]));
+                    d.regs[RB_DEPTHCONTROL], int32_t(d.regs[VGT_INDX_OFFSET]), d.regs[RB_BLENDCONTROL0], d.regs[RB_COLOR_MASK], d.regs[RB_COLOR_INFO]);
             }
             list->drawIndexedInstanced(count, 1, 0, int32_t(d.regs[VGT_INDX_OFFSET]), 0);
             ++target.draws;

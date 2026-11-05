@@ -13,6 +13,7 @@ struct VertexProgram
     struct Input { uint32_t destination; std::string semantic; };
     uint32_t codeOffset = 0;
     std::vector<Input> inputs;
+    std::string name;
     static VertexProgram FromShader(const NativeShader& shader);
 };
 

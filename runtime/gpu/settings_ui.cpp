@@ -9,6 +9,7 @@
 #include "native/upscaler.h"
 #include "native/frame_generation.h"
 #include "../game_loop.h"
+#include "../latency.h"
 #endif
 #include <wrl/client.h>
 #include <algorithm>
@@ -234,6 +235,7 @@ private:
             ImGui::Text("%.0f FPS", fps_);
         }
         if(d.showFrameTime&&timing_.count){ImGui::SameLine();ImGui::Text("%.1f ms",timing_.meanMs);}
+        if(d.showFrameTime){const auto lat=latency::Get();if(lat.samples){ImGui::SameLine();ImGui::Text("| latência %.0f ms",lat.averageMs);}}
         ImGui::End();
         if (!visible_) return;
 

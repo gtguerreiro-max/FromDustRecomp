@@ -19,6 +19,7 @@
 #endif
 #endif
 #include "../settings.h"
+#include "../latency.h"
 #include "../kernel/kernel.h"
 #include "../kernel/thread.h"
 #include "../kernel/debug.h"
@@ -279,10 +280,15 @@ bool Initialize() {
         auto& hooks=xe::ui::d3d12::fd_present_hooks;
         hooks.factory_created=fg::FactoryCreated;hooks.device_created=fg::DeviceCreated;
         hooks.guest_output_painted=fg::GuestOutputPainted;
-        hooks.before_present=fg::BeforePresent;hooks.after_present=fg::AfterPresent;
+        hooks.before_present=fg::BeforePresent;
         kernel::Log("gpu: NVIDIA Streamline loaded for DLSS Frame Generation (%dx)",frames+1);
       } else kernel::Log("gpu: DLSS Frame Generation unavailable: %s",fg::GetStatus().reason);
     }
+    // Every completed Present closes pending input latency samples.
+    xe::ui::d3d12::fd_present_hooks.after_present=[]{
+      if(gpu::native::fg::Loaded())gpu::native::fg::AfterPresent();
+      latency::Presented();
+    };
     g_nativeProvider=xe::ui::d3d12::D3D12Provider::Create();
     if(!g_nativeProvider)return false;
     g_nativePresenter=g_nativeProvider->CreatePresenter();
