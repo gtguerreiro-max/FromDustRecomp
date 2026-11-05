@@ -256,7 +256,13 @@ bool Initialize() {
   g_memory->SetGpuTelemetry(&g_stats.frames, &g_stats.draws);
   g_memory->SetGpuFrameObserver(gpu::RecordFrameTiming);
   const auto graphics = settings::Get();
-  const int frameLimit = graphics.frameLimit ? graphics.frameLimit : (graphics.vsync ? 60 : 0);
+  // VSync with no limit paces to the display's refresh rate (it used to be a
+  // fixed 60 Hz, which capped high refresh monitors at 60 FPS).
+  int refresh = 60;
+  if (DEVMODEW mode{}; (mode.dmSize = sizeof(mode), EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode)) && mode.dmDisplayFrequency > 1)
+    refresh = int(mode.dmDisplayFrequency);
+  const int frameLimit = graphics.frameLimit ? graphics.frameLimit : (graphics.vsync ? refresh : 0);
+  if (graphics.vsync && !graphics.frameLimit) kernel::Log("gpu: VSync without a frame limit: pacing at the display's %d Hz", refresh);
   g_frameInterval = frameLimit ? std::chrono::nanoseconds(1000000000LL / frameLimit) : std::chrono::nanoseconds{};
   g_memory->SetGpuFramePacer(PaceFrame);
   g_processor = std::make_unique<xe::cpu::Processor>(g_memory.get());

@@ -499,8 +499,13 @@ struct gpu::native::Renderer::Impl
     Microsoft::WRL::ComPtr<ID3D12RootSignature> presentRoot;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> presentPipeline;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> presentHeap;
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> presentAllocator;
-    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> presentList;
+    // A ring of copy recordings: with VSync the presenter's queue runs the
+    // copy behind queued flips, and waiting for the previous one to reuse a
+    // single allocator blocked the render worker for most of a refresh.
+    static constexpr uint32_t kPresentSlots=3;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> presentAllocators[kPresentSlots];
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> presentLists[kPresentSlots];
+    uint64_t presentSlotSerials[kPresentSlots]{};
     Microsoft::WRL::ComPtr<ID3D12Fence> presentFence;
     uint64_t presentSerial=0;
     bool PresentTo(ID3D12Resource* destination,ID3D12CommandQueue* destinationQueue);
@@ -2650,32 +2655,39 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
         if(FAILED(D3D12SerializeRootSignature(&root,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors))||
             FAILED(d3d->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&presentRoot))))return false;
         D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline={};pipeline.pRootSignature=presentRoot.Get();pipeline.CS={fd_native_present,sizeof(fd_native_present)};
-        D3D12_DESCRIPTOR_HEAP_DESC heap={};heap.NumDescriptors=2;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        D3D12_DESCRIPTOR_HEAP_DESC heap={};heap.NumDescriptors=2*kPresentSlots;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if(FAILED(d3d->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&presentPipeline)))||
             FAILED(d3d->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&presentHeap)))||
-            FAILED(d3d->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&presentAllocator)))||
-            FAILED(d3d->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,presentAllocator.Get(),nullptr,IID_PPV_ARGS(&presentList)))||
             FAILED(d3d->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&presentFence))))return false;
-        if(FAILED(presentList->Close()))return false;
+        for(uint32_t slot=0;slot<kPresentSlots;++slot)
+        {
+            if(FAILED(d3d->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&presentAllocators[slot])))||
+                FAILED(d3d->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,presentAllocators[slot].Get(),nullptr,IID_PPV_ARGS(&presentLists[slot])))||
+                FAILED(presentLists[slot]->Close()))return false;
+        }
     }
     const auto targetDesc=destination->GetDesc();
-    auto srv=presentHeap->GetCPUDescriptorHandleForHeapStart();
-    auto uav=srv;uav.ptr+=d3d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const uint32_t slot=uint32_t(presentSerial%kPresentSlots);
+    auto& presentAllocator=presentAllocators[slot];auto& presentList=presentLists[slot];
+    // This slot's previous copy (kPresentSlots frames ago) must be done before
+    // its allocator and descriptors are reused.
+    if(presentSlotSerials[slot]&&presentFence->GetCompletedValue()<presentSlotSerials[slot])
+    {
+        HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+        if(!event)return false;
+        const bool done=SUCCEEDED(presentFence->SetEventOnCompletion(presentSlotSerials[slot],event))&&WaitForSingleObject(event,10000)==WAIT_OBJECT_0;
+        CloseHandle(event);
+        if(!done)return false;
+    }
+    const uint32_t increment=d3d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    auto srv=presentHeap->GetCPUDescriptorHandleForHeapStart();srv.ptr+=size_t(increment)*2*slot;
+    auto uav=srv;uav.ptr+=increment;
+    auto table=presentHeap->GetGPUDescriptorHandleForHeapStart();table.ptr+=uint64_t(increment)*2*slot;
     D3D12_SHADER_RESOURCE_VIEW_DESC source={};source.Format=outputTexture->d3d->GetDesc().Format;
     source.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;source.Texture2D.MipLevels=1;source.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     d3d->CreateShaderResourceView(outputTexture->d3d,&source,srv);
     D3D12_UNORDERED_ACCESS_VIEW_DESC target={};target.Format=targetDesc.Format;target.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
     d3d->CreateUnorderedAccessView(destination,nullptr,&target,uav);
-    // The previous copy must be done before its allocator is reused (it
-    // normally is: one frame has passed).
-    if(presentSerial&&presentFence->GetCompletedValue()<presentSerial)
-    {
-        HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
-        if(!event)return false;
-        const bool done=SUCCEEDED(presentFence->SetEventOnCompletion(presentSerial,event))&&WaitForSingleObject(event,10000)==WAIT_OBJECT_0;
-        CloseHandle(event);
-        if(!done)return false;
-    }
     if(FAILED(presentAllocator->Reset())||FAILED(presentList->Reset(presentAllocator.Get(),presentPipeline.Get())))return false;
     D3D12_RESOURCE_BARRIER barriers[2]={};
     for(auto& barrier:barriers){barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;barrier.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;}
@@ -2683,7 +2695,7 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
     barriers[1].Transition.pResource=destination;barriers[1].Transition.StateBefore=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     presentList->ResourceBarrier(2,barriers);
     ID3D12DescriptorHeap* heaps[]={presentHeap.Get()};presentList->SetDescriptorHeaps(1,heaps);
-    presentList->SetComputeRootSignature(presentRoot.Get());presentList->SetComputeRootDescriptorTable(0,presentHeap->GetGPUDescriptorHandleForHeapStart());
+    presentList->SetComputeRootSignature(presentRoot.Get());presentList->SetComputeRootDescriptorTable(0,table);
     const uint32_t extents[]={outputWidth,outputHeight,uint32_t(targetDesc.Width),targetDesc.Height};
     presentList->SetComputeRoot32BitConstants(1,4,extents,0);
     presentList->Dispatch((uint32_t(targetDesc.Width)+7)/8,(targetDesc.Height+7)/8,1);
@@ -2692,6 +2704,7 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
     if(FAILED(presentList->Close()))return false;
     ID3D12CommandList* commands[]={presentList.Get()};destinationQueue->ExecuteCommandLists(1,commands);
     if(FAILED(destinationQueue->Signal(presentFence.Get(),++presentSerial)))return false;
+    presentSlotSerials[slot]=presentSerial;
     // No CPU wait: the renderer's queue waits on the GPU for this copy before
     // it rewrites the output texture (the destination queue then presents in
     // order). FD_NATIVE_PRESENT_WAIT=1 restores the CPU wait.

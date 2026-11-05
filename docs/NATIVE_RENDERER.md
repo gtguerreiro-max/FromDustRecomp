@@ -1252,3 +1252,37 @@ stack, as the native path does.
 Diagnostics: `FD_TRACE_IMLOAD=1` (draws that use inline microcode),
 `FD_TRACE_FETCH=<draw>` (fetches, indices, PS / VS constants of a replay draw),
 `FD_SKIP_DRAWS`, `FD_DUMP_TEXTURE`, `FD_TRACE_VFETCH`.
+
+## Frame cost round — 2026-11-05
+
+First level, fixed-rate world, DLAA, VSync on, no frame limit, RTX 5060 Ti:
+53-58 FPS -> 59-74 FPS (median 68).
+
+- VSync with "no limit" paced the game at a fixed 60 Hz
+  (`frameLimit ? ... : (vsync ? 60 : 0)`). On high refresh monitors that was
+  the cap. It now paces at the display's refresh rate (`EnumDisplaySettings`).
+- Render worker, resources phase 4.7 -> ~2.2 ms. The water textures change
+  every frame, and each change created new D3D12 textures, a new staging
+  buffer and a CPU wait for the upload. Textures of retired versions are now
+  reused by shape, the staging buffer persists, and frames with nothing new
+  submit no upload (also for cube maps).
+- Live texture captures copy the guest bytes on the game thread and decode
+  them on the worker (`CaptureDeferred` / `ResolveTexture`).
+- The present copy uses a ring of three command allocators and descriptor
+  pairs, not one allocator waited on every frame.
+- `BuildGeometry` called `getenv` per draw (11% of the game thread in a
+  sampling profile).
+
+Profile of the game thread after this round (`FD_PROFILE=25
+FD_PROFILE_DELAY=300 FD_PROFILE_THREAD=3`, `FD_PROFILE_TOP=<n>` lists more):
+- ~16% waiting in VdSwap for the render worker (the two are balanced).
+- ~13% in `VirtualProtect` from `WatchPhysical`. Every watch protects all
+  three physical aliases, and dynamic vertex buffers written every frame are
+  re-watched (and fault) per draw window.
+- ~12% in `memset` of large per-draw structures (command value-init, the
+  stream cache's zero-filled vectors), ~6% heap allocation.
+- ~12% guest waits (`NtWaitForSingleObjectEx`), the game's own job sync.
+
+Next candidates: copy only the used vertex range for dynamic streams and stop
+watching them, pool the per-draw allocations, and avoid zero-filling
+buffers that are fully overwritten.

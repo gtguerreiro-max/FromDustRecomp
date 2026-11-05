@@ -272,7 +272,8 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
     const bool pullPrimary=bounds&&bounds->pullPrimary&&primitive==4;
     const auto live = Fetches(livePhysical.subspan(program.codeOffset),pullPrimary);
     // FD_TRACE_VFETCH=<vertex shader>: debug, its live (patched) vertex fetches, once.
-    if (const char* traceShader = getenv("FD_TRACE_VFETCH"); traceShader && program.name == traceShader)
+    static const char* const traceShader = getenv("FD_TRACE_VFETCH");
+    if (traceShader && program.name == traceShader)
     {
         static std::vector<std::vector<uint32_t>> seen;
         std::vector<uint32_t> key;

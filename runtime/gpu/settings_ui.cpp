@@ -362,7 +362,7 @@ private:
                 constexpr int limits[] = {30, 60, 120, 0};
                 int limit = int(std::find(std::begin(limits), std::end(limits), d.frameLimit) - std::begin(limits));
                 if (ImGui::Combo("Limite de FPS", &limit, "30\0 60\0 120\0Sem limite\0")) d.frameLimit = limits[limit];
-                ImGui::TextDisabled("Com VSync, 'Sem limite' mantém o ritmo de 60 Hz.");
+                ImGui::TextDisabled("Com VSync, 'Sem limite' segue a frequência do monitor.");
                 constexpr int filters[] = {-1, 2, 3, 4, 5};
                 int filter = nativeBackend_ ? 0 : int(std::find(std::begin(filters), std::end(filters), d.anisotropy) - std::begin(filters));
                 ImGui::BeginDisabled(nativeBackend_);

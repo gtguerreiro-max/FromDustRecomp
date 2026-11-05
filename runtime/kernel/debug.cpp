@@ -345,7 +345,9 @@ namespace kernel::debug
                 std::vector<std::pair<uint64_t, uint32_t>> sorted(counts.begin(), counts.end());
                 std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b) { return a.second > b.second; });
                 Log("=== profile (%s), %u samples ===", title, samples);
-                for (size_t i = 0; i < sorted.size() && i < 30; i++)
+                // FD_PROFILE_TOP=<n> lists more entries (default 30).
+                static const size_t top = getenv("FD_PROFILE_TOP") ? size_t(atoi(getenv("FD_PROFILE_TOP"))) : 30;
+                for (size_t i = 0; i < sorted.size() && i < top; i++)
                 {
                     const uint64_t key = sorted[i].first;
                     const double pct = 100.0 * sorted[i].second / (samples ? samples : 1);
