@@ -1,3 +1,4 @@
+#include <atomic>
 #ifdef FD_NATIVE_RENDERER
 #include <chrono>
 #include "../../kernel/kernel.h"
@@ -57,6 +58,7 @@ Draw SurfaceState(uint32_t device) {
     });
 }
 }
+extern std::atomic<uint64_t> g_streamHitBytes,g_streamMissBytes,g_indexHitBytes,g_indexMissBytes;
 struct LiveGeometryCapture::Impl
 {
     enum class State { Waiting, Capturing, Complete } state = State::Waiting;
@@ -98,14 +100,20 @@ struct LiveGeometryCapture::Impl
             return revision;
         };
     }
-    void Commit(GeometryBatch::Command command)
+    void Commit(GeometryBatch::Command&& command)
+    {
+        batch.commands.push_back(std::move(command));
+        Notify(batch.commands.back());
+    }
+    // Draw commands are built in place (a command is ~15 KB: constants and
+    // device state; moving it copies all of it).
+    void Notify(GeometryBatch::Command& command)
     {
         if(onCommand)
         {
             if(!command.state.clear&&!command.state.resolve){command.state.vs=command.vertexShader;command.state.ps=command.pixelShader;}
             onCommand(command.state);
         }
-        batch.commands.push_back(std::move(command));
     }
 
     void Error(const std::string& message)
@@ -196,23 +204,23 @@ struct LiveGeometryCapture::Impl
             const auto [initiator,indexAddress,baseVertex]=packets[first];
             const GeometryBounds bounds{int32_t(baseVertex),pullPrimary};
             const auto buildStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-            const size_t streamBefore=batch.streams.bytes.size();
+            const size_t streamBefore=batch.streams.Size();
             auto geometry = BuildGeometry(program->second, pending.physical, pending.fetches,
                 initiator & 63, initiator >> 16, ((initiator >> 6) & 3) == 0, (initiator & 0x800) != 0,
                 indexAddress, reader, batch.streams,&bounds);
             if(profile)
             {
                 profileMs[1]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-buildStart).count();
-                profileIndexBytes+=geometry.indices.size();profileStreamBytes+=batch.streams.bytes.size()-streamBefore;
+                profileIndexBytes+=geometry.IndexBytes().size();profileStreamBytes+=batch.streams.Size()-streamBefore;
             }
-            vertexBytes += geometry.vertices.size(); indexBytes += geometry.indices.size();
-            GeometryBatch::Command command;
+            vertexBytes += geometry.vertices.size(); indexBytes += geometry.IndexBytes().size();
+            const auto commitStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+            auto& command = batch.commands.emplace_back();
             command.vertexShader = pending.shader->name; command.pixelShader = pending.pixelShader;
             command.vertexConstants = pending.vertexConstants; command.pixelConstants = pending.pixelConstants;
             command.state = *pending.state;command.state.regs[VGT_INDX_OFFSET]=baseVertex;
             command.geometry = std::move(geometry);
-            const auto commitStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-            Commit(std::move(command));
+            Notify(command);
             if(profile)profileMs[2]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-commitStart).count();
             ++geometryPackets;
             }
@@ -350,6 +358,8 @@ void LiveGeometryCapture::Swap(uint64_t previousIndexed)
                 const double n=300;
                 kernel::Log("native capture profile: begin %.2f ms, geometry %.2f ms, commit %.2f ms, other %.2f ms; %.0f KB indices, %.0f KB streams per frame",
                     c.profileMs[0]/n,c.profileMs[1]/n,c.profileMs[2]/n,c.profileMs[3]/n,c.profileIndexBytes/n/1024,c.profileStreamBytes/n/1024);
+                kernel::Log("native capture cache per frame: streams %.0f KB hit / %.0f KB converted, indices %.0f KB hit / %.0f KB converted",
+                    g_streamHitBytes.exchange(0)/n/1024,g_streamMissBytes.exchange(0)/n/1024,g_indexHitBytes.exchange(0)/n/1024,g_indexMissBytes.exchange(0)/n/1024);
                 std::fill(std::begin(c.profileMs),std::end(c.profileMs),0.0);c.profileIndexBytes=c.profileStreamBytes=0;
             }
             const auto serial=c.batch.serial+1;

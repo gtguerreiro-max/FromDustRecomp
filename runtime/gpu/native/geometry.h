@@ -25,12 +25,21 @@ struct StreamArena
     struct Entry { uint32_t address, offset, size; uint64_t revision=0; };
     std::vector<Entry> entries;
     std::vector<uint8_t> bytes;
+    // With the persistent cache (live capture) streams are not copied into
+    // `bytes`: each occupies [offset, offset + size) of the frame's stream
+    // space and refers to the cache's converted bytes.
+    struct Segment { uint32_t offset = 0; std::shared_ptr<const std::vector<uint8_t>> data; };
+    std::vector<Segment> segments;
+    uint32_t segmentEnd = 0;
+    uint32_t Size() const { return segments.empty() ? uint32_t(bytes.size()) : segmentEnd; }
     // Optional live write-watch generation covering the entire source range.
     // Without it, snapshots are compared byte-for-byte as in offline readers.
     std::function<uint64_t(uint32_t,uint32_t)> revision;
     // Optional cross-frame cache of converted (little-endian) streams and
     // indices, keyed by guest range and valid for one write-watch revision.
-    struct Converted { uint64_t revision = 0, used = 0; uint32_t minimum = 0, maximum = 0; std::vector<uint8_t> bytes; };
+    // Converted bytes are replaced, never modified, so frames in flight can
+    // keep referring to an older version.
+    struct Converted { uint64_t revision = 0, used = 0; uint32_t minimum = 0, maximum = 0; std::shared_ptr<const std::vector<uint8_t>> bytes; };
     struct Persistent
     {
         std::map<std::pair<uint32_t, uint32_t>, Converted> streams, indices;
@@ -50,6 +59,9 @@ struct StreamArena
 struct Geometry
 {
     std::vector<uint8_t> vertices, indices;
+    // Indices shared with the persistent cache (used instead of `indices`).
+    std::shared_ptr<const std::vector<uint8_t>> sharedIndices;
+    std::span<const uint8_t> IndexBytes() const { return sharedIndices ? std::span<const uint8_t>(*sharedIndices) : std::span<const uint8_t>(indices); }
     std::vector<std::string> semantics;
     std::array<uint32_t, 128> fetches = {};
     uint32_t stride = 0, primitive = 0, indexCount = 0, index32 = 0;

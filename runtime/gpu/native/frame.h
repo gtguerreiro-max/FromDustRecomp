@@ -77,6 +77,11 @@ struct FrameInput
     uint32_t frontBufferBase=0;
     std::span<const uint64_t> textureVersions;
     std::span<const std::shared_ptr<TextureResource>> resources;
+    // Live capture: the stream space as shared segments (offset, bytes)
+    // instead of one contiguous `streams` copy; streamSegmentBytes is its size.
+    struct StreamSegment { uint32_t offset = 0, size = 0; const uint8_t* data = nullptr; };
+    std::span<const StreamSegment> streamSegments;
+    uint32_t streamSegmentBytes = 0;
     std::span<const uint8_t> volumes;
 };
 struct FrameOutput

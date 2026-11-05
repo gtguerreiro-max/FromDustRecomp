@@ -751,11 +751,18 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     // Guest vertex streams read by pulled vertex fetches.
     const auto streamFile = frame.streams;
     auto& streamBuffer=storage.streamBuffer;
-    const uint64_t streamBytes=(std::max)(streamFile.size(),size_t(16));
+    const uint64_t streamBytes=(std::max)((std::max)(streamFile.size(),size_t(frame.streamSegmentBytes)),size_t(16));
     if(streamBytes>storage.streamCapacity){streamBuffer=device->createBuffer(RenderBufferDesc::UploadBuffer(streamBytes));storage.streamCapacity=streamBytes;}
     if (!streamFile.empty())
     {
         memcpy(streamBuffer->map(), streamFile.data(), streamFile.size());
+        streamBuffer->unmap();
+    }
+    if (!frame.streamSegments.empty())
+    {
+        // Live frames: one copy from the shared converted streams.
+        auto* map = static_cast<uint8_t*>(streamBuffer->map());
+        for (const auto& segment : frame.streamSegments) memcpy(map + segment.offset, segment.data, segment.size);
         streamBuffer->unmap();
     }
     auto* vertexMap = static_cast<uint8_t*>(vertexBuffer->map());

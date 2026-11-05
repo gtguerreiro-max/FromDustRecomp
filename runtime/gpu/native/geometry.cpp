@@ -1,5 +1,10 @@
 #include "geometry.h"
 #include <algorithm>
+#include <atomic>
+#include <map>
+#include <vector>
+#include <cstdio>
+#include <cstdlib>
 #include <typeinfo>
 #include <limits>
 #include <bit>
@@ -39,9 +44,26 @@ void SwapWords(uint8_t* destination, const uint8_t* source, size_t bytes)
         memcpy(destination + at, &value, 4);
     }
 }
+}
+// FD_NATIVE_PROFILE: bytes served from / converted into the persistent cache.
+std::atomic<uint64_t> g_streamHitBytes{0},g_streamMissBytes{0},g_indexHitBytes{0},g_indexMissBytes{0},g_vertexBytes{0};
+namespace {
 uint32_t Stream(StreamArena& arena, uint32_t address, std::span<const uint8_t> bytes)
 {
     uint64_t revision=arena.revision?arena.revision(address,uint32_t(bytes.size())):0;
+    if (arena.revision && arena.persistent)
+    {
+        // Live: dynamic vertex buffers are read by many draws as windows
+        // [address, buffer end) of one range. Reuse a range converted earlier
+        // in this frame that contains the window, while unwritten since.
+        for (auto entry = arena.entries.rbegin(); entry != arena.entries.rend(); ++entry)
+        {
+            if (address < entry->address || uint64_t(address) + bytes.size() > uint64_t(entry->address) + entry->size) continue;
+            if (arena.revision(entry->address, entry->size) != entry->revision) continue;
+            g_streamHitBytes += bytes.size();
+            return entry->offset + (address - entry->address);
+        }
+    }
     for (auto entry = arena.entries.rbegin(); entry != arena.entries.rend(); ++entry)
     {
         if (entry->address != address || entry->size != bytes.size()) continue;
@@ -58,21 +80,55 @@ uint32_t Stream(StreamArena& arena, uint32_t address, std::span<const uint8_t> b
         }
         if (equal) return entry->offset;
     }
-    if (bytes.size() % 4 || arena.bytes.size() + bytes.size() > UINT32_MAX)
+    if (bytes.size() % 4 || uint64_t(arena.Size()) + bytes.size() > UINT32_MAX)
         throw std::runtime_error("Native vertex stream arena overflow");
-    const uint32_t offset = uint32_t(arena.bytes.size());
-    StreamArena::Converted* cached = nullptr;
     if (arena.revision && arena.persistent)
     {
-        cached = &arena.persistent->streams[{address, uint32_t(bytes.size())}];
-        cached->used = arena.persistent->frame;
-        if (cached->revision == revision && cached->bytes.size() == bytes.size() && !cached->bytes.empty())
+        // Live: refer to the cache's converted bytes (converting on a miss).
+        auto& cached = arena.persistent->streams[{address, uint32_t(bytes.size())}];
+        cached.used = arena.persistent->frame;
+        if (cached.revision == revision && cached.bytes && cached.bytes->size() == bytes.size() && !bytes.empty())
+            g_streamHitBytes += bytes.size();
+        else
         {
-            arena.bytes.insert(arena.bytes.end(), cached->bytes.begin(), cached->bytes.end());
-            arena.entries.push_back({address, offset, uint32_t(bytes.size()), revision});
-            return offset;
+            g_streamMissBytes += bytes.size();
+            static const bool trace = getenv("FD_TRACE_STREAM_MISSES") != nullptr;
+            if (trace)
+            {
+                static std::map<std::pair<uint32_t, uint32_t>, uint64_t> misses;
+                static uint64_t total = 0;
+                misses[{address, uint32_t(bytes.size())}] += bytes.size();
+                if ((total += bytes.size()) > (512ull << 20))
+                {
+                    std::vector<std::pair<uint64_t, std::pair<uint32_t, uint32_t>>> top;
+                    for (const auto& [key, value] : misses) top.push_back({value, key});
+                    std::sort(top.rbegin(), top.rend());
+                    fprintf(stderr, "stream misses (%zu ranges):", misses.size());
+                    for (size_t i = 0; i < top.size() && i < 12; ++i)
+                        fprintf(stderr, " %08X+%u:%lluMB", top[i].second.first, top[i].second.second, (unsigned long long)(top[i].first >> 20));
+                    fputc('\n', stderr);
+                    misses.clear(); total = 0;
+                }
+            }
+            for (unsigned attempt = 0;; ++attempt)
+            {
+                auto fresh = std::make_shared<std::vector<uint8_t>>(bytes.size());
+                SwapWords(fresh->data(), bytes.data(), bytes.size());
+                const uint64_t after = arena.revision(address, uint32_t(bytes.size()));
+                if (after == revision) { cached.bytes = std::move(fresh); cached.revision = revision; break; }
+                if (attempt == 3) throw std::runtime_error("Vertex stream changed repeatedly during native acquisition");
+                revision = after;
+            }
         }
+        if (arena.segments.empty()) arena.segmentEnd = uint32_t(arena.bytes.size());
+        const uint32_t offset = arena.segmentEnd;
+        arena.segments.push_back({offset, cached.bytes});
+        arena.segmentEnd += uint32_t(bytes.size());
+        arena.entries.push_back({address, offset, uint32_t(bytes.size()), revision});
+        return offset;
     }
+    const uint32_t offset = uint32_t(arena.bytes.size());
+    StreamArena::Converted* cached = nullptr;
     for(unsigned attempt=0;;++attempt)
     {
         arena.bytes.resize(size_t(offset) + bytes.size());
@@ -81,11 +137,6 @@ uint32_t Stream(StreamArena& arena, uint32_t address, std::span<const uint8_t> b
         arena.bytes.resize(offset);
         if(attempt==3)throw std::runtime_error("Vertex stream changed repeatedly during native acquisition");
         revision=arena.revision(address,uint32_t(bytes.size()));
-    }
-    if (cached)
-    {
-        cached->revision = revision;
-        cached->bytes.assign(arena.bytes.begin() + offset, arena.bytes.end());
     }
     arena.entries.push_back({address, offset, uint32_t(bytes.size()),revision});
     return offset;
@@ -280,14 +331,14 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
             cachedIndices=&arena.persistent->indices[{indexBase,indexBytes|uint32_t(unit==4)<<31}];
             cachedIndices->used=arena.persistent->frame;
         }
-        if(cachedIndices&&cachedIndices->revision==indexRevision&&cachedIndices->bytes.size()==indexBytes&&indexBytes)
+        if(cachedIndices&&cachedIndices->revision==indexRevision&&cachedIndices->bytes&&cachedIndices->bytes->size()==indexBytes&&indexBytes)
         {
-            result.indices=cachedIndices->bytes;
+            result.sharedIndices=cachedIndices->bytes;g_indexHitBytes+=indexBytes;
             minimum=cachedIndices->minimum;maximum=cachedIndices->maximum;
         }
         else
         {
-            result.indices.resize(indexBytes);
+            result.indices.resize(indexBytes);g_indexMissBytes+=indexBytes;
             minimum=UINT32_MAX;maximum=0;
             auto convert=[&]<typename Index>()
             {
@@ -307,7 +358,9 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
             if(unit==2)convert.operator()<uint16_t>();else convert.operator()<uint32_t>();
             if(cachedIndices&&arena.revision(indexBase,indexBytes)==indexRevision)
             {
-                cachedIndices->revision=indexRevision;cachedIndices->bytes=result.indices;
+                auto shared=std::make_shared<const std::vector<uint8_t>>(std::move(result.indices));
+                result.indices={};result.sharedIndices=shared;
+                cachedIndices->revision=indexRevision;cachedIndices->bytes=std::move(shared);
                 cachedIndices->minimum=minimum;cachedIndices->maximum=maximum;
             }
         }
@@ -336,9 +389,10 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
     {
         if (count % 3) throw std::runtime_error("Incomplete rectangle list");
         std::vector<uint8_t> expanded, indices;
+        const auto sourceIndices = result.IndexBytes();
         auto indexAt = [&](uint32_t index) {
             uint32_t value = 0;
-            for (uint32_t b = 0; b < unit; ++b) value |= uint32_t(result.indices[index * unit + b]) << (8 * b);
+            for (uint32_t b = 0; b < unit; ++b) value |= uint32_t(sourceIndices[index * unit + b]) << (8 * b);
             return value;
         };
         for (uint32_t start = 0; start < count; start += 3)
@@ -362,7 +416,7 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
             if (base + 3 > 65535) throw std::runtime_error("Expanded rectangle indices exceed 16 bits");
             for (uint32_t index : {base,base+1,base+2,base+2,base+1,base+3}) Append(indices, index, 2);
         }
-        result.vertices = std::move(expanded); result.indices = std::move(indices);
+        result.vertices = std::move(expanded); result.indices = std::move(indices); result.sharedIndices.reset();
         result.index32 = 0; result.primitive = 4; result.indexCount = count / 3 * 6;
         result.replacesIndexOffset=bounds!=nullptr;
     }
@@ -372,7 +426,8 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
 void Geometry::Bind(Draw& draw) const
 {
     draw.primitive = primitive; draw.indexCount = indexCount; draw.index32 = index32; draw.stride = stride;
-    draw.indices = indices.data(); draw.indexBytes = uint32_t(indices.size());
+    const auto ownIndices = IndexBytes();
+    draw.indices = ownIndices.data(); draw.indexBytes = uint32_t(ownIndices.size());
     draw.vertices = vertices.data(); draw.vertexBytes = uint32_t(vertices.size()); draw.semantics = semantics;
     draw.vertexFetch = reinterpret_cast<const uint8_t*>(fetches.data());
     if(replacesIndexOffset){draw.regs[VGT_INDX_OFFSET]=0;draw.context[0x102]=0;}

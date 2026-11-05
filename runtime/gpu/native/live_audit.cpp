@@ -46,6 +46,9 @@ struct RenderJob
     std::vector<GeometryBatch::Command> commands;
     std::vector<uint8_t> bytes;
     std::vector<StreamArena::Entry> entries;
+    std::vector<StreamArena::Segment> segments;
+    uint32_t segmentEnd = 0;
+    std::vector<FrameInput::StreamSegment> views;
     std::vector<std::shared_ptr<TextureResource>> textures;
     uint32_t frontBuffer = 0;
     bool dump = false;
@@ -66,6 +69,9 @@ public:
         job.commands.swap(batch.commands);
         job.bytes.swap(batch.streams.bytes);
         job.entries.swap(batch.streams.entries);
+        job.segments.swap(batch.streams.segments);
+        job.segmentEnd = batch.streams.segmentEnd;
+        batch.streams.segmentEnd = 0;
         job.textures.assign(textures.begin(), textures.end());
         job.frontBuffer = frontBuffer;
         job.dump = dump;
@@ -87,7 +93,7 @@ private:
             kernel::Log("native frame: %s", error.what());
             ExitProcess(1);
         }
-        job.commands.clear();job.bytes.clear();job.entries.clear();job.textures.clear();
+        job.commands.clear();job.bytes.clear();job.entries.clear();job.textures.clear();job.segments.clear();job.views.clear();job.segmentEnd=0;
     }
     void Run()
     {
@@ -275,8 +281,19 @@ bool Initialize()
                     for(const auto& command:job.commands){gpu::native::Draw draw;command.BindGeometryAndConstants(draw);draws.push_back(std::move(draw));}
                     FrameInput input;input.draws=draws;input.resources=job.textures;
                     input.streams=job.bytes;input.continuous=true;input.frontBufferBase=job.frontBuffer;
+                    job.views.reserve(job.segments.size());
+                    for(const auto& segment:job.segments)job.views.push_back({segment.offset,uint32_t(segment.data->size()),segment.data->data()});
+                    input.streamSegments=job.views;input.streamSegmentBytes=job.segmentEnd;
                     std::string diagnostic;
-                    if(job.dump){diagnostic="native-session-frame";ReplayFrame::Save(input,diagnostic);}
+                    std::vector<uint8_t> flat;
+                    if(job.dump)
+                    {
+                        // Replays keep one contiguous stream file.
+                        flat=job.bytes;flat.resize((std::max)(size_t(job.segmentEnd),flat.size()));
+                        for(const auto& view:job.views)memcpy(flat.data()+view.offset,view.data,view.size);
+                        FrameInput saved=input;saved.streams=flat;saved.streamSegments={};saved.streamSegmentBytes=0;
+                        diagnostic="native-session-frame";ReplayFrame::Save(saved,diagnostic);
+                    }
                     const auto packed=std::chrono::steady_clock::now();
                     if(c->renderer->RenderFrame(input,diagnostic))throw std::runtime_error("Native frame execution failed");
                     const auto rendered=std::chrono::steady_clock::now();
