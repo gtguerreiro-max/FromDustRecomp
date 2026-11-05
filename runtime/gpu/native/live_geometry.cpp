@@ -70,8 +70,10 @@ struct LiveGeometryCapture::Impl
     uint32_t thread = 0;
     std::string report;
     std::vector<std::string> errors;
-    std::vector<Pending> stack;
-    std::optional<Pending> inlineDraw;
+    // Heap-held: a pending draw carries ~25 KB of constants and device state,
+    // and moving it by value copied all of that three times per draw.
+    std::vector<std::unique_ptr<Pending>> stack;
+    std::unique_ptr<Pending> inlineDraw;
     std::optional<PendingResolve> resolve;
     GeometryBatch batch;
     std::map<std::string, VertexProgram> programs;
@@ -132,7 +134,7 @@ struct LiveGeometryCapture::Impl
         if(!thread||(onFrame&&stack.empty()&&!resolve&&!inlineDraw))thread=current;
         return thread==current;
     }
-    void Process(Pending pending)
+    void Process(Pending& pending)
     {
         const auto processStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         const double nested=profileMs[1]+profileMs[2];
@@ -318,7 +320,8 @@ void LiveGeometryCapture::Begin(uint32_t device, audit::DrawKind kind, const Nat
     struct BeginTimer{Impl& c;std::chrono::steady_clock::time_point start;
         ~BeginTimer(){if(c.profile)c.profileMs[0]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}
     } beginTimer{c,beginStart};
-    Pending pending{}; pending.device = device; pending.kind = kind; pending.shader = shader;
+    auto owned = std::make_unique<Pending>(); Pending& pending = *owned;
+    pending.device = device; pending.kind = kind; pending.shader = shader;
     pending.primitive=primitive;pending.count=count;
     if (pixelShader) pending.pixelShader = pixelShader->name;
     if (Readable(device, 0x3294))
@@ -326,12 +329,14 @@ void LiveGeometryCapture::Begin(uint32_t device, audit::DrawKind kind, const Nat
         try { pending.state = SnapshotDeviceState({mem::Ptr<uint8_t>(device),0x3294},packet); }
         catch(const std::exception& error) { pending.stateError=error.what(); }
         pending.before = mem::Read32(device + 0x30);
-        for (uint32_t i = 0; i < 1024; ++i)
-        {
-            pending.vertexConstants[i] = mem::Read32(device + 0x780 + i * 4);
-            pending.pixelConstants[i] = mem::Read32(device + 0x1780 + i * 4);
-        }
-        for (uint32_t i = 0; i < 192; ++i) pending.fetches[i] = mem::Read32(device + 0x480 + i * 4);
+        // Big-endian guest words, swapped in bulk (vectorized).
+        auto readWords = [](uint32_t* out, const uint8_t* in, size_t count) {
+            memcpy(out, in, count * 4);
+            for (size_t i = 0; i < count; ++i) out[i] = _byteswap_ulong(out[i]);
+        };
+        readWords(pending.vertexConstants.data(), mem::Ptr<uint8_t>(device + 0x780), 1024);
+        readWords(pending.pixelConstants.data(), mem::Ptr<uint8_t>(device + 0x1780), 1024);
+        readWords(pending.fetches.data(), mem::Ptr<uint8_t>(device + 0x480), 192);
         const uint32_t object = mem::Read32(device + 0x3290);
         if (shader && Readable(object, 0x24))
         {
@@ -340,14 +345,15 @@ void LiveGeometryCapture::Begin(uint32_t device, audit::DrawKind kind, const Nat
         }
     }
     else pending.stateError="Unreadable native device state";
-    c.stack.push_back(std::move(pending));
+    c.stack.push_back(std::move(owned));
 }
 void LiveGeometryCapture::End(uint32_t device, audit::DrawKind kind)
 {
     auto& c = *impl;
     if (c.state != Impl::State::Capturing || c.thread != GetCurrentThreadId()) return;
-    if (c.stack.empty() || c.stack.back().device != device || c.stack.back().kind != kind) { c.Error("Unbalanced native geometry hooks"); return; }
-    auto pending = std::move(c.stack.back()); c.stack.pop_back();
+    if (c.stack.empty() || c.stack.back()->device != device || c.stack.back()->kind != kind) { c.Error("Unbalanced native geometry hooks"); return; }
+    auto owned = std::move(c.stack.back()); c.stack.pop_back();
+    Pending& pending = *owned;
     // The XDK patches vertex declarations in the draw's flush. Snapshot at
     // End even for BeginVertices: inline geometry is processed later, after
     // the caller fills its reserved bytes, and the shader may be rebound.
@@ -358,13 +364,13 @@ void LiveGeometryCapture::End(uint32_t device, audit::DrawKind kind)
         pending.physical.assign(completed.begin(),completed.end());
         pending.completedShader=true;
     }
-    if (kind == audit::DrawKind::BeginVertices) c.inlineDraw = std::move(pending);
-    else c.Process(std::move(pending));
+    if (kind == audit::DrawKind::BeginVertices) c.inlineDraw = std::move(owned);
+    else c.Process(pending);
 }
 void LiveGeometryCapture::FlushInline()
 {
     auto& c = *impl;
-    if (c.inlineDraw) { auto pending = std::move(*c.inlineDraw); c.inlineDraw.reset(); c.Process(std::move(pending)); }
+    if (c.inlineDraw) { auto pending = std::move(c.inlineDraw); c.Process(*pending); }
 }
 void LiveGeometryCapture::Swap(uint64_t previousIndexed)
 {
@@ -511,7 +517,7 @@ void LiveGeometryCapture::CommandBlock(uint32_t device,bool begin)
         if(begin&&c.inlineDraw&&c.inlineDraw->device==device)FlushInline();
         const uint32_t cursor=mem::Read32(device+0x30);
         auto preserve=[&](uint32_t& before,std::vector<uint8_t>& bytes){if(begin)AppendCommands(bytes,before,cursor);before=cursor;};
-        for(auto& pending:c.stack)if(pending.device==device)preserve(pending.before,pending.commands);
+        for(auto& pending:c.stack)if(pending->device==device)preserve(pending->before,pending->commands);
         if(c.resolve&&c.resolve->device==device)preserve(c.resolve->cursor,c.resolve->commands);
     }
     catch(const std::exception& error){c.Error(error.what());}

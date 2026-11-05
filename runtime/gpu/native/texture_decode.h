@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <memory>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -23,9 +24,13 @@ struct MipLayout
 {
     uint32_t rowPitchBytes,offsetBytes,xBlocks,yBlocks;
 };
+struct TextureDeferred;
 struct TextureResource
 {
     std::array<uint32_t,6> fetch;
+    // Live captures: the guest bytes copied on the game thread, decoded by
+    // ResolveTexture on the render worker (image, cube, mips, volume).
+    std::shared_ptr<TextureDeferred> deferred;
     DecodedTexture image;
     std::vector<uint8_t> cube;
     std::vector<DecodedTexture> mips;

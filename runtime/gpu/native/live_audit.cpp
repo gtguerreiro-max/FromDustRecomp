@@ -288,6 +288,7 @@ bool Initialize()
                     if(!c->renderer->CompletedFrames()&&!c->renderer->UseDevice(xenia::NativeDevice()))throw std::runtime_error("Native UI device unavailable");
                     fg::RenderBegin(job.token);
                     const auto started=std::chrono::steady_clock::now();
+                    for(const auto& texture:job.textures)ResolveTexture(*texture);
                     std::vector<gpu::native::Draw> draws;draws.reserve(job.commands.size());
                     for(const auto& command:job.commands){gpu::native::Draw draw;command.BindGeometryAndConstants(draw);draws.push_back(std::move(draw));}
                     FrameInput input;input.draws=draws;input.resources=job.textures;

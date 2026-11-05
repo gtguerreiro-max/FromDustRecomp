@@ -4,7 +4,7 @@
 # Usage: tools/test_frame_generation.ps1 [-Frames 1..3] [-Dlaa 1] [-RunSeconds 150]
 param([ValidateRange(0,3)][int]$Frames=1, [ValidateRange(0,5)][int]$Dlaa=1,
       [ValidateRange(20,1800)][int]$RunSeconds=150, [int[]]$CaptureAt=@(70,110,140),
-      [string]$Schedule='10:0010:600', [string]$OutputDirectory='', [switch]$Settings, [string]$Graphics='', [int]$GuestCaptureAt=0, [int]$DumpAt=0, [int]$FrameLimit=30, [int]$VblankHz=0, [switch]$KeepSave, [string]$Renderer='native', [switch]$NativeProfile)
+      [string]$Schedule='10:0010:600', [string]$OutputDirectory='', [switch]$Settings, [string]$Graphics='', [int]$GuestCaptureAt=0, [int]$DumpAt=0, [int]$FrameLimit=30, [int]$VblankHz=0, [switch]$KeepSave, [string]$Renderer='native', [switch]$NativeProfile, [int]$VSync=1)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 if(!$OutputDirectory){$OutputDirectory=Join-Path $root 'build\frame-generation'}
@@ -24,7 +24,7 @@ $env:FD_RENDERER=$Renderer;$env:FD_HEADLESS='0';$env:FD_EXIT_SECONDS=[string]$Ru
 $env:FD_NATIVE_SHADER_CATALOG=Join-Path $root 'build\native-shaders-live\catalog.bin'
 $env:FD_NATIVE_AUDIT_REPORT=Join-Path $output 'native-session.json';$env:FD_NATIVE_GEOMETRY_REPORT=Join-Path $output 'geometry.json'
 $env:FD_SETTINGS_FILE=Join-Path $output 'settings.ini'
-[IO.File]::WriteAllText($env:FD_SETTINGS_FILE,"[Graphics]`nScale=1`nVSync=1`nFrameLimit=$FrameLimit`nAnisotropy=-1`nUpscaler=$Dlaa`nFrameGeneration=$Frames`n$Graphics`n[Display]`nShowFps=1`n")
+[IO.File]::WriteAllText($env:FD_SETTINGS_FILE,"[Graphics]`nScale=1`nVSync=$VSync`nFrameLimit=$FrameLimit`nAnisotropy=-1`nUpscaler=$Dlaa`nFrameGeneration=$Frames`n$Graphics`n[Display]`nShowFps=1`n")
 $p=Start-Process -FilePath "$root\build\FromDust.exe" -ArgumentList ('"'+"$root\game"+'"') -WorkingDirectory $output -PassThru `
     -RedirectStandardOutput "$output\stdout.log" -RedirectStandardError "$output\stderr.log"
 $start=Get-Date

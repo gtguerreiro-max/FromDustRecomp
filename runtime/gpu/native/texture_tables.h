@@ -13,12 +13,16 @@ struct PackedTextures
 };
 // Per-frame owned snapshots. Adding another version of the same guest address
 // returns another index, preserving resources already referenced by draws.
+// Decodes a deferred capture once (thread-safe); no-op otherwise.
+void ResolveTexture(TextureResource& entry);
 class TextureTables
 {
 public:
     using Entry=TextureResource;
     std::span<const std::shared_ptr<Entry>> Resources()const{return entries;}
     static std::shared_ptr<Entry> CaptureResource(std::span<const uint32_t,6> fetch,const TextureMemoryReader& read);
+    // Copies the guest bytes only; ResolveTexture decodes them later.
+    static std::shared_ptr<Entry> CaptureDeferred(std::span<const uint32_t,6> fetch,const TextureMemoryReader& read);
     uint32_t AddResource(std::shared_ptr<Entry> entry);
     uint32_t Add(std::span<const uint32_t,6> fetch,std::span<const uint8_t> bytes);
     // Native memory producer: bank layout and mip positions come from the

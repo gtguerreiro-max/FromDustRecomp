@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <atomic>
+#include <mutex>
 
 namespace gpu::native
 {
@@ -44,24 +45,51 @@ uint32_t TextureTables::Capture(std::span<const uint32_t,6> fetch,const TextureM
 {
     return AddResource(CaptureResource(fetch,read));
 }
-std::shared_ptr<TextureTables::Entry> TextureTables::CaptureResource(std::span<const uint32_t,6> fetch,const TextureMemoryReader& read)
+namespace
 {
-    const auto snapshot=SnapshotTexture(fetch,read);
-    Entry entry;entry.fetch=snapshot.fetch;
+void DecodeSnapshot(TextureResource& entry,const TextureSnapshot& snapshot)
+{
+    const std::span<const uint32_t,6> fetch=snapshot.fetch;
     BaseImage(entry,fetch,snapshot.base,false);
     if(TextureInfo::FromFetch(fetch).dimension==3)entry.cube=DecodeCube(fetch,snapshot.base,false);
     if(entry.image.floatPixels&&!snapshot.storage.mips.empty())
         throw std::runtime_error("Native float texture mip tables are unsupported");
     for(uint32_t level=0;level<snapshot.storage.mips.size();++level)
         entry.mips.push_back(DecodeMip(fetch,snapshot.mips,level+1,snapshot.storage.mips[level]));
+}
+}
+struct TextureDeferred
+{
+    TextureSnapshot snapshot;
+    std::once_flag once;
+};
+void ResolveTexture(TextureResource& entry)
+{
+    if(!entry.deferred)return;
+    auto& deferred=*entry.deferred;
+    std::call_once(deferred.once,[&]{DecodeSnapshot(entry,deferred.snapshot);deferred.snapshot.base={};deferred.snapshot.mips={};});
+}
+std::shared_ptr<TextureTables::Entry> TextureTables::CaptureResource(std::span<const uint32_t,6> fetch,const TextureMemoryReader& read)
+{
+    const auto snapshot=SnapshotTexture(fetch,read);
+    Entry entry;entry.fetch=snapshot.fetch;
+    DecodeSnapshot(entry,snapshot);
     return std::make_shared<Entry>(std::move(entry));
+}
+std::shared_ptr<TextureTables::Entry> TextureTables::CaptureDeferred(std::span<const uint32_t,6> fetch,const TextureMemoryReader& read)
+{
+    auto entry=std::make_shared<Entry>();
+    entry->deferred=std::make_shared<TextureDeferred>();
+    entry->deferred->snapshot=SnapshotTexture(fetch,read);
+    entry->fetch=entry->deferred->snapshot.fetch;
+    return entry;
 }
 uint32_t TextureTables::AddResource(std::shared_ptr<Entry> entry)
 {
     if(!entry)throw std::runtime_error("Empty native texture resource");
     if(!entry->version)entry->version=NextVersion();
     const uint32_t index=uint32_t(entries.size());
-    if(!entry->mips.empty())mipOrder.push_back(index);
+    if(!entry->mips.empty()||(entry->deferred&&!entry->deferred->snapshot.storage.mips.empty()))mipOrder.push_back(index);
     entries.push_back(std::move(entry));
     return index;
 }
@@ -84,6 +112,7 @@ void TextureTables::Bind(Draw& draw,uint32_t slot,uint32_t index)const
 }
 PackedTextures TextureTables::Pack()const
 {
+    for(const auto& entry:entries)ResolveTexture(*entry);
     PackedTextures result;Word(result.textures,uint32_t(entries.size()));
     uint32_t volumes=0;for(const auto& entry:entries)if(entry->volumeDepth)++volumes;
     Word(result.volumes,volumes);

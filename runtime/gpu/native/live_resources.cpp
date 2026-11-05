@@ -54,7 +54,7 @@ void LiveResources::Bind(Draw& draw,const ShaderCatalog& shaders)
             for(unsigned attempt=0;;++attempt)
             {
                 revision=Revision(cached.storage);
-                auto resource=TextureTables::CaptureResource(draw.textureFetches[slot],[](uint32_t address,uint32_t size)->std::span<const uint8_t>{
+                auto resource=TextureTables::CaptureDeferred(draw.textureFetches[slot],[](uint32_t address,uint32_t size)->std::span<const uint8_t>{
                     if(uint64_t(address)+size>0x20000000)return {};
                     return {mem::Ptr<uint8_t>(mem::kPhysicalBase|address),size};
                 });

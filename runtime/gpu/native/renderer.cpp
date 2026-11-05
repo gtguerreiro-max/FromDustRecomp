@@ -370,6 +370,7 @@ struct FrameCache
     {
         std::shared_ptr<RenderTexture> texture,cube,volume;
         std::shared_ptr<RenderTextureView> cubeView;
+        std::tuple<uint32_t,uint32_t,uint32_t,RenderFormat> shape{}; // texture: width, height, mips, format
     };
     std::map<uint64_t,StaticTexture> staticTextures;
     std::shared_ptr<RenderTexture> blackCube;
@@ -390,6 +391,13 @@ struct FrameCache
     std::unique_ptr<RenderPipeline> packPipeline,floatPipeline;
     std::unique_ptr<RenderBuffer> vertexBuffer,indexBuffer,constantBuffer,streamBuffer,packConstants;
     uint64_t vertexCapacity=0,indexCapacity=0,constantCapacity=0,streamCapacity=0;
+    // Continuous frames: textures of retired versions with the same shape
+    // are reused for new versions (the water changes every frame), and the
+    // texture staging buffer persists. Every frame completes on the GPU
+    // before the next one starts, so both are idle when reused.
+    std::multimap<std::tuple<uint32_t,uint32_t,uint32_t,RenderFormat>,std::shared_ptr<RenderTexture>> freeTextures;
+    std::unique_ptr<RenderBuffer> textureStaging;
+    size_t textureStagingCapacity=0;
 };
 
 // Row-major 4x4 inverse (cofactor expansion); false when singular.
@@ -482,6 +490,7 @@ struct gpu::native::Renderer::Impl
     std::unique_ptr<RenderCommandFence> fence;
     std::unique_ptr<FrameCache> frameCache;
     double profileMs[5]{};
+    double profileResMs[5]{};
     double profileDrawMs[4]{};
     uint32_t profileFrames=0;
     Microsoft::WRL::ComPtr<ID3D12Device> externalDevice;
@@ -655,6 +664,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     if(!layout)layout=device->createPipelineLayout(layoutDesc);
     std::unique_ptr<RenderDescriptorSet> sets[5];
     for (int i = 0; i < 5; ++i) sets[i] = device->createDescriptorSet(setDescs[i]);
+    const auto profileSets=std::chrono::steady_clock::now();
     auto sampler = device->createSampler(RenderSamplerDesc());
     sets[3]->setSampler(0, sampler.get());
     std::map<uint64_t, std::pair<uint32_t, std::unique_ptr<RenderSampler>>> samplers;
@@ -765,6 +775,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         for (const auto& segment : frame.streamSegments) memcpy(map + segment.offset, segment.data, segment.size);
         streamBuffer->unmap();
     }
+    const auto profileUploads=std::chrono::steady_clock::now();
     auto* vertexMap = static_cast<uint8_t*>(vertexBuffer->map());
     auto* indexMap = static_cast<uint8_t*>(indexBuffer->map());
     auto* constantMap = static_cast<uint8_t*>(constantBuffer->map());
@@ -773,7 +784,18 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     // Textures: RGBA8, uploaded through one staging buffer.
     const bool versioned=frame.continuous&&versions.size()==textureCount;
     if(versioned)
-        std::erase_if(storage.staticTextures,[&](const auto& entry){return std::find(versions.begin(),versions.end(),entry.first)==versions.end();});
+    {
+        std::vector<uint64_t> live(versions);std::sort(live.begin(),live.end());
+        std::erase_if(storage.staticTextures,[&](auto& entry){
+            if(std::binary_search(live.begin(),live.end(),entry.first))return false;
+            auto& texture=entry.second.texture;
+            if(texture&&texture.use_count()==1&&storage.freeTextures.size()<64)
+            {
+                storage.freeTextures.emplace(entry.second.shape,std::move(texture));
+            }
+            return true;
+        });
+    }
     std::vector<bool> reused(textureCount,false);
     std::vector<std::shared_ptr<RenderTexture>> textures;
     std::vector<RenderFormat> textureFormats; // per table texture
@@ -851,24 +873,39 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                 mipAt += bytes;
             }
         }
-        staging = device->createBuffer(RenderBufferDesc::UploadBuffer((std::max)(stagingSize, size_t(16))));
-        auto* map = static_cast<uint8_t*>(staging->map());
+        RenderBuffer* stagingBuffer=nullptr;
+        if(versioned)
+        {
+            if(stagingSize>storage.textureStagingCapacity)
+            {
+                storage.textureStagingCapacity=(std::max)(stagingSize+stagingSize/4,size_t(1)<<20);
+                storage.textureStaging=device->createBuffer(RenderBufferDesc::UploadBuffer(storage.textureStagingCapacity));
+            }
+            stagingBuffer=storage.textureStaging.get();
+        }
+        else{staging = device->createBuffer(RenderBufferDesc::UploadBuffer((std::max)(stagingSize, size_t(16))));stagingBuffer=staging.get();}
+        auto* map = uploads.empty()?nullptr:static_cast<uint8_t*>(stagingBuffer->map());
         for (const auto& u : uploads)
         {
             const uint32_t texel = FormatBytes(textureFormats[u.index]), pitch = (u.width * texel + 255) & ~255u;
             for (uint32_t y = 0; y < u.height; ++y)
                 memcpy(map + u.to + size_t(y) * pitch, (u.pixels?u.pixels:textureFile.data()+u.from) + size_t(y) * u.width * texel, u.width * texel);
         }
-        staging->unmap();
-        list->begin();
+        if(map)stagingBuffer->unmap();
+        if(!uploads.empty())list->begin();
         for (uint32_t i = 0; i < textureCount; ++i)
         {
             if(reused[i])textures.push_back(storage.staticTextures.at(versions[i]).texture);
             else
             {
-                textures.push_back(CreateTexture(device.get(), RenderTextureDesc::Texture2D(dimensions[i].first, dimensions[i].second,mipCounts[i], textureFormats[i])));
+                std::shared_ptr<RenderTexture> texture;
+                if(versioned)
+                    if(auto free=storage.freeTextures.find(std::tuple{dimensions[i].first,dimensions[i].second,mipCounts[i],textureFormats[i]});free!=storage.freeTextures.end())
+                    {texture=std::move(free->second);storage.freeTextures.erase(free);}
+                if(!texture)texture=CreateTexture(device.get(), RenderTextureDesc::Texture2D(dimensions[i].first, dimensions[i].second,mipCounts[i], textureFormats[i]));
+                textures.push_back(std::move(texture));
                 list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(textures.back().get(), RenderTextureLayout::COPY_DEST));
-                if(versioned)storage.staticTextures[versions[i]].texture=textures.back();
+                if(versioned){auto& cached=storage.staticTextures[versions[i]];cached.texture=textures.back();cached.shape={dimensions[i].first,dimensions[i].second,mipCounts[i],textureFormats[i]};}
             }
         }
         for (const auto& u : uploads)
@@ -876,20 +913,25 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             const auto format = textureFormats[u.index];
             const uint32_t texel = FormatBytes(format);
             list->copyTextureRegion(RenderTextureCopyLocation::Subresource(textures[u.index].get(), u.mip),
-                RenderTextureCopyLocation::PlacedFootprint(staging.get(), format, u.width, u.height, 1,
+                RenderTextureCopyLocation::PlacedFootprint(stagingBuffer, format, u.width, u.height, 1,
                                                           ((u.width * texel + 255) & ~255u) / texel, u.to));
         }
         for (uint32_t i = 0; i < textureCount; ++i)
         {
-            list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(textures[i].get(), RenderTextureLayout::SHADER_READ));
+            if(!uploads.empty())list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(textures[i].get(), RenderTextureLayout::SHADER_READ));
             sets[0]->setTexture(i, textures[i].get(), RenderTextureLayout::SHADER_READ);
         }
         if(!frame.continuous||CachedEnv("FD_REPLAY_TRACE"))printf("fd_replay: %u captured mip chains uploaded\n", mipTextureCount);
-        list->end();
-        const RenderCommandList* uploadCommands = list.get();
-        queue->executeCommandLists(&uploadCommands, 1, nullptr, 0, nullptr, 0, fence.get());
-        queue->waitForCommandFence(fence.get());
+        // Nothing new (every texture reused): no upload submission to wait for.
+        if(!uploads.empty())
+        {
+            list->end();
+            const RenderCommandList* uploadCommands = list.get();
+            queue->executeCommandLists(&uploadCommands, 1, nullptr, 0, nullptr, 0, fence.get());
+            queue->waitForCommandFence(fence.get());
+        }
     }
+    const auto profileTextures=std::chrono::steady_clock::now();
 
     // Cube maps use six array slices and genuine cube SRVs in space2. Ambient
     // lighting reads these independently of the Texture2D descriptor heap.
@@ -936,15 +978,15 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         for (uint32_t face = 0; face < 6; ++face) file.insert(file.end(), {0, 0, 0, 255});
         if(!storage.blackCube){uploads.insert(uploads.begin(), {UINT32_MAX, 1, 1, black, total, 512});total += 512 * 6;}
         else for(uint32_t i=0;i<(std::max)(textureCount,1u);++i)sets[2]->setTexture(i,storage.blackCube.get(),RenderTextureLayout::SHADER_READ,storage.blackCubeView.get());
-        cubeStaging = device->createBuffer(RenderBufferDesc::UploadBuffer((std::max)(total,size_t(16))));
-        auto* map = static_cast<uint8_t*>(cubeStaging->map());
+        if(!uploads.empty())cubeStaging = device->createBuffer(RenderBufferDesc::UploadBuffer((std::max)(total,size_t(16))));
+        auto* map = uploads.empty()?nullptr:static_cast<uint8_t*>(cubeStaging->map());
         for (const auto& u : uploads)
             for (uint32_t face = 0; face < 6; ++face)
                 for (uint32_t y = 0; y < u.height; ++y)
                     memcpy(map + u.to + face * u.faceStride + size_t(y) * ((u.width * 4 + 255) & ~255u),
                         file.data() + u.from + (size_t(face) * u.height + y) * u.width * 4, u.width * 4);
-        cubeStaging->unmap();
-        list->begin();
+        if(map)cubeStaging->unmap();
+        if(!uploads.empty())list->begin();
         for (const auto& u : uploads)
         {
             std::shared_ptr<RenderTexture> texture = CreateTexture(device.get(), RenderTextureDesc::Texture(RenderTextureDimension::TEXTURE_2D,
@@ -971,14 +1013,18 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             cubeTextures.push_back(std::move(texture));
             cubeViews.push_back(std::move(view));
         }
-        list->end();
-        const RenderCommandList* upload = list.get();
-        queue->executeCommandLists(&upload, 1, nullptr, 0, nullptr, 0, fence.get());
-        queue->waitForCommandFence(fence.get());
+        if(!uploads.empty())
+        {
+            list->end();
+            const RenderCommandList* upload = list.get();
+            queue->executeCommandLists(&upload, 1, nullptr, 0, nullptr, 0, fence.get());
+            queue->waitForCommandFence(fence.get());
+        }
         if(versioned)for(uint32_t i=0;i<textureCount;++i)
             if(cubesByIndex[i]){auto& cached=storage.staticTextures[versions[i]];sets[2]->setTexture(i,cached.cube.get(),RenderTextureLayout::SHADER_READ,cached.cubeView.get());}
         if(!frame.continuous||CachedEnv("FD_REPLAY_TRACE"))printf("fd_replay: %u cube maps uploaded\n", count);
     }
+    const auto profileCubes=std::chrono::steady_clock::now();
     uint32_t nextCubeView = descriptorBase;
     std::map<uint64_t, uint32_t> cubeSwizzles;
 
@@ -2427,8 +2473,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     {
         const std::chrono::steady_clock::time_point times[]={profileStart,profileResources,profileSetup,profileRecorded,profileSubmit,profileFinished};
         for(size_t i=0;i<5;++i)profileMs[i]+=std::chrono::duration<double,std::milli>(times[i+1]-times[i]).count();
+        const std::chrono::steady_clock::time_point resourceTimes[]={profileStart,profileSets,profileUploads,profileTextures,profileCubes,profileResources};
+        for(size_t i=0;i<5;++i)profileResMs[i]+=std::chrono::duration<double,std::milli>(resourceTimes[i+1]-resourceTimes[i]).count();
         if(++profileFrames==60)
         {
+            fprintf(stderr,"native resource profile: sets %.2f ms, buffers %.2f ms, textures %.2f ms, cubes %.2f ms, volumes %.2f ms\n",profileResMs[0]/60,profileResMs[1]/60,profileResMs[2]/60,profileResMs[3]/60,profileResMs[4]/60);
+            std::fill(std::begin(profileResMs),std::end(profileResMs),0.0);
             fprintf(stderr,"native render profile: resources %.2f ms, surfaces %.2f ms, record %.2f ms, close %.2f ms, submit/wait %.2f ms\n",profileMs[0]/60,profileMs[1]/60,profileMs[2]/60,profileMs[3]/60,profileMs[4]/60);
             fprintf(stderr,"native draw profile: clear %.2f ms, resolve %.2f ms, prepare %.2f ms, bind/draw %.2f ms\n",profileDrawMs[0]/60,profileDrawMs[1]/60,profileDrawMs[2]/60,profileDrawMs[3]/60);
             std::fill(std::begin(profileMs),std::end(profileMs),0.0);profileFrames=0;
