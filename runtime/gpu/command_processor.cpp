@@ -22,6 +22,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+namespace {
+// Diagnostic switches, read once (these sit on per-packet paths).
+bool TraceEvents() { static const bool value = getenv("FD_GPU_EVENT_TRACE") != nullptr; return value; }
+bool TraceFrameCounts() { static const bool value = getenv("FD_TRACE_FRAME_COUNTS") != nullptr; return value; }
+}
+
 namespace gpu
 {
     Stats g_stats;
@@ -205,7 +211,7 @@ namespace gpu
                 // Coordinates are in eight-pixel units (8192 / 8), matching
                 // Xenos' maximum 2D extent rather than an unscaled bit mask.
                 const uint16_t extents[] = { 0, 1024, 0, 1024, 0, 1 };
-                if (getenv("FD_GPU_EVENT_TRACE"))
+                if (TraceEvents())
                 {
                     static unsigned traces = 0;
                     if (traces++ < 8) kernel::Log("native EXT report: address %08X", address);
@@ -222,7 +228,7 @@ namespace gpu
                 // interval counts by subtracting successive snapshots.
                 const uint32_t address = ReadRegister(reg::RB_SAMPLE_COUNT_ADDR);
                 const auto report=address?g_visibleSamples.Complete():g_visibleSamples.Report();
-                if (getenv("FD_GPU_EVENT_TRACE"))
+                if (TraceEvents())
                 {
                     static unsigned traces = 0;
                     if (traces++ < 8) kernel::Log("native ZPD report: address %08X, pass %u", address,
@@ -289,7 +295,7 @@ namespace gpu
             case PM4_DRAW_INDX:
             case PM4_DRAW_INDX_2:
                 ++g_stats.draws;
-                if(getenv("FD_TRACE_FRAME_COUNTS"))
+                if(TraceFrameCounts())
                 {
                     ++g_traceDraws;g_traceMesh+=g_tracePS==86;g_traceTerrain+=g_tracePS==146;g_traceDepth+=g_traceVS==67;
                 }
@@ -308,7 +314,7 @@ namespace gpu
             }
 
             case PM4_XE_SWAP:
-                if(getenv("FD_TRACE_FRAME_COUNTS"))
+                if(TraceFrameCounts())
                 {
                     if(g_traceDraws>500&&g_stats.frames.load()%60==0)
                         kernel::Log("native CP frame %llu: %u draws, mesh %u terrain %u mesh-depth %u",g_stats.frames.load()+1,g_traceDraws,g_traceMesh,g_traceTerrain,g_traceDepth);
@@ -318,7 +324,7 @@ namespace gpu
                 break;
 
             case PM4_IM_LOAD:
-                if(getenv("FD_TRACE_FRAME_COUNTS")&&count>=2)
+                if(TraceFrameCounts()&&count>=2)
                 {
                     const uint32_t address=arg(0),stage=address&3;
                     const int shader=native::audit::TraceShaderCode(stage,address&~3u);

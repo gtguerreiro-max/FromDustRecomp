@@ -171,6 +171,10 @@ bool Initialize()
                     else if(!draw.clear)c->resources.Bind(draw,c->catalog);
                 },[c](const GeometryBatch& batch){
                     if(batch.commands.empty()){c->resources.BeginFrame();return;}
+                    static const bool profile=getenv("FD_NATIVE_PROFILE")!=nullptr;
+                    static uint64_t profileFrames=0;
+                    if(profile&&++profileFrames%300==0)kernel::Log("native texture profile: %llu new keys, %llu captures, %.0f KB, %.2f ms this frame",
+                        (unsigned long long)c->resources.profileInserted,(unsigned long long)c->resources.profileCaptured,c->resources.profileCaptureBytes/1024.0,c->resources.profileCaptureMs);
                     if(getenv("FD_TRACE_FRAME_COUNTS")&&batch.commands.size()>500&&c->frames%60==0)
                     {
                         unsigned mesh=0,terrain=0,depth=0;
@@ -233,7 +237,8 @@ void ShaderInit(uint32_t stage, uint32_t object, uint32_t physical)
         }
     }
     const auto* shader = c.objects.Register(object, ShaderStage(stage), virtualData, physicalData, c.catalog);
-    if(shader&&getenv("FD_TRACE_FRAME_COUNTS"))
+    static const bool traceCounts=getenv("FD_TRACE_FRAME_COUNTS")!=nullptr;
+    if(shader&&traceCounts)
     {
         auto big=[&](size_t at){if(at+4>shader->virtualData.size())throw std::runtime_error("Invalid shader trace metadata");const auto* p=shader->virtualData.data()+at;return uint32_t(p[0])<<24|uint32_t(p[1])<<16|uint32_t(p[2])<<8|p[3];};
         const auto codeOffset=big(big(24));

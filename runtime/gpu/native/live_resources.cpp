@@ -1,3 +1,4 @@
+#include <chrono>
 #ifdef FD_NATIVE_RENDERER
 #include "../../kernel/kernel.h"
 #include "live_resources.h"
@@ -20,7 +21,7 @@ uint64_t Revision(const TextureStorage& storage)
         xenia::PhysicalRevision(storage.mipAddress,storage.mipBytes));
 }
 }
-void LiveResources::BeginFrame(){tables={};frameIndices.clear();}
+void LiveResources::BeginFrame(){tables={};frameIndices.clear();profileInserted=profileCaptured=profileCaptureBytes=0;profileCaptureMs=0;}
 void LiveResources::Bind(Draw& draw,const ShaderCatalog& shaders)
 {
     const auto* vs=shaders.Find(draw.vs,ShaderStage::Vertex);
@@ -38,10 +39,15 @@ void LiveResources::Bind(Draw& draw,const ShaderCatalog& shaders)
         key[4]&=0x3FC;key[5]&=0x1FFFFE00;
         auto [at,inserted]=resources.try_emplace(key);
         auto& cached=at->second;
-        if(inserted){cached.storage=DescribeTextureStorage(draw.textureFetches[slot]);Watch(cached.storage);}
-        uint64_t revision=Revision(cached.storage);
+        if(inserted){cached.storage=DescribeTextureStorage(draw.textureFetches[slot]);Watch(cached.storage);++profileInserted;}
+        const uint64_t serial=xenia::PhysicalWriteSerial();
+        if(cached.checkedSerial!=serial){cached.checkedRevision=Revision(cached.storage);cached.checkedSerial=serial;}
+        uint64_t revision=cached.checkedRevision;
         if(!cached.resource||revision!=cached.revision)
         {
+            ++profileCaptured;profileCaptureBytes+=cached.storage.baseBytes+cached.storage.mipBytes;
+            const auto captureStart=std::chrono::steady_clock::now();
+            struct CaptureTimer{double& total;std::chrono::steady_clock::time_point start;~CaptureTimer(){total+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}} captureTimer{profileCaptureMs,captureStart};
             Watch(cached.storage);
             // Watch before copying; a write during ownership acquisition must
             // trigger another copy rather than cache a mixed resource version.
@@ -52,7 +58,7 @@ void LiveResources::Bind(Draw& draw,const ShaderCatalog& shaders)
                     if(uint64_t(address)+size>0x20000000)return {};
                     return {mem::Ptr<uint8_t>(mem::kPhysicalBase|address),size};
                 });
-                if(Revision(cached.storage)==revision){cached.resource=std::move(resource);cached.revision=revision;break;}
+                if(Revision(cached.storage)==revision){cached.resource=std::move(resource);cached.revision=revision;cached.checkedSerial=UINT64_MAX;break;}
                 if(attempt==3)throw std::runtime_error("CPU texture changed repeatedly while acquiring native ownership");
                 Watch(cached.storage);
             }

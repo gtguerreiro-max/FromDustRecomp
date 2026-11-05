@@ -73,13 +73,14 @@ PPC_FUNC_IMPL(__imp__sub_820DE478);
 PPC_FUNC(sub_820DE478)
 {
     const uint32_t query=ctx.r3.u32,result=ctx.r4.u32,size=ctx.r5.u32;
-    const char* backend=getenv("FD_RENDERER");
-    const bool occlusion=backend&&!strcmp(backend,"native")&&query>=0x40000000&&query<0xBFFFFF60&&
+    static const bool nativeBackend=[]{const char* backend=getenv("FD_RENDERER");return backend&&!strcmp(backend,"native");}();
+    const bool occlusion=nativeBackend&&query>=0x40000000&&query<0xBFFFFF60&&
         result>=0x40000000&&uint64_t(result)+size<=0xC0000000&&size>=4&&mem::Read32(query+4)==9;
     __imp__sub_820DE478(ctx,base);
     if(occlusion)
     {
-        if(getenv("FD_GPU_QUERY_TRACE"))
+        static const bool trace=getenv("FD_GPU_QUERY_TRACE")!=nullptr;
+        if(trace)
         {
             static unsigned traces=0;
             if(traces++<40)kernel::Log("native query result: object %08X status %08X bytes %u samples %u",query,ctx.r3.u32,size,mem::Read32(result));

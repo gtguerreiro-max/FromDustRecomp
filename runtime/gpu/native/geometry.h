@@ -1,4 +1,6 @@
 #pragma once
+#include <memory>
+#include <map>
 #include "frame.h"
 #include "shader_catalog.h"
 #include <array>
@@ -26,6 +28,23 @@ struct StreamArena
     // Optional live write-watch generation covering the entire source range.
     // Without it, snapshots are compared byte-for-byte as in offline readers.
     std::function<uint64_t(uint32_t,uint32_t)> revision;
+    // Optional cross-frame cache of converted (little-endian) streams and
+    // indices, keyed by guest range and valid for one write-watch revision.
+    struct Converted { uint64_t revision = 0, used = 0; uint32_t minimum = 0, maximum = 0; std::vector<uint8_t> bytes; };
+    struct Persistent
+    {
+        std::map<std::pair<uint32_t, uint32_t>, Converted> streams, indices;
+        uint64_t frame = 0;
+        // Called once per frame: drops ranges unused for 300 frames (moving
+        // dynamic buffers would otherwise grow the cache without bound).
+        void NextFrame()
+        {
+            if (++frame % 300) return;
+            for (auto* map : {&streams, &indices})
+                std::erase_if(*map, [&](const auto& entry) { return entry.second.used + 300 < frame; });
+        }
+    };
+    std::shared_ptr<Persistent> persistent;
 };
 
 struct Geometry

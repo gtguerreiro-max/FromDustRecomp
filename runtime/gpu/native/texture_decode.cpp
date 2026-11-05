@@ -44,6 +44,15 @@ struct Raw
     }
     uint32_t Word(uint64_t offset,uint32_t count=4)const
     {
+        // Fast path: every byte's endian group lies inside the storage, so
+        // Byte's per-byte bounds checks reduce to one test (same mapping).
+        if(offset+count+4<=bytes.size())
+        {
+            const uint32_t swap=endian==1?1:endian==2?3:endian==3?2:0;
+            uint32_t value=0;
+            for(uint32_t i=0;i<count;++i)value|=uint32_t(bytes[size_t((offset+i)^swap)])<<(i*8);
+            return value;
+        }
         uint32_t value=0;for(uint32_t i=0;i<count;++i)value|=uint32_t(Byte(offset+i))<<(i*8);return value;
     }
 };
@@ -155,6 +164,14 @@ DecodedTexture Decode(std::span<const uint32_t,6> fetch,std::span<const uint8_t>
     }
     Raw raw{bytes,info.endian};
     DecodedTexture result{width,height,fixed,{}};result.pixels.resize(size_t(width)*height*(fixed?16:4));
+    // Fixed-point formats: per-component sign and scale, hoisted out of the texel loop.
+    const uint32_t fixedComponents=info.format==25?2:4;
+    bool fixedSigned[4]{},fixedNormalized=!(fetch[3]&1);double fixedPower=1;
+    if(fixed)
+    {
+        fixedPower=std::ldexp(1.0,int(((fetch[3]>>13&63)^32))-32);
+        for(uint32_t c=0;c<fixedComponents;++c)fixedSigned[c]=(fetch[0]>>(2+c*2)&3)==1;
+    }
     for(uint32_t y=0;y<rows;++y)for(uint32_t x=0;x<columns;++x)
     {
         const uint64_t at=offset+(tiled?(volumeRows?TextureBlockAddress3D(x,y,volumeZ,pitchBlocks,volumeRows,storage.bytes):Tiled(x+xBlocks,y+yBlocks,(pitchBlocks+31)&~31u,storage.bytes)):
@@ -170,15 +187,13 @@ DecodedTexture Decode(std::span<const uint32_t,6> fetch,std::span<const uint8_t>
         }
         else if(fixed)
         {
-            const uint32_t components=info.format==25?2:4;
-            float pixel[4]={0,0,0,1};const uint32_t exponent=fetch[3]>>13&63;
-            const int adjustment=int((exponent^32))-32;
-            for(uint32_t c=0;c<components;++c)
+            float pixel[4]={0,0,0,1};
+            for(uint32_t c=0;c<fixedComponents;++c)
             {
-                const uint32_t value=raw.Word(at+c*2,2),sign=fetch[0]>>(2+c*2)&3;
-                double v=sign==1?double(int32_t((value^32768)-32768)):double(value);
-                if(!(fetch[3]&1))v=sign==1?(std::max)(v/32767.0,-1.0):v/65535.0;
-                pixel[c]=float(std::ldexp(v,adjustment));
+                const uint32_t value=raw.Word(at+c*2,2);
+                double v=fixedSigned[c]?double(int32_t((value^32768)-32768)):double(value);
+                if(fixedNormalized)v=fixedSigned[c]?(std::max)(v/32767.0,-1.0):v/65535.0;
+                pixel[c]=float(v*fixedPower); // exact: a power-of-two scale, as ldexp
             }
             memcpy(result.pixels.data()+(size_t(y)*width+x)*16,pixel,16);
         }

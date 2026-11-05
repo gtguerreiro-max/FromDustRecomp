@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <bit>
 #include <stdexcept>
+#include <array>
+#include <map>
+#include <mutex>
 
 namespace gpu::native
 {
@@ -56,7 +59,25 @@ uint32_t TiledUsedBytes(uint32_t columns,uint32_t rows,uint32_t pitch,uint32_t b
 }
 }
 
+TextureStorage DescribeTextureStorageUncached(std::span<const uint32_t,6> fetch);
+// A pure function of the fetch words; the tiled extent scan is expensive for
+// large surfaces and the same fetches recur every frame (resolves, binds).
 TextureStorage DescribeTextureStorage(std::span<const uint32_t,6> fetch)
+{
+    std::array<uint32_t,6> key;std::copy(fetch.begin(),fetch.end(),key.begin());
+    static std::mutex lock;
+    static std::map<std::array<uint32_t,6>,TextureStorage> cache;
+    {
+        std::lock_guard guard(lock);
+        if(auto found=cache.find(key);found!=cache.end())return found->second;
+    }
+    auto result=DescribeTextureStorageUncached(fetch); // throws for unsupported layouts (not cached)
+    std::lock_guard guard(lock);
+    if(cache.size()>4096)cache.clear();
+    cache.emplace(key,result);
+    return result;
+}
+TextureStorage DescribeTextureStorageUncached(std::span<const uint32_t,6> fetch)
 {
     const auto info=TextureInfo::FromFetch(fetch);
     const auto block=GetTextureBlockInfo(info.format);

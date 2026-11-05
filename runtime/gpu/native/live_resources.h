@@ -21,12 +21,19 @@ private:
     {
         TextureStorage storage;
         uint64_t revision=UINT64_MAX;
+        // Revision of the storage pages as of a global write serial: while no
+        // watched page has been written since, the revision is unchanged.
+        uint64_t checkedSerial=UINT64_MAX,checkedRevision=0;
         std::shared_ptr<TextureTables::Entry> resource;
     };
     std::map<std::array<uint32_t,6>,Cached> resources;
     std::map<uint32_t,uint64_t> gpuAuthority;
     std::map<const TextureTables::Entry*,uint32_t> frameIndices;
     TextureTables tables;
+public:
+    // FD_NATIVE_PROFILE counters since the last BeginFrame.
+    uint64_t profileInserted=0,profileCaptured=0,profileCaptureBytes=0;
+    double profileCaptureMs=0;
 };
 }
 #endif

@@ -3,6 +3,8 @@
 // original guest addresses.
 
 #include <algorithm>
+#include <map>
+#include <string>
 #include <unordered_map>
 #include <mutex>
 #include <thread>
@@ -254,6 +256,7 @@ namespace kernel::debug
                 Log("profiling guest thread %u", g_threadIds[index]);
             }
             std::unordered_map<uint64_t, uint32_t> self, inclusive;
+            std::map<std::pair<uint64_t, uint64_t>, uint32_t> callers; // (self, its caller)
             uint32_t samples = 0;
             const auto end = GetTickCount64() + seconds * 1000ull;
             timeBeginPeriod(1);
@@ -267,6 +270,7 @@ namespace kernel::debug
                 {
                     ++samples;
                     std::vector<uint64_t> seen;
+                    uint64_t selfKey = 0;
                     for (int depth = 0; depth < 64 && context.Rip; depth++)
                     {
                         // Key: guest address, or host RIP (tagged) for runtime code.
@@ -280,7 +284,9 @@ namespace kernel::debug
                                 key = (uint64_t(1) << 63) | (imageBase + fn->BeginAddress);
                         }
                         if (depth == 0)
-                            ++self[key];
+                            ++self[selfKey = key];
+                        else if (depth == 1)
+                            ++callers[{selfKey, key}];
                         if (std::find(seen.begin(), seen.end(), key) == seen.end())
                         {
                             seen.push_back(key);
@@ -320,6 +326,20 @@ namespace kernel::debug
             };
             report("self", self);
             report("inclusive", inclusive);
+            auto name = [](uint64_t key) -> std::string {
+                char text[32];
+                if (key >> 63) return HostSymbol(uintptr_t(key & ~(uint64_t(1) << 63)));
+                snprintf(text, sizeof(text), "sub_%08llX", (unsigned long long)key);
+                return text;
+            };
+            std::vector<std::pair<std::pair<uint64_t, uint64_t>, uint32_t>> pairs(callers.begin(), callers.end());
+            std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.second > b.second; });
+            Log("=== profile (self <- caller), %u samples ===", samples);
+            for (size_t i = 0; i < pairs.size() && i < 30; i++)
+            {
+                const std::string self = name(pairs[i].first.first), caller = name(pairs[i].first.second);
+                Log("  %5.1f%%  %s  <-  %s", 100.0 * pairs[i].second / (samples ? samples : 1), self.c_str(), caller.c_str());
+            }
         }).detach();
     }
 

@@ -1,4 +1,5 @@
 #ifdef FD_NATIVE_RENDERER
+#include <chrono>
 #include "../../kernel/kernel.h"
 #endif
 #include "live_geometry.h"
@@ -77,8 +78,15 @@ struct LiveGeometryCapture::Impl
     std::function<void(Draw&)> onCommand;
     std::function<void(const GeometryBatch&)> onFrame;
     std::map<std::pair<uint32_t,uint32_t>,uint64_t> watchedStreams;
+    // FD_NATIVE_PROFILE: CPU cost of the live collection, per frame.
+    bool profile=getenv("FD_NATIVE_PROFILE")!=nullptr;
+    double profileMs[4]{}; // begin, build geometry, commit, process other
+    uint64_t profileIndexBytes=0,profileStreamBytes=0,profileFrames=0;
+    std::shared_ptr<StreamArena::Persistent> persistentStreams=std::make_shared<StreamArena::Persistent>();
     void TrackStreams()
     {
+        batch.streams.persistent=persistentStreams;
+        persistentStreams->NextFrame();
         batch.streams.revision=[this](uint32_t address,uint32_t size) {
             auto [at,inserted]=watchedStreams.try_emplace({address,size},UINT64_MAX);
             auto revision=xenia::PhysicalRevision(address,size);
@@ -116,6 +124,11 @@ struct LiveGeometryCapture::Impl
     }
     void Process(Pending pending)
     {
+        const auto processStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+        const double nested=profileMs[1]+profileMs[2];
+        struct ProcessTimer{Impl& c;std::chrono::steady_clock::time_point start;double nested;
+            ~ProcessTimer(){if(c.profile)c.profileMs[3]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()-(c.profileMs[1]+c.profileMs[2]-nested);}
+        } processTimer{*this,processStart,nested};
         ++calls;
         try
         {
@@ -182,16 +195,25 @@ struct LiveGeometryCapture::Impl
             {
             const auto [initiator,indexAddress,baseVertex]=packets[first];
             const GeometryBounds bounds{int32_t(baseVertex),pullPrimary};
+            const auto buildStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+            const size_t streamBefore=batch.streams.bytes.size();
             auto geometry = BuildGeometry(program->second, pending.physical, pending.fetches,
                 initiator & 63, initiator >> 16, ((initiator >> 6) & 3) == 0, (initiator & 0x800) != 0,
                 indexAddress, reader, batch.streams,&bounds);
+            if(profile)
+            {
+                profileMs[1]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-buildStart).count();
+                profileIndexBytes+=geometry.indices.size();profileStreamBytes+=batch.streams.bytes.size()-streamBefore;
+            }
             vertexBytes += geometry.vertices.size(); indexBytes += geometry.indices.size();
             GeometryBatch::Command command;
             command.vertexShader = pending.shader->name; command.pixelShader = pending.pixelShader;
             command.vertexConstants = pending.vertexConstants; command.pixelConstants = pending.pixelConstants;
             command.state = *pending.state;command.state.regs[VGT_INDX_OFFSET]=baseVertex;
             command.geometry = std::move(geometry);
+            const auto commitStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
             Commit(std::move(command));
+            if(profile)profileMs[2]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-commitStart).count();
             ++geometryPackets;
             }
         }
@@ -260,6 +282,10 @@ void LiveGeometryCapture::Begin(uint32_t device, audit::DrawKind kind, const Nat
     auto& c = *impl;
     if (c.state != Impl::State::Capturing) return;
     if (!c.EnterThread()) { c.Error("Geometry calls crossed unfinished render operations"); return; }
+    const auto beginStart=c.profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+    struct BeginTimer{Impl& c;std::chrono::steady_clock::time_point start;
+        ~BeginTimer(){if(c.profile)c.profileMs[0]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}
+    } beginTimer{c,beginStart};
     Pending pending{}; pending.device = device; pending.kind = kind; pending.shader = shader;
     pending.primitive=primitive;pending.count=count;
     if (pixelShader) pending.pixelShader = pixelShader->name;
@@ -319,8 +345,24 @@ void LiveGeometryCapture::Swap(uint64_t previousIndexed)
         {
             if(c.failures)throw std::runtime_error(c.errors.empty()?"Native continuous geometry failed":c.errors.front());
             c.onFrame(c.batch);
+            if(c.profile&&++c.profileFrames%300==0)
+            {
+                const double n=300;
+                kernel::Log("native capture profile: begin %.2f ms, geometry %.2f ms, commit %.2f ms, other %.2f ms; %.0f KB indices, %.0f KB streams per frame",
+                    c.profileMs[0]/n,c.profileMs[1]/n,c.profileMs[2]/n,c.profileMs[3]/n,c.profileIndexBytes/n/1024,c.profileStreamBytes/n/1024);
+                std::fill(std::begin(c.profileMs),std::end(c.profileMs),0.0);c.profileIndexBytes=c.profileStreamBytes=0;
+            }
             const auto serial=c.batch.serial+1;
+            // Keep the previous frame's capacity (RenderFrame has completed):
+            // growing these vectors moved every large command and re-copied
+            // the stream arena, and freeing them returned pages to the OS.
+            const size_t commandCount=c.batch.commands.size(),streamBytes=c.batch.streams.bytes.size();
+            auto commands=std::move(c.batch.commands);auto bytes=std::move(c.batch.streams.bytes);auto entries=std::move(c.batch.streams.entries);
+            commands.clear();bytes.clear();entries.clear();
             c.batch={};c.batch.serial=serial;c.calls=c.vertexBytes=c.indexBytes=0;
+            c.batch.commands=std::move(commands);c.batch.streams.bytes=std::move(bytes);c.batch.streams.entries=std::move(entries);
+            c.batch.commands.reserve(commandCount+commandCount/4+32);
+            c.batch.streams.bytes.reserve(streamBytes+streamBytes/4+65536);
             c.TrackStreams();
             c.geometryPackets=c.clearPackets=c.resolvePackets=c.patchedShaderSnapshots=0;
             c.thread=0;

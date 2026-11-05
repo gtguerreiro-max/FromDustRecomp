@@ -1,5 +1,7 @@
 #include "geometry.h"
 #include <algorithm>
+#include <typeinfo>
+#include <limits>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -27,6 +29,16 @@ void Append(std::vector<uint8_t>& bytes, uint32_t value, uint32_t size = 4)
     for (uint32_t i = 0; i < size; ++i) bytes.push_back(uint8_t(value >> (8 * i)));
 }
 void Float(std::vector<uint8_t>& bytes, float value) { Append(bytes, std::bit_cast<uint32_t>(value)); }
+// Big-endian 32-bit words -> little-endian, in bulk (vectorizable).
+void SwapWords(uint8_t* destination, const uint8_t* source, size_t bytes)
+{
+    for (size_t at = 0; at + 4 <= bytes; at += 4)
+    {
+        uint32_t value; memcpy(&value, source + at, 4);
+        value = __builtin_bswap32(value);
+        memcpy(destination + at, &value, 4);
+    }
+}
 uint32_t Stream(StreamArena& arena, uint32_t address, std::span<const uint8_t> bytes)
 {
     uint64_t revision=arena.revision?arena.revision(address,uint32_t(bytes.size())):0;
@@ -49,13 +61,31 @@ uint32_t Stream(StreamArena& arena, uint32_t address, std::span<const uint8_t> b
     if (bytes.size() % 4 || arena.bytes.size() + bytes.size() > UINT32_MAX)
         throw std::runtime_error("Native vertex stream arena overflow");
     const uint32_t offset = uint32_t(arena.bytes.size());
+    StreamArena::Converted* cached = nullptr;
+    if (arena.revision && arena.persistent)
+    {
+        cached = &arena.persistent->streams[{address, uint32_t(bytes.size())}];
+        cached->used = arena.persistent->frame;
+        if (cached->revision == revision && cached->bytes.size() == bytes.size() && !cached->bytes.empty())
+        {
+            arena.bytes.insert(arena.bytes.end(), cached->bytes.begin(), cached->bytes.end());
+            arena.entries.push_back({address, offset, uint32_t(bytes.size()), revision});
+            return offset;
+        }
+    }
     for(unsigned attempt=0;;++attempt)
     {
-        for(size_t at=0;at<bytes.size();at+=4)Append(arena.bytes,Big(bytes,at));
+        arena.bytes.resize(size_t(offset) + bytes.size());
+        SwapWords(arena.bytes.data() + offset, bytes.data(), bytes.size());
         if(!arena.revision||arena.revision(address,uint32_t(bytes.size()))==revision)break;
         arena.bytes.resize(offset);
         if(attempt==3)throw std::runtime_error("Vertex stream changed repeatedly during native acquisition");
         revision=arena.revision(address,uint32_t(bytes.size()));
+    }
+    if (cached)
+    {
+        cached->revision = revision;
+        cached->bytes.assign(arena.bytes.begin() + offset, arena.bytes.end());
     }
     arena.entries.push_back({address, offset, uint32_t(bytes.size()),revision});
     return offset;
@@ -240,19 +270,47 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
         // pass. Per-byte push_back used to recheck capacity millions of times
         // per frame and the bounds pass separately decoded every index again.
         static_assert(std::endian::native==std::endian::little);
-        result.indices.resize(guestIndices.size()/unit*unit);
-        minimum=UINT32_MAX;maximum=0;
-        auto convert=[&]<typename Index>()
+        const uint32_t indexBytes=uint32_t(guestIndices.size()/unit*unit);
+        const uint32_t indexBase=indexAddress&0x1FFFFFFF;
+        StreamArena::Converted* cachedIndices=nullptr;
+        uint64_t indexRevision=0;
+        if(arena.revision&&arena.persistent)
         {
-            for(size_t at=0;at<result.indices.size();at+=sizeof(Index))
+            indexRevision=arena.revision(indexBase,indexBytes);
+            cachedIndices=&arena.persistent->indices[{indexBase,indexBytes|uint32_t(unit==4)<<31}];
+            cachedIndices->used=arena.persistent->frame;
+        }
+        if(cachedIndices&&cachedIndices->revision==indexRevision&&cachedIndices->bytes.size()==indexBytes&&indexBytes)
+        {
+            result.indices=cachedIndices->bytes;
+            minimum=cachedIndices->minimum;maximum=cachedIndices->maximum;
+        }
+        else
+        {
+            result.indices.resize(indexBytes);
+            minimum=UINT32_MAX;maximum=0;
+            auto convert=[&]<typename Index>()
             {
-                Index value;memcpy(&value,guestIndices.data()+at,sizeof(value));
-                if constexpr(sizeof(Index)==2)value=__builtin_bswap16(value);else value=__builtin_bswap32(value);
-                memcpy(result.indices.data()+at,&value,sizeof(value));
-                if(bounds){minimum=(std::min)(minimum,uint32_t(value));maximum=(std::max)(maximum,uint32_t(value));}
+                const size_t n=indexBytes/sizeof(Index);
+                const uint8_t* source=guestIndices.data();
+                uint8_t* destination=result.indices.data();
+                Index low=(std::numeric_limits<Index>::max)(),high=0;
+                for(size_t i=0;i<n;++i)
+                {
+                    Index value;memcpy(&value,source+i*sizeof(Index),sizeof(value));
+                    if constexpr(sizeof(Index)==2)value=__builtin_bswap16(value);else value=__builtin_bswap32(value);
+                    memcpy(destination+i*sizeof(Index),&value,sizeof(value));
+                    low=(std::min)(low,value);high=(std::max)(high,value);
+                }
+                if(n){minimum=uint32_t(low);maximum=uint32_t(high);}
+            };
+            if(unit==2)convert.operator()<uint16_t>();else convert.operator()<uint32_t>();
+            if(cachedIndices&&arena.revision(indexBase,indexBytes)==indexRevision)
+            {
+                cachedIndices->revision=indexRevision;cachedIndices->bytes=result.indices;
+                cachedIndices->minimum=minimum;cachedIndices->maximum=maximum;
             }
-        };
-        if(unit==2)convert.operator()<uint16_t>();else convert.operator()<uint32_t>();
+        }
     }
     if(bounds)
     {

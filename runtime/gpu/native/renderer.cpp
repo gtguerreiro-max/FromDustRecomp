@@ -425,6 +425,17 @@ void Multiply4x4(const float* a,const float* b,float* out)
     }
 }
 
+// Diagnostic environment switches on per-draw / per-copy paths, read once.
+const char* CachedEnv(const char* name)
+{
+    static std::mutex lock;
+    static std::map<std::string, const char*> values;
+    std::lock_guard guard(lock);
+    auto [at, inserted] = values.try_emplace(name, nullptr);
+    if (inserted) at->second = getenv(name);
+    return at->second;
+}
+
 RenderMultisampling Multisampling(uint32_t surface,bool noMsaa,bool xenosPattern)
 {
     const uint32_t count = noMsaa ? 1u : 1u << ((surface >> 16) & 3);
@@ -854,7 +865,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(textures[i].get(), RenderTextureLayout::SHADER_READ));
             sets[0]->setTexture(i, textures[i].get(), RenderTextureLayout::SHADER_READ);
         }
-        if(!frame.continuous||getenv("FD_REPLAY_TRACE"))printf("fd_replay: %u captured mip chains uploaded\n", mipTextureCount);
+        if(!frame.continuous||CachedEnv("FD_REPLAY_TRACE"))printf("fd_replay: %u captured mip chains uploaded\n", mipTextureCount);
         list->end();
         const RenderCommandList* uploadCommands = list.get();
         queue->executeCommandLists(&uploadCommands, 1, nullptr, 0, nullptr, 0, fence.get());
@@ -947,7 +958,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         queue->waitForCommandFence(fence.get());
         if(versioned)for(uint32_t i=0;i<textureCount;++i)
             if(cubesByIndex[i]){auto& cached=storage.staticTextures[versions[i]];sets[2]->setTexture(i,cached.cube.get(),RenderTextureLayout::SHADER_READ,cached.cubeView.get());}
-        if(!frame.continuous||getenv("FD_REPLAY_TRACE"))printf("fd_replay: %u cube maps uploaded\n", count);
+        if(!frame.continuous||CachedEnv("FD_REPLAY_TRACE"))printf("fd_replay: %u cube maps uploaded\n", count);
     }
     uint32_t nextCubeView = descriptorBase;
     std::map<uint64_t, uint32_t> cubeSwizzles;
@@ -1132,7 +1143,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         if(sceneResolve!=SIZE_MAX)
         {
             UpscalerJitter(upscale.frameIndex,UpscalerRenderScale(upscaleMode),jitterX,jitterY);
-            if(getenv("FD_UPSCALER_NO_JITTER"))jitterX=jitterY=0;
+            if(CachedEnv("FD_UPSCALER_NO_JITTER"))jitterX=jitterY=0;
             jitterDraw.assign(draws.size(),0);
             auto isCamera=[&](const std::string& vs){
                 auto found=upscale.cameraShaders.find(vs);
@@ -1194,7 +1205,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             else t.rt[k]=std::make_shared<Surface>();
             Surface& rt = *t.rt[k];
             rt.format = colorFormat(ColorInfo(d.regs, k));
-            initialColors[k] = RenderColor(0, 0, 0, getenv("FD_CLEAR_ALPHA") ? float(atof(getenv("FD_CLEAR_ALPHA"))) : 0);
+            initialColors[k] = RenderColor(0, 0, 0, CachedEnv("FD_CLEAR_ALPHA") ? float(atof(CachedEnv("FD_CLEAR_ALPHA"))) : 0);
             auto clear = colorClears.find({d.regs[RB_SURFACE_INFO], ColorInfo(d.regs, k)});
             if (clear != colorClears.end() && coversTarget(*clear->second)) initialColors[k] = clearColorValue(*clear->second, rt.format);
             newColors[k]=!rt.texture;
@@ -1221,7 +1232,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         // of the colour attachments bound alongside it (NativeXRenderer's
         // SurfaceKey follows the same storage identity).
         const DepthKey depthKey(d.regs[RB_SURFACE_INFO], d.regs[RB_DEPTH_INFO], t.width, t.height,
-            getenv("FD_SEPARATE_DEPTH") ? ++depthSerial : 0);
+            CachedEnv("FD_SEPARATE_DEPTH") ? ++depthSerial : 0);
         t.ds = &depthSurfaces[depthKey];
         const bool newDepth = !t.ds->texture;
         if (newDepth)
@@ -1259,7 +1270,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         // FD_PENDING_LIVE=1: reads before a destination's first copy this frame see
         // the live source target; by default they see the captured memory copy
         // (the previous frame's state, e.g. the simulation's height maps).
-        if (getenv("FD_PENDING_LIVE"))
+        if (CachedEnv("FD_PENDING_LIVE"))
         for (const auto& [dest, r] : pendingResolves)
             if (!resolved.count(dest) && std::get<0>(key) == r->copySurface && std::get<1>(key) == r->copyColor &&
                 std::get<5>(key) == r->copyDepth && (r->copyControl & 7) < t.count)
@@ -1345,7 +1356,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         desc.pipelineLayout = layout.get();
         desc.vertexShader = vs.get();
         // FD_REPLAY_DEBUG_PS=1 keeps the depth-colour debug shader.
-        desc.pixelShader = getenv("FD_REPLAY_DEBUG_PS") ? pixelShader.get() : ps;
+        desc.pixelShader = CachedEnv("FD_REPLAY_DEBUG_PS") ? pixelShader.get() : ps;
         const uint32_t count = targetFor(d).count, written = writtenTargets(d);
         for (uint32_t k = 0; k < count; ++k)
         {
@@ -1360,7 +1371,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         desc.depthWriteEnabled = (depthControl >> 2) & 1;
         desc.depthFunction = Compare(depthControl >> 4);
         desc.depthTargetFormat = RenderFormat::D32_FLOAT_S8_UINT;
-        desc.stencilEnabled = d.hasStencilState && (depthControl & 1) && !getenv("FD_NO_STENCIL");
+        desc.stencilEnabled = d.hasStencilState && (depthControl & 1) && !CachedEnv("FD_NO_STENCIL");
         const uint32_t stencil = d.regs[RB_STENCILREFMASK];
         desc.stencilReference = stencil & 0xFF;
         desc.stencilReadMask = (stencil >> 8) & 0xFF;
@@ -1445,7 +1456,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             desc.renderTargetFormat[0] = RenderFormat::R32_FLOAT;
             floatPipeline = device->createGraphicsPipeline(desc);
         }
-        if(!frame.continuous||getenv("FD_REPLAY_TRACE"))fprintf(stderr, "fd_replay: depth pack pipeline %s (vs %zu bytes, ps %zu bytes)\n", packPipeline && static_cast<D3D12GraphicsPipeline*>(packPipeline.get())->d3d ? "ok" : "FAILED", packVsCode.size(), packPsCode.size());
+        if(!frame.continuous||CachedEnv("FD_REPLAY_TRACE"))fprintf(stderr, "fd_replay: depth pack pipeline %s (vs %zu bytes, ps %zu bytes)\n", packPipeline && static_cast<D3D12GraphicsPipeline*>(packPipeline.get())->d3d ? "ok" : "FAILED", packVsCode.size(), packPsCode.size());
     }
     constexpr uint32_t kMaxPacks = 64;
     uint32_t packAt = 0;
@@ -1596,7 +1607,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         commandList->activeComputePipelineLayout=nullptr;
         commandList->targetFramebuffer=nullptr;
         current=nullptr;
-        if(evaluated&&!getenv("FD_UPSCALER_BYPASS"))
+        if(evaluated&&!CachedEnv("FD_UPSCALER_BYPASS"))
         {
             list->barriers(RenderBarrierStage::COPY,{
                 RenderTextureBarrier(up.output.get(),RenderTextureLayout::COPY_SOURCE),
@@ -1632,7 +1643,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         } recordTimer{profile,profileDrawMs[d.clear?0:d.resolve?1:2],profileDrawStart};
         if (d.clear)
         {
-            if (getenv("FD_NO_CLEARS")) continue;
+            if (CachedEnv("FD_NO_CLEARS")) continue;
             // A clear followed immediately by Resolve has no draw to allocate
             // its target (the title screen's neutral refraction buffer).
             if ((d.clearFlags & 0xF)||(frame.continuous&&(d.clearFlags&0x30))) targetFor(d);
@@ -1730,7 +1741,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                     resolvedSwap[d.copyDest] = (d.copyDestInfo >> 24) & 1;
                     // copy_dest_exp_bias (bits 16-21, signed): memory = value * 2^bias.
                     resolvedBias[d.copyDest] = int32_t(d.copyDestInfo << 10) >> 26;
-                    if (getenv("FD_REPLAY_TRACE"))
+                    if (CachedEnv("FD_REPLAY_TRACE"))
                         fprintf(stderr, "resolve %08X info %08X src %u bias %d count %u\n", d.copyDest, d.copyDestInfo,
                             source, resolvedBias[d.copyDest], t.count);
                     const uint32_t copyW = (std::clamp)(d.copyWidth, 1u, t.width), copyH = (std::clamp)(d.copyHeight, 1u, t.height);
@@ -1784,7 +1795,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                         t.ds->shaderRead = false;
                         snap->surface.shaderRead = true;
                         resolvedDepth[d.copyDest] = &snap->surface;
-                        if (getenv("FD_DUMP_DEPTH"))
+                        if (CachedEnv("FD_DUMP_DEPTH"))
                         {
                             Dump dump;
                             dump.depth = true;
@@ -1811,8 +1822,8 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                         // holds the previous frame; the captured memory copy is closer.
                         resolved.erase(d.copyDest);
                     }
-                    else if (source < t.count && t.rt[source]->texture && (getenv("FD_NO_SNAPSHOT") ||
-                        (getenv("FD_LIVE_DEST") && strtoul(getenv("FD_LIVE_DEST"), nullptr, 16) == d.copyDest)))
+                    else if (source < t.count && t.rt[source]->texture && (CachedEnv("FD_NO_SNAPSHOT") ||
+                        (CachedEnv("FD_LIVE_DEST") && strtoul(CachedEnv("FD_LIVE_DEST"), nullptr, 16) == d.copyDest)))
                     {
                         resolved[d.copyDest] = t.rt[source].get();
                         // Dump the copied rectangle as it is now, for compare_resolves.py.
@@ -1923,7 +1934,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                         current = nullptr;
                         resolved[d.copyDest] = &p->surface;
                         resolvedSwap[d.copyDest] = false;
-                        if (getenv("FD_REPLAY_TRACE")) fprintf(stderr, "packed depth -> %08X (%ux%u, float %u)\n", d.copyDest, t.width, t.height, (d.copyDepth >> 16) & 1);
+                        if (CachedEnv("FD_REPLAY_TRACE")) fprintf(stderr, "packed depth -> %08X (%ux%u, float %u)\n", d.copyDest, t.width, t.height, (d.copyDepth >> 16) & 1);
                     }
                     else if (source == 4 && t.ds->texture) resolved[d.copyDest] = t.ds;
                 }
@@ -2070,7 +2081,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                 if (bias || d.expAdjust[slot] || FixedSnorm(source.format))
                 {
                     const float scale = std::ldexp(1.0f, bias + d.expAdjust[slot] + (FixedSnorm(source.format) ? 5 : 0));
-                    if (getenv("FD_REPLAY_TRACE"))
+                    if (CachedEnv("FD_REPLAY_TRACE"))
                         fprintf(stderr, "scale draw %u slot %u vs %s ps %s = %g\n", i, slot, d.vs.c_str(), d.ps.c_str(), scale);
                     memcpy(shared + kSharedFetchScale + slot * 4, &scale, 4);
                 }
@@ -2280,7 +2291,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             if (!dir.empty()) stbi_write_png(path.c_str(), t.width, t.height, 4, rgba.data(), t.width * 4);
             rt.readback->unmap();
         }
-        if(!frame.continuous||getenv("FD_REPLAY_TRACE"))printf("target_%d: %ux%u, %u RT, %u draws (surface %08X color %08X depth %08X)\n", n, t.width, t.height, t.count, t.draws,
+        if(!frame.continuous||CachedEnv("FD_REPLAY_TRACE"))printf("target_%d: %ux%u, %u RT, %u draws (surface %08X color %08X depth %08X)\n", n, t.width, t.height, t.count, t.draws,
             std::get<0>(key), std::get<1>(key), std::get<5>(key));
         ++n;
     }
@@ -2306,7 +2317,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         }
         dump.buffer->unmap();
     }
-    if(!frame.continuous||getenv("FD_REPLAY_TRACE"))printf("fd_replay: %zu draws, %zu pipelines, %zu targets, %zu resolves mapped, %u resolved reads\n", draws.size(),
+    if(!frame.continuous||CachedEnv("FD_REPLAY_TRACE"))printf("fd_replay: %zu draws, %zu pipelines, %zu targets, %zu resolves mapped, %u resolved reads\n", draws.size(),
         pipelines.size(), targets.size(), resolved.size(), aliasHits);
     PrintDebugMessages(infoQueue, debugErrors, debugWarnings, "readback");
     if (debugErrors) return 1;
