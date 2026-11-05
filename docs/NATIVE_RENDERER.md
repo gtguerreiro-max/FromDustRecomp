@@ -1364,3 +1364,18 @@ with the Breath catching up to it. Not enabled by default.
 Diagnostics: `FD_PROBE_STICK=<s>` (watchpoint on the stick vector),
 `FD_TRACE_POINTER=1`, `FD_POINTER_DRY=1`, `FD_MOUSE_POINTS=<s>:<x>,<y>;...`
 (scripted mouse), `FD_FIND_WORDS`, `FD_WATCH_READS`, `tools/test_mouse_pointer.ps1`.
+
+## Alpha test and alpha to mask — 2026-11-05
+
+The native renderer ignored RB_COLORCONTROL (0x2202): the catalog shaders
+were built with `g_SpecConstants()` returning 0, so their final
+`clip(oC0.w - g_AlphaThreshold)` never ran. In the far (RB) camera the
+vegetation impostors (VS 195 / PS 196 and VS 197 / PS 198, colorcontrol
+0x87000014) drew their whole quads: dark squares around the trees.
+- Shaders: `g_NativeSpecConstants` (shared constant 536, c33.z) feeds
+  `g_SpecConstants()` (`tools/build_native_shaders.py`, shader_common.h).
+- Renderer: alpha test enable (bit 3) with GREATER / GEQUAL uses RB_ALPHA_REF
+  (0x210E) as the threshold, NEVER discards; alpha to mask (bit 4) is
+  approximated as a cut at 0.5 (hard edges, no coverage dithering yet).
+  `FD_NO_ALPHA_TEST=1` turns both off.
+- The 4 reference frames still match exactly (none uses either).

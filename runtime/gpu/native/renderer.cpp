@@ -2207,6 +2207,30 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         // D3D12 SV_VertexID excludes BaseVertexLocation. Restore the Xenos
         // VGT index offset for shader-side vertex fetch addressing.
         memcpy(shared + 532,&d.regs[VGT_INDX_OFFSET],4);
+        // Alpha test (RB_COLORCONTROL 0x2202: function bits 0-2, enable bit 3;
+        // RB_ALPHA_REF 0x210E). The shaders end with clip(oC0.w - threshold)
+        // when spec bit 1 (g_NativeSpecConstants, 536) is set: exact for
+        // GREATER / GEQUAL, which From Dust uses (vegetation impostors);
+        // NEVER discards everything; LESS / EQUAL forms are left untested.
+        {
+            uint32_t spec = 0;
+            float threshold = 0;
+            if (d.hasContext && (d.context[0x202] & 0x8) && !CachedEnv("FD_NO_ALPHA_TEST"))
+            {
+                const uint32_t function = d.context[0x202] & 7;
+                const float reference = AsFloat(d.context[0x10E]);
+                if (function == 4 || function == 6) { spec = 2; threshold = function == 4 ? std::nextafter(reference, 2.0f) : reference; }
+                else if (function == 0) { spec = 2; threshold = 2.0f; }
+            }
+            // Alpha to mask (bit 4; tree impostors): coverage from alpha.
+            // Approximated as a cut at half coverage (hard edges).
+            else if (d.hasContext && (d.context[0x202] & 0x10) && !CachedEnv("FD_NO_ALPHA_TEST"))
+            {
+                spec = 2; threshold = 0.5f;
+            }
+            memcpy(shared + 528, &threshold, 4);
+            memcpy(shared + 536, &spec, 4);
+        }
         // fdFetchScale (1536 + slot * 4): 1, or for a render target read in
         // place of its biased copy, 2^(copy bias + fetch exp_adjust).
         // fdColorScale (1664 + k * 4): render target k's colour exponent bias,
@@ -2430,6 +2454,8 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                     d.index32, d.stride, d.vertexBytes, d.semantics.empty() ? "-" : d.semantics[0].c_str(), v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
                     viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth, viewport.maxDepth, target.width, target.height,
                     d.regs[RB_DEPTHCONTROL], int32_t(d.regs[VGT_INDX_OFFSET]), d.regs[RB_BLENDCONTROL0], d.regs[RB_COLOR_MASK], d.regs[RB_COLOR_INFO]);
+                fprintf(stderr, "draw %zu context %d colorcontrol %08X alpharef %g\n", i, int(d.hasContext),
+                    d.hasContext ? d.context[0x202] : 0u, d.hasContext ? AsFloat(d.context[0x10E]) : 0.0f);
             }
             list->drawIndexedInstanced(count, 1, 0, int32_t(d.regs[VGT_INDX_OFFSET]), 0);
             ++target.draws;

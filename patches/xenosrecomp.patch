@@ -1,5 +1,5 @@
 diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
-index 1c74034..a192715 100644
+index 1c74034..c89d4e3 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
 @@ -15,6 +15,9 @@
@@ -12,7 +12,7 @@ index 1c74034..a192715 100644
  #ifdef __spirv__
  
  struct PushConstants
-@@ -26,10 +29,19 @@ struct PushConstants
+@@ -26,10 +29,20 @@ struct PushConstants
  
  [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
  
@@ -25,6 +25,7 @@ index 1c74034..a192715 100644
 +#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 520)
 +#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 528)
 +#define g_VertexBaseOffset         vk::RawBufferLoad<int>(g_PushConstants.SharedConstants + 532)
++#define g_NativeSpecConstants      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 536)
 +#define g_LoopConstant(INDEX)      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 544 + (INDEX) * 4)
 +#define fdFetchScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1536 + (INDEX) * 4)
 +#define fdColorScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1664 + (INDEX) * 4)
@@ -36,7 +37,7 @@ index 1c74034..a192715 100644
  
  [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
  
-@@ -38,15 +50,118 @@ struct PushConstants
+@@ -38,15 +51,119 @@ struct PushConstants
  #else
  
  #define DEFINE_SHARED_CONSTANTS() \
@@ -49,6 +50,7 @@ index 1c74034..a192715 100644
 +    float2 g_HalfPixelOffset : packoffset(c32.z); \
 +    float g_AlphaThreshold : packoffset(c33.x); \
 +    int g_VertexBaseOffset : packoffset(c33.y); \
++    uint g_NativeSpecConstants : packoffset(c33.z); \
 +    uint4 g_LoopConstants[8] : packoffset(c34); \
 +    uint4 g_VertexFetch[32] : packoffset(c64); \
 +    float4 g_FetchScales[8] : packoffset(c96); \
@@ -159,7 +161,7 @@ index 1c74034..a192715 100644
  Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
  Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
  TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
-@@ -59,10 +174,26 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+@@ -59,10 +176,26 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
      return dimensions;
  }
  
@@ -187,7 +189,7 @@ index 1c74034..a192715 100644
  }
  
  float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
-@@ -135,17 +266,29 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+@@ -135,17 +268,29 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
      float h1y = h1(fy);
  
      float4 r =
@@ -222,7 +224,7 @@ index 1c74034..a192715 100644
  }
  
  struct CubeMapData
-@@ -156,7 +299,12 @@ struct CubeMapData
+@@ -156,7 +301,12 @@ struct CubeMapData
  
  float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
  {

@@ -59,7 +59,7 @@ def main():
             if run.returncode:
                 raise RuntimeError(path.name + ": XenosRecomp failed: " + run.stderr.decode(errors="replace"))
             text = temporary.read_text(encoding="utf-8")
-            temporary.write_text(text + "\nuint g_SpecConstants() { return 0; }\n", encoding="utf-8")
+            temporary.write_text(text + "\n// Per-draw specialization bits from the native renderer (shared constant 536): alpha test (bit 1).\nuint g_SpecConstants() { return g_NativeSpecConstants; }\n", encoding="utf-8")
             run = subprocess.run([str(dxc), "-T", "vs_6_0" if stage == 0 else "ps_6_0", *flags,
                                   str(temporary), "-Fo", str(compiled)], capture_output=True, timeout=120)
             if run.returncode:
