@@ -39,6 +39,7 @@ struct Data {
     int upscaler = 0; // native renderer: off, DLAA, DLSS quality / balanced / performance / ultra (live)
     int renderScale = 100; // native renderer internal resolution, percent of 1024x600 (live)
     bool decoupledSim = false; // world at a fixed 30 Hz, render up to the FPS limit (live)
+    bool evenPacing = true;    // with it: only 120 / 60 / 30 FPS, so world steps stay on screen evenly
     int frameGeneration = 0; // native renderer, DLSS-G: off, 2x, 3x, 4x (load on restart)
     int inputMode = 0; // automatic, keyboard/mouse, controller
     int sensitivity = 100;
@@ -49,6 +50,7 @@ struct Data {
     // right buttons absorb / release (LT / RT), a held button turns the
     // camera (right stick) and the wheel zooms.
     bool mouseBreath = true;
+    bool globalView = true; // keep the far (RB) camera unless the player leaves it
     int mouseMode = 0; // 0 direct (the Breath moves with the mouse on screen), 1 classic (mouse as stick)
     int mouseSpeed = 100;
     bool mouseButtons = true;

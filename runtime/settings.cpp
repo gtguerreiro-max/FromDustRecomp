@@ -64,6 +64,7 @@ void Load(const std::filesystem::path& path) {
     d.renderScale = read(L"Graphics", L"RenderScale", d.renderScale);
     d.frameGeneration = read(L"Graphics", L"FrameGeneration", d.frameGeneration);
     d.decoupledSim = read(L"Graphics", L"DecoupledSimulation", d.decoupledSim) != 0;
+    d.evenPacing = read(L"Graphics", L"EvenPacing", d.evenPacing) != 0;
     d.inputMode = read(L"Controls", L"Mode", d.inputMode);
     d.sensitivity = read(L"Controls", L"Sensitivity", d.sensitivity);
     d.deadzone = read(L"Controls", L"Deadzone", d.deadzone);
@@ -71,6 +72,7 @@ void Load(const std::filesystem::path& path) {
     d.mouseCamera = read(L"Controls", L"MouseCamera", d.mouseCamera) != 0;
     d.mouseBreath = read(L"Controls", L"MouseBreath", d.mouseBreath) != 0;
     d.mouseMode = read(L"Controls", L"MouseMode", d.mouseMode);
+    d.globalView = read(L"Controls", L"GlobalView", d.globalView) != 0;
     d.mouseSpeed = read(L"Controls", L"MouseSpeed", d.mouseSpeed);
     d.mouseButtons = read(L"Controls", L"MouseButtons", d.mouseButtons) != 0;
     d.cameraButton = read(L"Controls", L"CameraButton", d.cameraButton);
@@ -112,6 +114,7 @@ bool Save() {
     write(L"Graphics", L"RenderScale", d.renderScale);
     write(L"Graphics", L"FrameGeneration", d.frameGeneration);
     write(L"Graphics", L"DecoupledSimulation", d.decoupledSim);
+    write(L"Graphics", L"EvenPacing", d.evenPacing);
     write(L"Controls", L"Mode", d.inputMode);
     write(L"Controls", L"Sensitivity", d.sensitivity);
     write(L"Controls", L"Deadzone", d.deadzone);
@@ -119,6 +122,7 @@ bool Save() {
     write(L"Controls", L"MouseCamera", d.mouseCamera);
     write(L"Controls", L"MouseBreath", d.mouseBreath);
     write(L"Controls", L"MouseMode", d.mouseMode);
+    write(L"Controls", L"GlobalView", d.globalView);
     write(L"Controls", L"MouseSpeed", d.mouseSpeed);
     write(L"Controls", L"MouseButtons", d.mouseButtons);
     write(L"Controls", L"CameraButton", d.cameraButton);

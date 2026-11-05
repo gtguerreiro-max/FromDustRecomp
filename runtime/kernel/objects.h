@@ -103,6 +103,18 @@ namespace kernel
     bool TimeoutToDeadline(uint32_t timeoutPtr, Deadline& deadline);
     bool TimeoutToDeadline(int64_t timeout100ns, Deadline& deadline);
 
+    // Time the calling thread spent blocked (ns), per kind: 0 kernel object
+    // waits, 1 KeDelayExecutionThread / yields, 2 critical sections, 3 the
+    // native renderer's hand-over. Diagnostics (FD_TRACE_SIM_STEPS).
+    uint64_t* ThreadWaits();
+    struct WaitTimer
+    {
+        explicit WaitTimer(int kind) : kind(kind), start(std::chrono::steady_clock::now()) {}
+        ~WaitTimer() { ThreadWaits()[kind] += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()); }
+        int kind;
+        std::chrono::steady_clock::time_point start;
+    };
+
     // Returns STATUS_SUCCESS + index, or STATUS_TIMEOUT.
     uint32_t WaitForObjects(KernelObject* const* objects, uint32_t count, bool waitAll, const Deadline* deadline);
 

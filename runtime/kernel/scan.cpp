@@ -141,21 +141,25 @@ namespace kernel::debug
 {
 namespace
 {
-uintptr_t g_watchHost = 0;
-uint32_t g_watchGuest = 0;
+uint32_t g_watchGuest[4] = {};
 LONG WINAPI WatchHandler(EXCEPTION_POINTERS* info)
 {
-    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(info->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(info->ContextRecord->Dr6 & 0xF)) return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD64 hit = info->ContextRecord->Dr6 & 0xF;
     info->ContextRecord->Dr6 = 0;
-    TraceGuestWriter(info->ContextRecord, g_watchGuest);
+    for (int slot = 0; slot < 4; ++slot)
+        if (hit & (1ull << slot)) TraceGuestWriter(info->ContextRecord, g_watchGuest[slot]);
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 }
-void ArmWriteWatch(uint32_t address, bool readsToo)
+void ArmWatchSlot(uint32_t address, bool readsToo, int slot);
+void ArmWriteWatch(uint32_t address, bool readsToo) { ArmWatchSlot(address, readsToo, 0); }
+void ArmWatchSlot(uint32_t address, bool readsToo, int slot)
 {
-        g_watchGuest = address;
-        g_watchHost = reinterpret_cast<uintptr_t>(mem::Translate(address));
-        AddVectoredExceptionHandler(1, WatchHandler);
+        static bool installed = false;
+        if (!installed) { installed = true; AddVectoredExceptionHandler(1, WatchHandler); }
+        g_watchGuest[slot] = address;
+        const uintptr_t host = reinterpret_cast<uintptr_t>(mem::Translate(address));
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         THREADENTRY32 entry{sizeof(entry)};
         unsigned armed = 0;
@@ -170,8 +174,10 @@ void ArmWriteWatch(uint32_t address, bool readsToo)
                 context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
                 if (GetThreadContext(thread, &context))
                 {
-                    context.Dr0 = g_watchHost;
-                    context.Dr7 = (context.Dr7 & ~0xF0003ull) | 1 | ((readsToo ? 3ull : 1ull) << 16) | (3ull << 18);
+                    (&context.Dr0)[slot] = host;
+                    const DWORD64 field = 0xFull << (16 + slot * 4), enable = 3ull << (slot * 2);
+                    context.Dr7 = (context.Dr7 & ~(field | enable)) | (1ull << (slot * 2)) |
+                        ((((readsToo ? 3ull : 1ull)) | (3ull << 2)) << (16 + slot * 4));
                     if (SetThreadContext(thread, &context)) ++armed;
                 }
                 ResumeThread(thread);
@@ -179,7 +185,7 @@ void ArmWriteWatch(uint32_t address, bool readsToo)
             CloseHandle(thread);
         }
         CloseHandle(snapshot);
-        Log("write watch: %08X armed on %u threads", address, armed);
+        Log("write watch: %08X armed on %u threads (slot %d%s)", address, armed, slot, readsToo ? ", reads too" : "");
 }
 void StartWriteWatch()
 {
@@ -291,12 +297,12 @@ void StartIntScan()
     std::thread([t0 = t[0], t1 = t[1], t2 = t[2], t3 = t[3], start] {
         const double times[4] = {t0, t1, t2, t3};
         auto waitUntil = [&](double s) { while (GetTickCount64() < start + ULONGLONG(s * 1000)) Sleep(5); };
-        std::vector<std::pair<uint32_t, uint32_t>> ranges;
-        for (const auto& range : mem::AllocatedRanges()) if (range.first < 0xA0000000u) ranges.push_back(range);
-        ranges.push_back({0x8A000000u, 0x00400000u});
         // One raw copy at t1; at t2 only the words that changed are kept.
         std::vector<std::vector<uint8_t>> first;
         waitUntil(times[0]);
+        std::vector<std::pair<uint32_t, uint32_t>> ranges;
+        for (const auto& range : mem::AllocatedRanges()) if (range.first < 0xA0000000u) ranges.push_back(range);
+        ranges.push_back({0x8A000000u, 0x00400000u});
         for (const auto& [address, size] : ranges) first.emplace_back(mem::Ptr<uint8_t>(address), mem::Ptr<uint8_t>(address) + size);
         std::vector<uint32_t> addresses;
         std::vector<uint32_t> values[4];
@@ -316,10 +322,14 @@ void StartIntScan()
             for (size_t i = 0; i < addresses.size(); ++i) values[k][i] = mem::Read32(addresses[i]);
         }
         unsigned hits = 0;
-        for (size_t i = 0; i < addresses.size() && hits < 80; ++i)
+        uint32_t page = 0, perPage = 0;
+        for (size_t i = 0; i < addresses.size() && hits < 200; ++i)
         {
             const uint32_t a = values[0][i], b = values[1][i], c = values[2][i], d = values[3][i];
-            if (a != c || c != d || a == b || a > 0xFFFF || b > 0xFFFF) continue;
+            if (a != c || c != d || a == b || a > 16 || b > 16) continue;
+            // At most two hits per 4 KB page (skips toggled buffers).
+            if ((addresses[i] >> 12) != page) { page = addresses[i] >> 12; perPage = 0; }
+            if (++perPage > 2) continue;
             ++hits;
             Log("int scan: %08X  %u -> %u -> %u -> %u   (%08X %08X [%08X] %08X %08X)", addresses[i], a, b, c, d,
                 mem::Read32(addresses[i] - 8), mem::Read32(addresses[i] - 4), mem::Read32(addresses[i]), mem::Read32(addresses[i] + 4), mem::Read32(addresses[i] + 8));

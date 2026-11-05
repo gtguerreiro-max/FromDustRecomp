@@ -302,7 +302,7 @@ namespace kernel::debug
                     ++samples;
                     std::vector<uint64_t> seen;
                     uint64_t selfKey = 0;
-                    for (int depth = 0; depth < 64 && context.Rip; depth++)
+                    for (int depth = 0; depth < 64 && context.Rip && context.Rsp >= 0x10000; depth++)
                     {
                         // Key: guest address, or host RIP (tagged) for runtime code.
                         const uint32_t guest = GuestFromHost(context.Rip);
@@ -327,7 +327,14 @@ namespace kernel::debug
                         PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
                         if (!fn)
                         {
-                            context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp);
+                            // A leaf frame: the return address is on top of the stack
+                            // (read safely: a sample can land in a prologue / epilogue).
+                            DWORD64 ret = 0;
+                            SIZE_T got = 0;
+                            if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(context.Rsp), &ret, sizeof(ret), &got) ||
+                                got != sizeof(ret))
+                                break;
+                            context.Rip = ret;
                             context.Rsp += 8;
                             continue;
                         }

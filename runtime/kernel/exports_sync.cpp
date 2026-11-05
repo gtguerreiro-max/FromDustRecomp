@@ -158,6 +158,7 @@ KFUNC(KiApcNormalRoutineNop) { RETURN(0); }
 
 KFUNC(NtYieldExecution)
 {
+    WaitTimer timer(1);
     std::this_thread::yield();
     RETURN(STATUS_SUCCESS);
 }
@@ -165,6 +166,7 @@ KFUNC(NtYieldExecution)
 KFUNC(KeDelayExecutionThread)
 {
     const int64_t interval = int64_t(*mem::Ptr<be<uint64_t>>(ARG2));
+    WaitTimer timer(1);
     if (interval == 0)
     {
         std::this_thread::yield();
@@ -513,6 +515,7 @@ KFUNC(RtlEnterCriticalSection)
     }
     auto* lock = mem::Ptr<volatile long>(cs + kCsLock);
     auto* waiters = mem::Ptr<volatile long>(cs + kCsWaiters);
+    WaitTimer timer(2);
     _InterlockedIncrement(waiters);
     for (int wait = 0; !TryClaimHandoff(cs, me) && !TryEnter(cs, me); wait++)
     {

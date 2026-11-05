@@ -66,6 +66,7 @@ std::vector<ScriptedPress> g_script;
 const ULONGLONG g_inputStart = GetTickCount64();
 std::atomic<bool> g_lastKeyboard{true};
 std::atomic<bool (*)()> g_pointerActive{nullptr};
+std::atomic<void (*)(uint16_t)> g_buttonObserver{nullptr};
 float g_grabX = 0, g_grabY = 0;      // pending grabbed mouse movement (pixels)
 float g_grabWidth = 1, g_grabHeight = 1;
 ULONGLONG g_grabTick = 0;
@@ -271,6 +272,7 @@ uint32_t GetState(uint32_t user, State& state) {
         if (g_captured) Capture(g_window.load(), false);
     }
     if (user == 0) UpdatePrompts(d);
+    if (user == 0) if (auto observer = g_buttonObserver.load()) observer(state.pad.buttons);
     // Scripted presses for unattended diagnostic runs (see SchedulePad).
     if (user == 0) {
         std::lock_guard scriptLock(g_scriptMutex);
@@ -290,6 +292,7 @@ uint32_t GetState(uint32_t user, State& state) {
     return ERROR_SUCCESS;
 }
 void SetPointerQuery(bool (*active)()) { g_pointerActive = active; }
+void SetButtonObserver(void (*observer)(uint16_t buttons)) { g_buttonObserver = observer; }
 void WindowAspect(float& width, float& height) {
     std::lock_guard lock(g_pollMutex);
     if (g_grabWidth > 1 && g_grabHeight > 1) { width = g_grabWidth; height = g_grabHeight; }

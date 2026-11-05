@@ -9,4 +9,11 @@ double SimulationRate();
 // The pad's buttons / triggers may change for the game only before an update
 // that steps the world (edges are consumed by world logic).
 bool InputMayChange();
+// The display pacer's limit (FPS, 0 = none), for even pacing.
+void SetFrameLimit(int fps);
+// Even pacing (fixed-rate world): the rate the game loop holds now (120, 60
+// or 30, so each world step stays on screen for the same number of frames)
+// and its recent frame time (ms) without the pacing wait; 0 when off.
+int EvenPaceRate();
+float EvenPaceWorkMs();
 }

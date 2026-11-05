@@ -1379,3 +1379,72 @@ vegetation impostors (VS 195 / PS 196 and VS 197 / PS 198, colorcontrol
   approximated as a cut at 0.5 (hard edges, no coverage dithering yet).
   `FD_NO_ALPHA_TEST=1` turns both off.
 - The 4 reference frames still match exactly (none uses either).
+
+## Global view by default — 2026-11-05
+
+From Dust has two gameplay cameras: the close one and the "global view"
+(RB). On a PC screen with a mouse the global view reads like an RTS camera,
+so it is now the default (F1 > Controls > "Prefer the global view (RB
+camera)", `GlobalView` in [Controls]; `FD_NO_GLOBAL_VIEW=1` turns it off).
+
+The camera mode is not a field we found: the camera parameters live in a
+reflected params class (helicoTimeToGlobal 0x90, helicoDistanceToCursor 0x98,
+globalCameraHeight 0x130, globalDistanceToCursor 0x134, ...), and the mode is
+script state. So `camera_assist.cpp` measures it: every cursor update
+(`sub_8A1F4298`) computes the scene camera's distance to the Breath cursor
+(`pointer::CameraDistance`). First level: close ~25.4 units, global ~113 (the
+transition takes under a second; 116-129 after the village cut scene).
+- Close for 2 s in play (> 60 = global) and the player did not choose it:
+  an RB tap is scheduled (`pcinput::SchedulePad`, 150 ms), at most every 4 s,
+  never while the F1 menu blocks input and not within 20 s of an LB press
+  (LB looks at a villager up close).
+- The player's own RB (seen before injected presses, `SetButtonObserver`):
+  pressed from the global view means "close": no taps until the player
+  presses RB again from the close view.
+- A gap of more than 0.5 s in cursor updates (menus, cut scenes, loading)
+  restarts the 2 s timer.
+
+Verified with the first level's save: the close camera at 76.7 s, the tap at
+77.8 s, the global view (113.2) from 78.8 s; the village cut scene
+(117.7-135.3 s, no cursor updates) ends in the global view, so no second tap.
+`FD_TRACE_CAMERA_DISTANCE=1` logs the distance every 0.5 s and each tap.
+
+## Micro stutter with the fixed-rate world, even pacing — 2026-11-05
+
+Report: micro stutters with FrameLimit=60, VSync, DecoupledSimulation=1
+(RTX 5060 Ti, Ryzen 5 5600X, 240 Hz display). `FD_TRACE_SIM_STEPS=1` logs,
+every 10 s, how many frames each world step stayed on screen and the frame
+intervals. First level, from the save:
+- Limit 60, as before: ~50-55 FPS in play, world steps held for 1 frame
+  (~85 per 10 s) or 2 (~215): water and people move in jerks while the
+  camera is smooth. That is the stutter. Even where 60 held (menus), timing
+  jitter around 0.5 steps per frame gave 1 / 2 / 3 frame steps (78 / 144 / 78).
+- Limit none (the game's own cap, 120): ~103-106 FPS, steps of 3 or 4 frames.
+- Holding 60 exactly (`FD_EVEN_PACE_FIXED=60`): ~54 FPS, frames 18-25 ms.
+  The game puts more into a longer frame: ~446 draws per frame at ~103 FPS,
+  ~1400 at ~54 FPS, ~1540 at 30 FPS, and our capture cost follows the draws.
+  So a 60 FPS cadence does not fit on this PC although 100+ FPS does.
+  Per-frame waits of the game thread (kernel object waits, delays, critical
+  sections, the renderer hand-over; `kernel::ThreadWaits`) show the rest is
+  CPU work: e.g. 18.2 ms with 4.7 ms of waits.
+
+Changes (`game_loop.cpp`):
+- Snapping: a frame interval within 10% of 1/k world steps (k = 1..4) counts
+  as exactly that, so a steady 60 FPS steps the world every second frame.
+  `FD_NO_SIM_SNAP=1` turns it off.
+- Even pacing (F1 > Graphics > Smoothness > "Even frame pacing", `EvenPacing`
+  in [Graphics], default on, only with the fixed-rate world): the game loop
+  sleeps at the start of the component update (`sub_825803A8`) to hold 120,
+  60 or 30 FPS, the fastest that does not exceed the frame limit and that
+  the frames fit in (windows of 30 frames: 4 late frames -> slower; 3 windows
+  well inside the faster interval -> faster). The display pacer
+  (`xenia_bridge.cpp` `PaceFrame`, on the render worker) steps aside then:
+  sleeping there too fought the game's own vblank wait (18-25 ms frames with
+  ~9 ms of work). `FD_NO_EVEN_PACE=1` turns it off, `FD_EVEN_PACE_FIXED=<n>`
+  holds a rate.
+
+Result on this PC: limit 60 + even pacing -> 60 FPS in menus, 30 FPS with
+every step on screen for exactly one frame in play (300 of 300). The
+alternative is even pacing off and no limit: ~103 FPS with 3 / 4 frame
+steps (small unevenness, smooth camera). Making 60 hold needs the per-draw
+capture cost down, or finding what the game scales with the frame time.

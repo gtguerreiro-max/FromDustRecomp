@@ -20,6 +20,7 @@
 #endif
 #include "../settings.h"
 #include "../latency.h"
+#include "../game_loop.h"
 #include "../kernel/kernel.h"
 #include "../kernel/thread.h"
 #include "../kernel/debug.h"
@@ -53,7 +54,9 @@ std::atomic<uint64_t> g_writeSerial{0};
 std::array<std::atomic<uint64_t>,0x20000> g_pageRevisions{};
 
 void PaceFrame() {
-  if (g_frameInterval.count() == 0) return;
+  // With even pacing the game loop paces itself (game_loop.cpp); a second
+  // sleep here would fight the game's own vblank wait.
+  if (g_frameInterval.count() == 0 || gameloop::EvenPaceRate() > 0) return;
   static thread_local std::chrono::steady_clock::time_point next;
   const auto now = std::chrono::steady_clock::now();
   if (now < next) std::this_thread::sleep_until(next);
@@ -273,6 +276,7 @@ bool Initialize() {
   const int frameLimit = graphics.frameLimit ? graphics.frameLimit : (graphics.vsync ? refresh : 0);
   if (graphics.vsync && !graphics.frameLimit) kernel::Log("gpu: VSync without a frame limit: pacing at the display's %d Hz", refresh);
   g_frameInterval = frameLimit ? std::chrono::nanoseconds(1000000000LL / frameLimit) : std::chrono::nanoseconds{};
+  gameloop::SetFrameLimit(frameLimit);
   g_memory->SetGpuFramePacer(PaceFrame);
   g_processor = std::make_unique<xe::cpu::Processor>(g_memory.get());
   g_kernel = std::make_unique<xe::kernel::KernelState>(&g_emulator, g_processor.get());

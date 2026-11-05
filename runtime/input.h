@@ -33,6 +33,9 @@ bool MousePosition(float& x, float& y);
 // Mouse pointing (pointer.cpp) registers whether it drives the Breath; the
 // relative mouse-as-stick emulation and cursor capture are off meanwhile.
 void SetPointerQuery(bool (*active)());
+// Observer of the player's buttons (XInput mask) each poll, before injected
+// presses (camera_assist.cpp).
+void SetButtonObserver(void (*observer)(uint16_t buttons));
 // Mouse movement since the last call while the Breath is grabbed by the mouse
 // (hidden cursor), as fractions of the window size (+x right, +y down).
 bool TakeMouseDelta(float& dx, float& dy);

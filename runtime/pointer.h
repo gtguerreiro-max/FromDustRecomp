@@ -21,4 +21,6 @@ bool Grab(float x, float y, float z, float& outX, float& outY);
 bool Active();
 // Diagnostics: the screen position [0, 1] of a world point with the camera.
 bool Project(float x, float y, float z, float& sx, float& sy);
+// Distance from the camera (its near-plane centre) to a world point.
+bool CameraDistance(float x, float y, float z, float& distance);
 }

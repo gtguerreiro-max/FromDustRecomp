@@ -155,4 +155,18 @@ bool Project(float x, float y, float z, float& sx, float& sy)
     sx = float((v[0] / v[3] + 1) * 0.5); sy = float((1 - v[1] / v[3]) * 0.5);
     return true;
 }
+bool CameraDistance(float x, float y, float z, float& distance)
+{
+    double inv[16];
+    {
+        std::lock_guard lock(g_mutex);
+        if (!g_camera || !Invert(g_rows, inv)) return false;
+    }
+    double v[4];
+    for (int r = 0; r < 4; ++r) v[r] = inv[r * 4 + 3]; // clip (0, 0, 0, 1): near-plane centre
+    if (std::fabs(v[3]) < 1e-9) return false;
+    const double cx = v[0] / v[3] - x, cy = v[1] / v[3] - y, cz = v[2] / v[3] - z;
+    distance = float(std::sqrt(cx * cx + cy * cy + cz * cz));
+    return std::isfinite(distance);
+}
 }

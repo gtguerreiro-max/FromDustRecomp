@@ -159,8 +159,11 @@ namespace kernel
         return TimeoutToDeadline(int64_t(*mem::Ptr<be<uint64_t>>(timeoutPtr)), deadline);
     }
 
+    uint64_t* ThreadWaits() { thread_local uint64_t waits[4] = {}; return waits; }
+
     uint32_t WaitForObjects(KernelObject* const* objects, uint32_t count, bool waitAll, const Deadline* deadline)
     {
+        WaitTimer timer(0);
         thread_local Waiter waiter;
         std::unique_lock lock(g_dispatcherLock);
         bool registered = false;

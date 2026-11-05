@@ -327,8 +327,17 @@ private:
                          "the 'Frame limit' (60, 120 or none; applies on restart). Water and people still update at 30 Hz. "
                          "Applies immediately.");
                     if (nativeBackend_ && d.decoupledSim)
+                    {
                         ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "World at 30 Hz  |  image up to %s FPS",
                             d.frameLimit ? std::to_string((std::min)(d.frameLimit, 120)).c_str() : "120");
+                        ImGui::Checkbox("Even frame pacing", &d.evenPacing);
+                        Help("Holds 120, 60 or 30 FPS, the fastest of them the PC keeps up with, so each world step stays on screen "
+                             "for the same time. Rates in between (say 45 or 55 FPS) show some steps for one frame and others for two: "
+                             "water and people move in small jerks while the camera is smooth. Off: the plain frame limit.");
+                        if (const int even = gameloop::EvenPaceRate(); even > 0)
+                            ImGui::TextDisabled("Now paced at %d FPS (frames take %.1f ms). Rates between 30, 60 and 120 would "
+                                                "show the world's steps unevenly.", even, gameloop::EvenPaceWorkMs());
+                    }
                     else if (!nativeBackend_) ImGui::TextDisabled("Available with the native renderer.");
                 }
                 Section("FRAME GENERATION");
@@ -400,6 +409,10 @@ private:
                 Help("Hold the button and move the mouse to rotate the camera.");
                 ImGui::Combo("Mouse wheel", &d.wheelZoom, "Off\0Zoom\0Inverted zoom\0");
                 Section("CAMERA AND CONTROLLER");
+                ImGui::Checkbox("Prefer the global view (RB camera)", &d.globalView);
+                Help("Keeps the far camera, an overview that suits a PC screen and the mouse. When the game returns to the close "
+                     "camera by itself (after cut scenes and tutorials), the global view comes back after two seconds. Press RB "
+                     "to choose the close camera yourself; it then stays until you press RB again.");
                 ImGui::SliderInt("Camera sensitivity", &d.sensitivity, 25, 300, "%d %%");
                 ImGui::Checkbox("Invert camera Y axis", &d.invertY);
                 ImGui::SliderInt("Stick dead zone", &d.deadzone, 0, 30, "%d %%");

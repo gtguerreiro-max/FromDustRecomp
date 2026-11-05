@@ -3,6 +3,7 @@
 #ifdef FD_NATIVE_RENDERER
 #include "shader_catalog.h"
 #include "../../kernel/kernel.h"
+#include "../../kernel/objects.h"
 #include "live_geometry.h"
 #include "live_resources.h"
 #include "renderer.h"
@@ -70,7 +71,10 @@ public:
     void Submit(GeometryBatch& batch, std::span<const std::shared_ptr<TextureResource>> textures, uint32_t frontBuffer, bool dump, void* token)
     {
         std::unique_lock lock(mutex);
-        idle.wait(lock, [&] { return !pending && !busy; });
+        {
+            kernel::WaitTimer timer(3);
+            idle.wait(lock, [&] { return !pending && !busy; });
+        }
         job.commands.swap(batch.commands);
         job.bytes.swap(batch.streams.bytes);
         job.entries.swap(batch.streams.entries);
