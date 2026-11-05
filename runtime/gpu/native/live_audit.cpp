@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <thread>
 #include "replay_frame.h"
+#include "prompt_glyphs.h"
 #include "frame_generation.h"
 #include "../../latency.h"
 
@@ -261,6 +262,7 @@ bool Initialize()
                 created->renderer=std::make_unique<Renderer>();
                 if(!created->renderer->LoadShaderCatalog(path))throw std::runtime_error("Cannot load the native renderer shader catalog");
                 auto* c=created.get();
+                SetTextureResolveHook(prompts::Apply);
                 created->geometry->SetContinuous([c](gpu::native::Draw& draw){
                     if(draw.resolve)c->resources.Resolve(draw.textureFetches[0]);
                     else if(!draw.clear)c->resources.Bind(draw,c->catalog);

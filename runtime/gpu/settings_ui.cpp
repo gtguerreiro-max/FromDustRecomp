@@ -156,6 +156,7 @@ private:
     gpu::FrameTimingSnapshot timing_;
     gpu::native::audit::Status native_;
     std::chrono::steady_clock::time_point sample_ = std::chrono::steady_clock::now();
+    const std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
     void Toggle() {
         visible_ = !visible_;
 #ifdef FD_NATIVE_RENDERER
@@ -223,10 +224,15 @@ private:
         ImGui::SetNextWindowBgAlpha(0.88f);
         constexpr auto hudFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove;
+        // A short hint at start-up; afterwards only the enabled counters.
+        const bool hint = now - started_ < std::chrono::seconds(15) && !visible_;
+        if (hint || d.showFps || d.showFrameTime) {
         ImGui::Begin("##pc_hud", nullptr, hudFlags);
-        if (ImGui::Button(visible_ ? "Fechar  [F1]" : "Definições  [F1]")) Toggle();
+        bool first = true;
+        auto item = [&] { if (!first) ImGui::SameLine(); first = false; };
+        if (hint) { item(); ImGui::TextDisabled("F1  Settings"); }
         if (d.showFps) {
-            ImGui::SameLine();
+            item();
 #ifdef FD_NATIVE_RENDERER
             const auto fgs = gpu::native::fg::GetStatus();
             if (fgs.active && fgs.presentedPerFrame > 1) ImGui::Text("%.0f FPS  (DLSS FG %u×: %.0f)", fps_, fgs.presentedPerFrame, fps_ * fgs.presentedPerFrame);
@@ -234,9 +240,10 @@ private:
 #endif
             ImGui::Text("%.0f FPS", fps_);
         }
-        if(d.showFrameTime&&timing_.count){ImGui::SameLine();ImGui::Text("%.1f ms",timing_.meanMs);}
-        if(d.showFrameTime){const auto lat=latency::Get();if(lat.samples){ImGui::SameLine();ImGui::Text("| latência %.0f ms",lat.averageMs);}}
+        if(d.showFrameTime&&timing_.count){item();ImGui::Text("%.1f ms",timing_.meanMs);}
+        if(d.showFrameTime){const auto lat=latency::Get();if(lat.samples){item();ImGui::Text("| latency %.0f ms",lat.averageMs);}}
         ImGui::End();
+        }
         if (!visible_) return;
 
         ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
@@ -246,39 +253,39 @@ private:
         constexpr auto panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
         ImGui::Begin("##pc_settings", nullptr, panelFlags);
-        ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "FROM DUST  /  DEFINIÇÕES DE PC");
-        ImGui::TextDisabled("F1 abre ou fecha. As escolhas ficam guardadas neste PC.");
+        ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "FROM DUST  /  PC SETTINGS");
+        ImGui::TextDisabled("F1 opens or closes this menu. Choices are saved on this PC.");
         ImGui::Spacing();
         const auto before = d;
         if (ImGui::BeginTabBar("settings_tabs")) {
-            if (ImGui::BeginTabItem("Ecrã",nullptr,selectTab_=="screen"?ImGuiTabItemFlags_SetSelected:0)) {
+            if (ImGui::BeginTabItem("Display",nullptr,selectTab_=="screen"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("screen_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 int mode = d.fullscreen ? 1 : 0;
-                Section("JANELA");
-                if (ImGui::Combo("Modo de ecrã", &mode, "Janela\0Ecrã inteiro sem margens\0")) d.fullscreen = mode == 1;
-                Help("Ecrã inteiro sem margens ocupa o monitor sem mudar a sua resolução. Atalhos: F11 ou Alt+Enter.");
+                Section("WINDOW");
+                if (ImGui::Combo("Display mode", &mode, "Windowed\0Borderless fullscreen\0")) d.fullscreen = mode == 1;
+                Help("Borderless fullscreen covers the monitor without changing its resolution. Shortcuts: F11 or Alt+Enter.");
                 ImGui::BeginDisabled(d.fullscreen);
-                ImGui::Combo("Tamanho da janela", &d.windowPreset, "1280 × 720\0 1600 × 900\0 1920 × 1080\0 2560 × 1440\0 3840 × 2160\0");
+                ImGui::Combo("Window size", &d.windowPreset, "1280 × 720\0 1600 × 900\0 1920 × 1080\0 2560 × 1440\0 3840 × 2160\0");
                 ImGui::EndDisabled();
                 Section("INTERFACE");
-                ImGui::Checkbox("Mostrar contador de FPS", &d.showFps);
-                ImGui::Checkbox("Mostrar tempo entre frames",&d.showFrameTime);
-                ImGui::Combo("Posição do HUD",&d.hudCorner,"Canto superior direito\0Canto superior esquerdo\0Canto inferior direito\0Canto inferior esquerdo\0");
-                ImGui::SliderInt("Tamanho da interface",&d.uiScale,75,150,"%d %%");
-                Section("APRESENTAÇÃO");
-                ImGui::Combo("Apresentação da imagem", &d.presentation, "Suave (bilinear)\0FSR — ampliar e definir\0CAS — realçar detalhes\0");
-                Help("Como a imagem do jogo é ampliada para o tamanho da janela. FSR e CAS realçam o detalhe; a nitidez ajusta a intensidade.");
+                ImGui::Checkbox("Show FPS counter", &d.showFps);
+                ImGui::Checkbox("Show frame time and latency",&d.showFrameTime);
+                ImGui::Combo("Counter position",&d.hudCorner,"Top right\0Top left\0Bottom right\0Bottom left\0");
+                ImGui::SliderInt("Menu size",&d.uiScale,75,150,"%d %%");
+                Section("PRESENTATION");
+                ImGui::Combo("Image scaling", &d.presentation, "Smooth (bilinear)\0FSR (upscale and sharpen)\0CAS (sharpen detail)\0");
+                Help("How the game image is scaled to the window. FSR and CAS sharpen detail; Sharpness sets the strength.");
                 ImGui::BeginDisabled(d.presentation == 0);
-                ImGui::SliderInt("Nitidez", &d.sharpness, 0, 100, "%d %%");
+                ImGui::SliderInt("Sharpness", &d.sharpness, 0, 100, "%d %%");
                 ImGui::EndDisabled();
-                ImGui::TextWrapped("Estas opções aplicam-se de imediato.");
+                ImGui::TextWrapped("These options apply immediately.");
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Gráficos",nullptr,selectTab_=="graphics"?ImGuiTabItemFlags_SetSelected:0)) {
+            if (ImGui::BeginTabItem("Graphics",nullptr,selectTab_=="graphics"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("graphics_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
-                Section("ANTI-ALIASING E UPSCALING");
+                Section("ANTI-ALIASING AND UPSCALING");
                 {
 #ifdef FD_NATIVE_RENDERER
                     const auto status = gpu::native::GetUpscalerStatus();
@@ -287,123 +294,123 @@ private:
                     constexpr int scales[] = {100, 150, 200, 250, 300};
                     int scaleIndex = int(std::find(std::begin(scales), std::end(scales), d.renderScale) - std::begin(scales));
                     if (scaleIndex >= 5) scaleIndex = 0;
-                    if (ImGui::Combo("Resolução interna", &scaleIndex,
-                            "Original (1024×600)\0" "1,5× (1536×900)\0" "2× (2048×1200)\0" "2,5× (2560×1500)\0" "3× (3072×1800)\0"))
+                    if (ImGui::Combo("Internal resolution", &scaleIndex,
+                            "Original (1024×600)\0" "1.5× (1536×900)\0" "2× (2048×1200)\0" "2.5× (2560×1500)\0" "3× (3072×1800)\0"))
                         d.renderScale = scales[scaleIndex];
-                    Help("Desenha o jogo a uma resolução maior (imagem mais nítida, mais trabalho da GPU). "
-                         "A simulação do terreno e da água fica à resolução original. Aplica-se de imediato.");
+                    Help("Renders the game at a higher resolution (sharper image, more GPU work). "
+                         "The terrain and water simulation keeps its original resolution. Applies immediately.");
                     ImGui::Combo("Anti-aliasing / DLSS", &d.upscaler,
-                                 "Original do jogo\0" "NVIDIA DLAA\0" "DLSS Qualidade\0" "DLSS Equilibrado\0" "DLSS Desempenho\0" "DLSS Ultra desempenho\0");
+                                 "Game default\0" "NVIDIA DLAA\0" "DLSS Quality\0" "DLSS Balanced\0" "DLSS Performance\0" "DLSS Ultra Performance\0");
                     ImGui::EndDisabled();
-                    Help("DLAA usa o DLSS da NVIDIA à resolução interna para suavizar arestas e estabilizar a imagem. "
-                         "Os modos DLSS desenham a cena abaixo da resolução interna (67%, 58%, 50% ou 33%) e reconstroem-na: "
-                         "com resolução interna 2× e DLSS Desempenho, a cena é desenhada a 1024×600 e mostrada a 2048×1200. "
-                         "Precisa de uma GPU NVIDIA RTX e do renderer nativo. Aplica-se de imediato.");
-                    if (!nativeBackend_) ImGui::TextDisabled("Disponível com o renderer nativo (Jogar-nativo.cmd).");
+                    Help("DLAA uses NVIDIA DLSS at the internal resolution to smooth edges and stabilise the image. "
+                         "The DLSS modes render the scene below the internal resolution (67%, 58%, 50% or 33%) and reconstruct it: "
+                         "with a 2× internal resolution and DLSS Performance, the scene is rendered at 1024×600 and shown at 2048×1200. "
+                         "Needs an NVIDIA RTX GPU and the native renderer. Applies immediately.");
+                    if (!nativeBackend_) ImGui::TextDisabled("Available with the native renderer (Jogar-nativo.cmd).");
 #ifdef FD_NATIVE_RENDERER
-                    else if (d.upscaler == 0) ImGui::TextDisabled("Desligado: imagem original do jogo.");
-                    else if (status.available == 0) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "DLSS indisponível: requer GPU NVIDIA RTX, driver recente e nvngx_dlss.dll.");
-                    else if (status.available < 0 || !status.sceneFound) ImGui::TextDisabled("Ativo quando houver uma cena 3D (menus e vídeos ficam iguais).");
-                    else ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "%s ativo  |  %u×%u → %u×%u  |  %llu frames  |  câmara %s",
+                    else if (d.upscaler == 0) ImGui::TextDisabled("Off: the game's own image.");
+                    else if (status.available == 0) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "DLSS unavailable: needs an NVIDIA RTX GPU, a recent driver and nvngx_dlss.dll.");
+                    else if (status.available < 0 || !status.sceneFound) ImGui::TextDisabled("Active once a 3D scene is shown (menus and videos are unchanged).");
+                    else ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "%s active  |  %u×%u → %u×%u  |  %llu frames  |  camera %s",
                                             gpu::native::UpscalerModeName(status.active), status.renderWidth, status.renderHeight,
                                             status.outputWidth, status.outputHeight, (unsigned long long)status.evaluatedFrames,
-                                            status.cameraFound ? "detetada" : "não detetada (sem vetores)");
+                                            status.cameraFound ? "found" : "not found (no motion vectors)");
 #endif
                 }
-                Section("FLUIDEZ");
+                Section("SMOOTHNESS");
                 {
                     ImGui::BeginDisabled(!nativeBackend_);
-                    ImGui::Checkbox("Física a ritmo fixo (experimental)", &d.decoupledSim);
+                    ImGui::Checkbox("Fixed-rate world simulation (experimental)", &d.decoupledSim);
                     ImGui::EndDisabled();
-                    Help("O jogo original faz avançar o mundo (água, terreno, pessoas) um passo por frame, por isso fica preso a 30 FPS. "
-                         "Com esta opção o mundo avança sempre 30 vezes por segundo e o resto do jogo (câmara, imagem) corre ao ritmo "
-                         "do 'Limite de FPS' (60, 120 ou sem limite; aplica ao reiniciar). A água e as pessoas continuam a 30 Hz. "
-                         "Aplica-se de imediato.");
+                    Help("The original game advances the world (water, terrain, people) one step per frame, so it is locked to 30 FPS. "
+                         "With this option the world always advances 30 times per second and the rest of the game (camera, image) runs at "
+                         "the 'Frame limit' (60, 120 or none; applies on restart). Water and people still update at 30 Hz. "
+                         "Applies immediately.");
                     if (nativeBackend_ && d.decoupledSim)
-                        ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "Mundo a 30 Hz  |  imagem até %s FPS",
+                        ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "World at 30 Hz  |  image up to %s FPS",
                             d.frameLimit ? std::to_string((std::min)(d.frameLimit, 120)).c_str() : "120");
-                    else if (!nativeBackend_) ImGui::TextDisabled("Disponível com o renderer nativo.");
+                    else if (!nativeBackend_) ImGui::TextDisabled("Available with the native renderer.");
                 }
-                Section("GERAÇÃO DE FRAMES");
+                Section("FRAME GENERATION");
                 {
                     ImGui::BeginDisabled(!nativeBackend_);
                     ImGui::Combo("DLSS Frame Generation", &d.frameGeneration,
-                                 "Desligada\0" "2× (DLSS FG)\0" "3× (DLSS Multi Frame)\0" "4× (DLSS Multi Frame)\0");
+                                 "Off\0" "2× (DLSS FG)\0" "3× (DLSS Multi Frame)\0" "4× (DLSS Multi Frame)\0");
                     ImGui::EndDisabled();
-                    Help("O jogo corre a 30 FPS; a geração de frames da NVIDIA cria 1 a 3 imagens intermédias entre cada "
-                         "frame real, para 60, 90 ou 120 FPS no ecrã. A latência mantém-se a dos 30 FPS. "
-                         "2× precisa de uma RTX 40 ou mais recente; 3× e 4× de uma RTX 50. Desliga-se sozinha com este menu aberto. "
-                         "Ligar ou desligar aplica ao reiniciar; o multiplicador muda de imediato.");
+                    Help("NVIDIA frame generation adds 1 to 3 generated images between real frames "
+                         "(2×, 3× or 4× the game's frame rate on screen). Latency stays that of the real frames. "
+                         "2× needs an RTX 40 or newer; 3× and 4× an RTX 50. It pauses while this menu is open. "
+                         "Turning it on or off applies on restart; the multiplier changes immediately.");
 #ifdef FD_NATIVE_RENDERER
                     if (nativeBackend_) {
                         const auto fgs = gpu::native::fg::GetStatus();
                         if (!gpu::native::fg::Loaded()) {
                             if (d.frameGeneration > 0) ImGui::TextColored(ImVec4(1, .8f, .4f, 1), "%s",
-                                fgs.reason[0] ? fgs.reason : "Reinicia o jogo para ativar.");
-                            else ImGui::TextDisabled("Desligada.");
-                        } else if (fgs.available == 0) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Indisponível: %s", fgs.reason);
-                        else if (d.frameGeneration == 0) ImGui::TextDisabled("Desligada (reinicia para descarregar o Streamline).");
+                                fgs.reason[0] ? fgs.reason : "Restart the game to enable it.");
+                            else ImGui::TextDisabled("Off.");
+                        } else if (fgs.available == 0) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Unavailable: %s", fgs.reason);
+                        else if (d.frameGeneration == 0) ImGui::TextDisabled("Off (restart to unload Streamline).");
                         else if (fgs.maxFrames && d.frameGeneration > fgs.maxFrames)
-                            ImGui::TextColored(ImVec4(1, .8f, .4f, 1), "Esta GPU gera no máximo %d frame(s): %d×.", fgs.maxFrames, fgs.maxFrames + 1);
-                        else if (fgs.taggedFrames) ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "Ativa no jogo (%d×)  |  %llu frames  |  em pausa com este menu aberto",
+                            ImGui::TextColored(ImVec4(1, .8f, .4f, 1), "This GPU generates at most %d frame(s): %d×.", fgs.maxFrames, fgs.maxFrames + 1);
+                        else if (fgs.taggedFrames) ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "Active in game (%d×)  |  %llu frames  |  paused while this menu is open",
                                                                       (std::min)(d.frameGeneration, fgs.maxFrames ? fgs.maxFrames : 3) + 1, (unsigned long long)fgs.taggedFrames);
-                        else ImGui::TextDisabled("À espera de uma cena 3D (menus e vídeos ficam a 30 FPS).");
+                        else ImGui::TextDisabled("Waiting for a 3D scene (menus and videos stay at the game's rate).");
                     }
 #endif
                 }
-                Section("RENDERIZAÇÃO (APLICA AO REINICIAR)");
+                Section("RENDERING (APPLIES ON RESTART)");
                 if (!nativeBackend_) {
                     int scale = d.scale - 1;
-                    if (ImGui::Combo("Resolução interna (Xenia)", &scale, "Nativa (1×)\0Alta (2×)\0Muito alta (3×)\0")) d.scale = scale + 1;
-                    ImGui::TextDisabled("2× e 3× aumentam o detalhe e o trabalho da GPU.");
+                    if (ImGui::Combo("Internal resolution (Xenia)", &scale, "Native (1×)\0High (2×)\0Very high (3×)\0")) d.scale = scale + 1;
+                    ImGui::TextDisabled("2× and 3× add detail and GPU work.");
                 }
-                ImGui::Checkbox("Sincronização vertical (VSync)", &d.vsync);
-                Help("Sincroniza com o monitor e evita cortes na imagem. O jogo foi feito para 30 FPS; a física da água depende do ritmo dos frames.");
+                ImGui::Checkbox("Vertical sync (VSync)", &d.vsync);
+                Help("Syncs with the monitor and avoids tearing.");
                 constexpr int limits[] = {30, 60, 120, 0};
                 int limit = int(std::find(std::begin(limits), std::end(limits), d.frameLimit) - std::begin(limits));
-                if (ImGui::Combo("Limite de FPS", &limit, "30\0 60\0 120\0Sem limite\0")) d.frameLimit = limits[limit];
-                ImGui::TextDisabled("Com VSync, 'Sem limite' segue a frequência do monitor.");
+                if (ImGui::Combo("Frame limit", &limit, "30\0 60\0 120\0None\0")) d.frameLimit = limits[limit];
+                ImGui::TextDisabled("With VSync, 'None' follows the monitor's refresh rate.");
                 constexpr int filters[] = {-1, 2, 3, 4, 5};
                 int filter = nativeBackend_ ? 0 : int(std::find(std::begin(filters), std::end(filters), d.anisotropy) - std::begin(filters));
                 ImGui::BeginDisabled(nativeBackend_);
-                if (ImGui::Combo("Filtragem de texturas", &filter, "Original do jogo\0Anisotrópica 2×\0Anisotrópica 4×\0Anisotrópica 8×\0Anisotrópica 16×\0")) d.anisotropy = filters[filter];
+                if (ImGui::Combo("Texture filtering", &filter, "Game default\0Anisotropic 2×\0Anisotropic 4×\0Anisotropic 8×\0Anisotropic 16×\0")) d.anisotropy = filters[filter];
                 ImGui::EndDisabled();
-                if(nativeBackend_)ImGui::TextDisabled("Nesta versão do renderer nativo, é usada a filtragem do jogo.");
+                if(nativeBackend_)ImGui::TextDisabled("The native renderer uses the game's own filtering.");
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Controlos",nullptr,selectTab_=="controls"?ImGuiTabItemFlags_SetSelected:0)) {
+            if (ImGui::BeginTabItem("Controls",nullptr,selectTab_=="controls"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("controls_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
-                ImGui::Combo("Dispositivo", &d.inputMode, "Automático\0Teclado e rato\0Comando XInput\0");
-                Help("Automático aceita teclado, rato e comando ao mesmo tempo.");
-                Section("RATO (ESTILO PC)");
-                ImGui::Checkbox("Mover o Breath com o rato", &d.mouseBreath);
-                Help("O cursor fica escondido e o movimento do rato guia o Breath pelo terreno. F1 ou Esc mostram o cursor.");
+                ImGui::Combo("Device", &d.inputMode, "Automatic\0Keyboard and mouse\0XInput controller\0");
+                Help("Automatic accepts keyboard, mouse and controller together; on-screen prompts follow the last device used.");
+                Section("MOUSE");
+                ImGui::Checkbox("Move the Breath with the mouse", &d.mouseBreath);
+                Help("The cursor is hidden and mouse movement guides the Breath over the terrain. F1 shows the cursor.");
                 ImGui::BeginDisabled(!d.mouseBreath);
-                ImGui::SliderInt("Velocidade do Breath", &d.mouseSpeed, 25, 300, "%d %%");
+                ImGui::SliderInt("Breath speed", &d.mouseSpeed, 25, 300, "%d %%");
                 ImGui::EndDisabled();
-                ImGui::Checkbox("Botão esquerdo aspira, direito larga", &d.mouseButtons);
-                Help("Esquerdo = LT (aspirar matéria), direito = RT (largar). Mantém premido como nos gatilhos.");
-                ImGui::Combo("Rodar a câmara", &d.cameraButton, "Desligado\0Arrastar com o botão direito\0Arrastar com o botão do meio\0");
-                Help("Mantém o botão premido e move o rato para rodar a câmara.");
-                ImGui::Combo("Roda do rato", &d.wheelZoom, "Desligada\0Zoom\0Zoom invertido\0");
-                Section("CÂMARA E COMANDO");
-                ImGui::SliderInt("Sensibilidade da câmara", &d.sensitivity, 25, 300, "%d %%");
-                ImGui::Checkbox("Inverter eixo vertical da câmara", &d.invertY);
-                ImGui::SliderInt("Zona morta dos analógicos", &d.deadzone, 0, 30, "%d %%");
-                ImGui::Checkbox("Vibração do comando", &d.vibration);
-                Section("TECLADO");
-                ImGui::TextDisabled("Clica numa tecla para a alterar. Esc cancela a atribuição.");
-                if (capture_ >= 0) ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "Prime uma tecla para: %s", settings::kActionNames[capture_]);
+                ImGui::Checkbox("Left button absorbs, right button releases", &d.mouseButtons);
+                Help("Left = LT (absorb matter), right = RT (release). Hold them like the triggers.");
+                ImGui::Combo("Rotate camera", &d.cameraButton, "Off\0Drag with the right button\0Drag with the middle button\0");
+                Help("Hold the button and move the mouse to rotate the camera.");
+                ImGui::Combo("Mouse wheel", &d.wheelZoom, "Off\0Zoom\0Inverted zoom\0");
+                Section("CAMERA AND CONTROLLER");
+                ImGui::SliderInt("Camera sensitivity", &d.sensitivity, 25, 300, "%d %%");
+                ImGui::Checkbox("Invert camera Y axis", &d.invertY);
+                ImGui::SliderInt("Stick dead zone", &d.deadzone, 0, 30, "%d %%");
+                ImGui::Checkbox("Controller vibration", &d.vibration);
+                Section("KEYBOARD");
+                ImGui::TextDisabled("Click a key to change it. Esc cancels.");
+                if (capture_ >= 0) ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "Press a key for: %s", settings::kActionNames[capture_]);
                 if (ImGui::BeginTable("bindings", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
-                    ImGui::TableSetupColumn("Ação", ImGuiTableColumnFlags_WidthStretch, 2.0f);
-                    ImGui::TableSetupColumn("Tecla", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                    ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+                    ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthStretch, 1.0f);
                     for (int i = 0; i < settings::ActionCount; ++i) {
                         ImGui::PushID(i);
                         ImGui::TableNextRow(); ImGui::TableNextColumn();
                         ImGui::TextUnformatted(settings::kActionNames[i]);
                         ImGui::TableNextColumn();
-                        const auto text = capture_ == i ? std::string("A aguardar…") : settings::KeyName(d.keys[i]);
+                        const auto text = capture_ == i ? std::string("Waiting…") : settings::KeyName(d.keys[i]);
                         if (ImGui::Button(text.c_str(), ImVec2(-1, 0))) capture_ = i;
                         ImGui::PopID();
                     }
@@ -411,46 +418,46 @@ private:
                 }
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Som",nullptr,selectTab_=="audio"?ImGuiTabItemFlags_SetSelected:0)) {
+            if (ImGui::BeginTabItem("Audio",nullptr,selectTab_=="audio"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("audio_options", ImVec2(0, -116*uiScale));
                 ImGui::Spacing();
                 ImGui::SliderInt("Volume", &d.volume, 0, 100, "%d %%");
-                ImGui::Checkbox("Silenciar quando a janela não está ativa", &d.muteUnfocused);
+                ImGui::Checkbox("Mute when the window is not active", &d.muteUnfocused);
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
-            if(ImGui::BeginTabItem("Renderer e estatísticas",nullptr,selectTab_=="renderer"?ImGuiTabItemFlags_SetSelected:0)) {
+            if(ImGui::BeginTabItem("Renderer and statistics",nullptr,selectTab_=="renderer"?ImGuiTabItemFlags_SetSelected:0)) {
                 ImGui::BeginChild("renderer_information",ImVec2(0,-116*uiScale));
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(.88f,.76f,.47f,1),"RENDERER ATIVO");
-                ImGui::TextUnformatted(nativeBackend_ ? "Nativo / Direct3D 12" : "Xenia / Direct3D 12");
-                ImGui::TextWrapped("GPU: %s",adapterName_.empty()?"Indisponível":adapterName_.c_str());
-                ImGui::Text("Janela: %u × %u px  |  Escala interna: %d×",g_window->GetActualPhysicalWidth(),g_window->GetActualPhysicalHeight(),nativeBackend_?1:startup_.scale);
-                ImGui::Text("VSync: %s  |  Limite: %s",startup_.vsync?"ligado":"desligado",startup_.frameLimit?std::to_string(startup_.frameLimit).c_str():"sem limite");
-                if(memoryAvailable_)ImGui::Text("Memória GPU local: %.0f / %.0f MiB (uso / orçamento)",memory_.CurrentUsage/1048576.0,memory_.Budget/1048576.0);
-                else ImGui::TextDisabled("Memória GPU local: indisponível");
+                ImGui::TextColored(ImVec4(.88f,.76f,.47f,1),"ACTIVE RENDERER");
+                ImGui::TextUnformatted(nativeBackend_ ? "Native / Direct3D 12" : "Xenia / Direct3D 12");
+                ImGui::TextWrapped("GPU: %s",adapterName_.empty()?"Unavailable":adapterName_.c_str());
+                ImGui::Text("Window: %u × %u px  |  Internal scale: %d×",g_window->GetActualPhysicalWidth(),g_window->GetActualPhysicalHeight(),nativeBackend_?1:startup_.scale);
+                ImGui::Text("VSync: %s  |  Limit: %s",startup_.vsync?"on":"off",startup_.frameLimit?std::to_string(startup_.frameLimit).c_str():"none");
+                if(memoryAvailable_)ImGui::Text("Local GPU memory: %.0f / %.0f MiB (usage / budget)",memory_.CurrentUsage/1048576.0,memory_.Budget/1048576.0);
+                else ImGui::TextDisabled("Local GPU memory: unavailable");
                 ImGui::Spacing();ImGui::Separator();ImGui::Spacing();
-                ImGui::TextUnformatted("DESEMPENHO");
+                ImGui::TextUnformatted("PERFORMANCE");
                 if(timing_.count) {
-                    ImGui::Text("%.1f FPS  |  Média %.2f ms  |  P95 %.2f ms",timing_.fps,timing_.meanMs,timing_.p95Ms);
-                    ImGui::Text("Maior intervalo: %.2f ms  |  Pedidos de desenho/frame: %.0f",timing_.maxMs,timing_.drawsPerFrame);
-                    ImGui::PlotLines("##frame_intervals",timing_.milliseconds.data(),int(timing_.count),0,"Intervalos entre frames (ms)",0,(std::max)(40.0f,float(timing_.maxMs)*1.1f),ImVec2(-1,90*uiScale));
-                } else ImGui::TextDisabled("A recolher tempos entre frames…");
-                ImGui::TextDisabled("Até 240 frames do jogo; estes valores não medem o tempo de execução da GPU.");
-                ImGui::Text("Frames processados: %llu  |  Pedidos de desenho: %llu",gpu::g_stats.frames.load(),gpu::g_stats.draws.load());
-                if(ImGui::Button("Limpar histórico")){gpu::FrameTimings().Reset();timing_={};}
+                    ImGui::Text("%.1f FPS  |  Mean %.2f ms  |  P95 %.2f ms",timing_.fps,timing_.meanMs,timing_.p95Ms);
+                    ImGui::Text("Longest interval: %.2f ms  |  Draw calls/frame: %.0f",timing_.maxMs,timing_.drawsPerFrame);
+                    ImGui::PlotLines("##frame_intervals",timing_.milliseconds.data(),int(timing_.count),0,"Frame intervals (ms)",0,(std::max)(40.0f,float(timing_.maxMs)*1.1f),ImVec2(-1,90*uiScale));
+                } else ImGui::TextDisabled("Collecting frame intervals…");
+                ImGui::TextDisabled("Up to 240 game frames; these values do not measure GPU execution time.");
+                ImGui::Text("Frames processed: %llu  |  Draw calls: %llu",gpu::g_stats.frames.load(),gpu::g_stats.draws.load());
+                if(ImGui::Button("Clear history")){gpu::FrameTimings().Reset();timing_={};}
                 ImGui::Spacing();ImGui::Separator();ImGui::Spacing();
-                ImGui::TextUnformatted("INTEGRAÇÃO NATIVA");
+                ImGui::TextUnformatted("NATIVE INTEGRATION");
 #ifdef FD_NATIVE_RENDERER
-                ImGui::TextWrapped(nativeBackend_ ? "Esta sessão usa o renderer nativo, em integração." : "O renderer nativo está disponível para testes. Esta sessão usa Xenia.");
+                ImGui::TextWrapped(nativeBackend_ ? "This session uses the native renderer." : "The native renderer is available for testing. This session uses Xenia.");
 #else
-                ImGui::TextWrapped("O motor nativo não está incluído nesta compilação.");
+                ImGui::TextWrapped("The native renderer is not included in this build.");
 #endif
                 if(native_.enabled) {
-                    ImGui::Text("Shaders no catálogo: %llu  |  Inicializações reconhecidas: %llu / %llu",native_.catalogShaders,native_.matchedShaders,native_.shaderInitializations);
-                    ImGui::Text("Desenhos sem shader identificado: %llu",native_.unresolvedDraws);
-                    if(native_.captureEnabled)ImGui::Text("Captura: %s  |  Geometria %llu  |  Limpezas %llu  |  Cópias %llu",native_.captureComplete?"concluída":"a aguardar / em curso",native_.geometryPackets,native_.clearPackets,native_.resolvePackets);
-                    if(native_.captureFailures)ImGui::TextColored(ImVec4(1,.5f,.4f,1),"Falhas na captura: %llu",native_.captureFailures);
-                } else ImGui::TextDisabled("Auditoria nativa: desligada nesta sessão.");
+                    ImGui::Text("Catalog shaders: %llu  |  Recognised initializations: %llu / %llu",native_.catalogShaders,native_.matchedShaders,native_.shaderInitializations);
+                    ImGui::Text("Draws without an identified shader: %llu",native_.unresolvedDraws);
+                    if(native_.captureEnabled)ImGui::Text("Capture: %s  |  Geometry %llu  |  Clears %llu  |  Resolves %llu",native_.captureComplete?"complete":"waiting / running",native_.geometryPackets,native_.clearPackets,native_.resolvePackets);
+                    if(native_.captureFailures)ImGui::TextColored(ImVec4(1,.5f,.4f,1),"Capture failures: %llu",native_.captureFailures);
+                } else ImGui::TextDisabled("Native audit: off in this session.");
                 ImGui::EndChild();ImGui::EndTabItem();
             }
             selectTab_.clear();
@@ -459,20 +466,20 @@ private:
         if (d != before) Changed(d);
         ImGui::Separator(); ImGui::Spacing();
         const bool restart = settings::GraphicsChanged(startup_, d);
-        if (saveFailed_) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Não foi possível guardar as definições.");
-        else if (restartFailed_) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Não foi possível reiniciar. Fecha e volta a abrir o jogo.");
-        else if (restart) ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "Gráficos guardados — reinicia para aplicar.");
-        else ImGui::TextDisabled("Guardado automaticamente.");
-        if (ImGui::Button("Repor predefinições")) { capture_ = -1; Changed(settings::Data{}); }
+        if (saveFailed_) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Could not save the settings.");
+        else if (restartFailed_) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Could not restart. Close and reopen the game.");
+        else if (restart) ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "Graphics saved; restart to apply.");
+        else ImGui::TextDisabled("Saved automatically.");
+        if (ImGui::Button("Restore defaults")) { capture_ = -1; Changed(settings::Data{}); }
         ImGui::SameLine();
-        if (restart && ImGui::Button("Reiniciar o jogo")) {
+        if (restart && ImGui::Button("Restart game")) {
             saveFailed_ = !settings::Save();
             if (!saveFailed_) g_context->CallInUIThreadDeferred([this] { restartFailed_ = !Restart(); });
         }
         if (restart) ImGui::SameLine();
-        if (ImGui::Button("Fechar")) Toggle();
+        if (ImGui::Button("Close")) Toggle();
         ImGui::SameLine();
-        ImGui::TextDisabled("F1 menu  ·  F11 ecrã inteiro  ·  Esc fechar");
+        ImGui::TextDisabled("F1 menu  ·  F11 fullscreen  ·  Esc close");
         ImGui::End();
     }
 };

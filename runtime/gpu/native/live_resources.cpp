@@ -3,6 +3,7 @@
 #include "../../kernel/kernel.h"
 #include "live_resources.h"
 #include "../xenia_bridge.h"
+#include "../../input.h"
 #include <algorithm>
 #include <stdexcept>
 
@@ -43,7 +44,11 @@ void LiveResources::Bind(Draw& draw,const ShaderCatalog& shaders)
         const uint64_t serial=xenia::PhysicalWriteSerial();
         if(cached.checkedSerial!=serial){cached.checkedRevision=Revision(cached.storage);cached.checkedSerial=serial;}
         uint64_t revision=cached.checkedRevision;
-        if(!cached.resource||revision!=cached.revision)
+        // The prompt atlas is decoded again when the prompt style changes
+        // (keyboard / controller glyphs, rebound keys).
+        const int promptGeneration=cached.resource?ResolvedGeneration(*cached.resource):-1;
+        const bool promptStale=promptGeneration>=0&&uint32_t(promptGeneration)!=(pcinput::PromptGeneration()&0x7FFFFFFF);
+        if(!cached.resource||revision!=cached.revision||promptStale)
         {
             ++profileCaptured;profileCaptureBytes+=cached.storage.baseBytes+cached.storage.mipBytes;
             const auto captureStart=std::chrono::steady_clock::now();

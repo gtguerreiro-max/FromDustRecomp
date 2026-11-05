@@ -1295,3 +1295,24 @@ Follow-up the same day: 67-78 FPS (average 72) in the same session.
   instead of value-initialized and then overwritten.
 - Capture per frame: begin 0.59 ms, geometry 2.15 ms (was 3.2-4.4), commit
   1.37 ms, other 0.82 ms.
+
+## Keyboard / mouse prompts — 2026-11-05
+
+From Dust draws its controller glyphs from two 1024x1024 UI atlases: the
+front end's (menus: A, B, X, LT, RT, LB, RB, Back, stick) and the in-game HUD's
+(tutorials and tool tips: also Y and Start). Both are stored upside down.
+`runtime/gpu/native/prompt_glyphs.cpp` recognises each atlas by a 16x16 sample
+inside its A glyph and, when the keyboard or mouse was the last device used
+(or the input mode is "Keyboard and mouse"), draws keycaps with the current
+bindings and mouse icons (LT = left button, RT = right button, stick = mouse
+movement) over those glyphs. Wide keys use keycap symbols (␣ ⌫ ↵ ⇥ ⇧),
+rendered with GDI so they stay readable at the size the game draws prompts.
+The hook runs after the deferred decode on the render worker
+(`SetTextureResolveHook`); `LiveResources` decodes the atlas again when
+`pcinput::PromptGeneration()` changes (device switch or rebinding), so the
+prompts follow the controller and the keyboard live. The atlas mip chain is
+dropped when patched.
+
+The F1 menu and key names are now in English, and the permanent "Settings
+[F1]" button is gone: a hint shows for the first 15 seconds, afterwards only
+the FPS / frame-time counters when enabled.

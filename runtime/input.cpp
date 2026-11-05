@@ -62,6 +62,17 @@ std::array<std::atomic<ULONGLONG>, 4> g_emptyUntil{};
 struct ScriptedPress { Gamepad pad; ULONGLONG from, until; };
 std::mutex g_scriptMutex;
 std::vector<ScriptedPress> g_script;
+std::atomic<bool> g_lastKeyboard{true};
+std::atomic<uint32_t> g_promptGeneration{1};
+uint64_t g_promptSignature = 0;
+void UpdatePrompts(const settings::Data& d) {
+    const bool keyboard = d.inputMode == 1 || (d.inputMode == 0 && g_lastKeyboard.load());
+    uint64_t signature = 1469598103934665603ull;
+    auto mix = [&](uint64_t value) { signature = (signature ^ value) * 1099511628211ull; };
+    mix(keyboard); mix(d.mouseButtons); mix(d.cameraButton); mix(d.mouseBreath);
+    for (auto key : d.keys) mix(key);
+    if (signature != g_promptSignature) { g_promptSignature = signature; ++g_promptGeneration; }
+}
 DWORD CachedXInputGetState(DWORD user, XINPUT_STATE* state) {
     if (GetTickCount64() < g_emptyUntil[user].load()) return ERROR_DEVICE_NOT_CONNECTED;
     const DWORD result = XInputGetState(user, state);
@@ -137,12 +148,16 @@ uint32_t GetState(uint32_t user, State& state) {
             state.pad = {p.wButtons, p.bLeftTrigger, p.bRightTrigger, p.sThumbLX, p.sThumbLY, p.sThumbRX, p.sThumbRY};
             Deadzone(state.pad.leftX, state.pad.leftY, d.deadzone);
             Deadzone(state.pad.rightX, state.pad.rightY, d.deadzone);
+            // A pressed button, a pulled trigger or a moved stick makes the controller the prompt device.
+            if (state.pad.buttons || state.pad.leftTrigger > 40 || state.pad.rightTrigger > 40 ||
+                state.pad.leftX || state.pad.leftY || state.pad.rightX || state.pad.rightY) g_lastKeyboard = false;
         }
         if (keyboard) {
             std::array<bool, 256> keys{};
             for (size_t i = 0; i < keys.size(); ++i) {
                 const bool latched = g_pressed[i].exchange(false);
                 keys[i] = g_down[i].load() || latched;
+                if (keys[i]) g_lastKeyboard = true;
             }
             const auto mapped = MapKeyboard(d, keys);
             state.pad.buttons |= mapped.buttons;
@@ -166,6 +181,7 @@ uint32_t GetState(uint32_t user, State& state) {
                 // A jump of more than a third of the screen in one poll is the
                 // cursor being clipped / warped, not a hand movement.
                 if (std::abs(dx) > 600 || std::abs(dy) > 400) dx = dy = 0;
+                if (std::abs(dx) >= 3 || std::abs(dy) >= 3) g_lastKeyboard = true;
                 if (turning) {
                     state.pad.rightX = Axis(state.pad.rightX + dx * 40000.0f / elapsed);
                     state.pad.rightY = Axis(state.pad.rightY - dy * 40000.0f / elapsed);
@@ -204,7 +220,7 @@ uint32_t GetState(uint32_t user, State& state) {
                 }
             }
             if (d.mouseButtons) {
-                if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) state.pad.leftTrigger = 255;
+                if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) { state.pad.leftTrigger = 255; g_lastKeyboard = true; }
                 if (cameraKey != VK_RBUTTON && (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) state.pad.rightTrigger = 255;
             }
             // Each wheel notch holds the camera's vertical axis (zoom) briefly.
@@ -229,6 +245,7 @@ uint32_t GetState(uint32_t user, State& state) {
         g_wheel = 0;
         if (g_captured) Capture(g_window.load(), false);
     }
+    if (user == 0) UpdatePrompts(d);
     // Scripted presses for unattended diagnostic runs (see SchedulePad).
     if (user == 0) {
         std::lock_guard scriptLock(g_scriptMutex);
@@ -247,6 +264,11 @@ uint32_t GetState(uint32_t user, State& state) {
     previous = state;
     return ERROR_SUCCESS;
 }
+bool KeyboardPrompts() {
+    const int mode = settings::Get().inputMode;
+    return mode == 1 || (mode == 0 && g_lastKeyboard.load());
+}
+uint32_t PromptGeneration() { return g_promptGeneration.load(); }
 void SchedulePad(const Gamepad& pad, uint32_t delayMs, uint32_t durationMs) {
     const ULONGLONG from = GetTickCount64() + delayMs;
     std::lock_guard lock(g_scriptMutex);

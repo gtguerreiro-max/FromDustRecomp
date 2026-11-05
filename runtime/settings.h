@@ -15,11 +15,11 @@ inline constexpr std::array<uint16_t, ActionCount> kDefaultKeys = {
     'W', 'S', 'A', 'D', 'I', 'K', 'J', 'L', 0x26, 0x28, 0x25, 0x27
 };
 inline constexpr const char* kActionNames[] = {
-    "Start / pausa", "Voltar / seleção", "A / confirmar", "B / cancelar", "X", "Y",
-    "LB", "RB", "LT", "RT", "Mover para a frente", "Mover para trás",
-    "Mover para a esquerda", "Mover para a direita", "Câmara: cima", "Câmara: baixo",
-    "Câmara: esquerda", "Câmara: direita", "Direcional: cima", "Direcional: baixo",
-    "Direcional: esquerda", "Direcional: direita"
+    "Start / pause", "Back / select", "A / confirm", "B / cancel", "X", "Y",
+    "LB", "RB", "LT", "RT", "Move forward", "Move back",
+    "Move left", "Move right", "Camera up", "Camera down",
+    "Camera left", "Camera right", "D-pad up", "D-pad down",
+    "D-pad left", "D-pad right"
 };
 inline constexpr int kWindowWidths[] = {1280, 1600, 1920, 2560, 3840};
 inline constexpr int kWindowHeights[] = {720, 900, 1080, 1440, 2160};

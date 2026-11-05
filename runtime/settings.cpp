@@ -143,19 +143,34 @@ bool GraphicsChanged(const Data& a, const Data& b) {
 std::string KeyName(uint16_t key) {
     switch (key) {
     case VK_RETURN: return "Enter";
-    case VK_SPACE: return "Espaço";
+    case VK_SPACE: return "Space";
     case VK_BACK: return "Backspace";
     case VK_TAB: return "Tab";
-    case VK_UP: return "Cima";
-    case VK_DOWN: return "Baixo";
-    case VK_LEFT: return "Esquerda";
-    case VK_RIGHT: return "Direita";
+    case VK_UP: return "Up";
+    case VK_DOWN: return "Down";
+    case VK_LEFT: return "Left";
+    case VK_RIGHT: return "Right";
+    case VK_SHIFT: case VK_LSHIFT: return "Shift";
+    case VK_RSHIFT: return "Right Shift";
+    case VK_CONTROL: case VK_LCONTROL: return "Ctrl";
+    case VK_RCONTROL: return "Right Ctrl";
+    case VK_MENU: case VK_LMENU: return "Alt";
+    case VK_RMENU: return "Right Alt";
+    case VK_CAPITAL: return "Caps Lock";
+    case VK_DELETE: return "Delete";
+    case VK_INSERT: return "Insert";
+    case VK_HOME: return "Home";
+    case VK_END: return "End";
+    case VK_PRIOR: return "Page Up";
+    case VK_NEXT: return "Page Down";
     }
+    if (key >= VK_F1 && key <= VK_F24) return "F" + std::to_string(key - VK_F1 + 1);
+    if (key >= VK_NUMPAD0 && key <= VK_NUMPAD9) return "Num " + std::to_string(key - VK_NUMPAD0);
     if ((key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9')) return std::string(1, char(key));
     wchar_t buffer[128]{};
     const UINT scan = MapVirtualKeyW(key, MAPVK_VK_TO_VSC_EX);
     const LONG flags = LONG((scan & 0xFF) << 16) | ((scan & 0xFF00) ? (1 << 24) : 0);
-    if (!GetKeyNameTextW(flags, buffer, 128)) return "Tecla " + std::to_string(key);
+    if (!GetKeyNameTextW(flags, buffer, 128)) return "Key " + std::to_string(key);
     char utf8[512]{};
     WideCharToMultiByte(CP_UTF8, 0, buffer, -1, utf8, sizeof(utf8), nullptr, nullptr);
     return utf8;

@@ -24,4 +24,9 @@ uint32_t SetVibration(uint32_t user, uint16_t left, uint16_t right);
 // Holds `pad` (buttons, triggers, sticks) on pad 0 for `durationMs` after
 // `delayMs` (diagnostic runs).
 void SchedulePad(const Gamepad& pad, uint32_t delayMs, uint32_t durationMs);
+// On-screen prompts: keyboard / mouse glyphs while the keyboard or mouse was
+// the last device used (or always / never, per the input mode setting).
+bool KeyboardPrompts();
+// Changes whenever the prompt style or a binding shown in prompts changes.
+uint32_t PromptGeneration();
 }

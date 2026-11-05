@@ -62,12 +62,19 @@ struct TextureDeferred
 {
     TextureSnapshot snapshot;
     std::once_flag once;
+    std::atomic<int> generation{-1};
 };
+namespace{std::atomic<int(*)(TextureResource&)> g_resolveHook{nullptr};}
+void SetTextureResolveHook(int (*hook)(TextureResource&)){g_resolveHook=hook;}
+int ResolvedGeneration(const TextureResource& entry){return entry.deferred?entry.deferred->generation.load(std::memory_order_acquire):-1;}
 void ResolveTexture(TextureResource& entry)
 {
     if(!entry.deferred)return;
     auto& deferred=*entry.deferred;
-    std::call_once(deferred.once,[&]{DecodeSnapshot(entry,deferred.snapshot);deferred.snapshot.base={};deferred.snapshot.mips={};});
+    std::call_once(deferred.once,[&]{
+        DecodeSnapshot(entry,deferred.snapshot);deferred.snapshot.base={};deferred.snapshot.mips={};
+        if(auto hook=g_resolveHook.load())deferred.generation.store(hook(entry),std::memory_order_release);
+    });
 }
 std::shared_ptr<TextureTables::Entry> TextureTables::CaptureResource(std::span<const uint32_t,6> fetch,const TextureMemoryReader& read)
 {

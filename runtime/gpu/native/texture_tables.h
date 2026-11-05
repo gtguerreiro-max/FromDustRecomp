@@ -15,6 +15,11 @@ struct PackedTextures
 // returns another index, preserving resources already referenced by draws.
 // Decodes a deferred capture once (thread-safe); no-op otherwise.
 void ResolveTexture(TextureResource& entry);
+// Live runtime: called after each deferred decode; returns -1, or a
+// generation the resource must be decoded again for once it changes.
+void SetTextureResolveHook(int (*hook)(TextureResource&));
+// The hook's result for a decoded deferred resource (-1: none / not yet).
+int ResolvedGeneration(const TextureResource& entry);
 class TextureTables
 {
 public:
