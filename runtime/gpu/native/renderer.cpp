@@ -335,7 +335,9 @@ struct Surface
 // A render target configuration of the frame (EDRAM color/depth bases + pitch).
 struct Target
 {
-    uint32_t width = 0, height = 0, count = 1, draws = 0;
+    uint32_t width = 0, height = 0, count = 1, draws = 0; // host size
+    uint32_t guestWidth = 0, guestHeight = 0;             // guest (EDRAM) size
+    double scale = 1;                                     // host / guest (internal resolution)
     bool hadContents=false;
     uint64_t lastWrite=0;
     std::shared_ptr<Surface> rt[4];
@@ -345,7 +347,7 @@ struct Target
 };
 
 using SurfaceKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>;
-using TargetKey = std::tuple<uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t>;
+using TargetKey = std::tuple<uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t>; // ..., scale * 1000
 using DepthKey = std::tuple<uint32_t,uint32_t,uint32_t,uint32_t,uint32_t>;
 using ColorKey = std::tuple<uint32_t,uint32_t,uint32_t,uint32_t>;
 struct Snapshot
@@ -500,6 +502,9 @@ struct gpu::native::Renderer::Impl
     {
         Upscaler ngx;
         std::unique_ptr<RenderTexture> motion, depth, output;
+        Surface upscaled;                 // DLSS Super Resolution output (replaces the scene copy)
+        uint32_t outWidth = 0, outHeight = 0;
+        double lastRenderScale = 1, lastOutputScale = 1;
         std::unique_ptr<RenderFramebuffer> framebuffer;
         std::unique_ptr<RenderShader> vs, ps;
         std::unique_ptr<RenderPipeline> pipeline;
@@ -1052,6 +1057,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     for(auto& [base,snapshot]:snapshots)bindSurface(snapshot->surface);
     for(auto& [base,snapshot]:depthSnapshots)bindSurface(snapshot->surface);
     for(auto& [base,packed]:storage.packed)bindSurface(packed->surface);
+    if(upscale.upscaled.texture)bindSurface(upscale.upscaled);
     std::map<uint32_t, const Draw*> pendingResolves; // destination -> its first resolve in the frame
     using ClearKey = std::pair<uint32_t, uint32_t>; // surface info, colour/depth info
     std::map<ClearKey, const Draw*> colorClears, depthClears;
@@ -1119,16 +1125,25 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     // DLSS Frame Generation needs the same depth / motion vectors (no jitter).
     const bool frameGen=frame.continuous&&shaderCatalog&&fg::WantsInputs();
     if(frame.continuous)fg::BeginFrame();
+    // Internal resolution: screen-size targets (the front buffer's size) are
+    // rendered at outputScale; with DLSS Super Resolution the scene before its
+    // copy renders at renderScale and DLSS brings it to outputScale.
+    // Replays stay at 1x unless FD_NATIVE_SCALE asks otherwise (diagnostics).
+    static const bool forcedScale=getenv("FD_NATIVE_SCALE")!=nullptr;
+    const double outputScale=(frame.continuous||forcedScale)&&shaderCatalog?ConfiguredRenderScale(RenderScaleSetting()):1.0;
+    const bool superResolution=upscaleMode!=UpscalerMode::Off&&upscaleMode!=UpscalerMode::Dlaa&&
+        !(upscale.ngx.Tried()&&!upscale.ngx.Available());
+    uint32_t fbW=0,fbH=0;
     size_t sceneResolve=SIZE_MAX;
     std::vector<uint8_t> jitterDraw;
     float jitterX=0,jitterY=0,sceneVP[16]{},sceneViewport[4]{},sceneDepth[2]{};
     bool sceneCamera=false;
-    if(upscaleMode!=UpscalerMode::Off||frameGen)
+    if(upscaleMode!=UpscalerMode::Off||frameGen||outputScale!=1.0)
     {
-        uint32_t maxW=0,maxH=0;
+        uint32_t& maxW=fbW;uint32_t& maxH=fbH;
         // Scene size = the copy to the front buffer (the game's output size).
         for(const Draw& d:draws)
-            if(d.resolve&&(d.copyControl&7)<4&&frame.frontBufferBase&&d.copyDest==frame.frontBufferBase){maxW=d.copyWidth;maxH=d.copyHeight;}
+            if(d.resolve&&(d.copyControl&7)<4&&(frame.frontBufferBase?d.copyDest==frame.frontBufferBase:!d.copyX&&!d.copyY&&!d.copyMip)){maxW=d.copyWidth;maxH=d.copyHeight;}
         for(size_t i=0;i<draws.size();++i)
         {
             const Draw& r=draws[i];
@@ -1177,23 +1192,59 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             }
         }
     }
+    const double renderScale=superResolution&&sceneResolve!=SIZE_MAX?outputScale*UpscalerRenderScale(upscaleMode):outputScale;
+    auto drawScale=[&](size_t index,uint32_t width,uint32_t height){
+        // Screen targets: the front buffer's size, or its width with a slightly
+        // shorter letterbox (videos draw 1024x588 and copy 1024x600).
+        if(!fbW||width!=fbW||height>fbH||height*10<fbH*9)return 1.0;
+        return sceneResolve!=SIZE_MAX&&index>sceneResolve?outputScale:renderScale;
+    };
+    auto scaledSize=[](uint32_t value,double scale){return scale==1.0?value:(std::max)(1u,uint32_t(std::lround(value*scale)));};
+    auto scaledRects=[](const Draw& c,double scale){
+        std::vector<RenderRect> rects(c.clearRects.begin(),c.clearRects.end());
+        if(scale!=1.0)for(auto& r:rects){r.left=int32_t(std::lround(r.left*scale));r.top=int32_t(std::lround(r.top*scale));
+            r.right=int32_t(std::lround(r.right*scale));r.bottom=int32_t(std::lround(r.bottom*scale));}
+        return rects;
+    };
+    // A changed internal resolution leaves targets of the old scale behind;
+    // drop them (and what only they referenced) instead of growing forever.
+    if(frame.continuous&&(renderScale!=upscale.lastRenderScale||outputScale!=upscale.lastOutputScale))
+    {
+        for(auto it=targets.begin();it!=targets.end();)
+        {
+            const double s=it->second.scale;
+            if(s!=1.0&&s!=renderScale&&s!=outputScale)it=targets.erase(it);else ++it;
+        }
+        for(auto it=storage.colorSurfaces.begin();it!=storage.colorSurfaces.end();)
+            if(it->second.use_count()==1)it=storage.colorSurfaces.erase(it);else ++it;
+        std::set<const Surface*> usedDepth;
+        for(auto& [key,t]:targets)usedDepth.insert(t.ds);
+        for(auto it=depthSurfaces.begin();it!=depthSurfaces.end();)
+            if(!usedDepth.count(&it->second))it=depthSurfaces.erase(it);else ++it;
+        resolved.clear();resolvedDepth.clear();
+        upscale.lastRenderScale=renderScale;upscale.lastOutputScale=outputScale;
+        upscale.reset=true;
+        if(outputScale!=1.0||renderScale!=1.0)fprintf(stderr,"native renderer: internal resolution %.3gx (scene %.3gx)\n",outputScale,renderScale);
+    }
     auto targetFor = [&](const Draw& d) -> Target& {
         const auto surfaceKey=keyOf(d);
         const auto [width,height]=targetExtent(d);
-        const TargetKey key=std::tuple_cat(surfaceKey,std::tuple{width,height,(std::max)(targetCounts[surfaceKey],1u)});
+        const double scale=drawScale(size_t(&d-draws.data()),width,height);
+        const TargetKey key=std::tuple_cat(surfaceKey,std::tuple{width,height,(std::max)(targetCounts[surfaceKey],1u),uint32_t(std::lround(scale*1000))});
         Target& t = targets[key];
         if (t.framebuffer) return t;
         // Size: the larger of the window scissor and the largest viewport of
         // the target's draws (PA_CL_VPORT scale is half the size in pixels);
         // the scissor can be stale, e.g. the final 1024x600 composite after a
-        // 512x300 pass.
-        t.width=width;t.height=height;
+        // 512x300 pass. Screen-size targets are allocated at their scale.
+        t.guestWidth=width;t.guestHeight=height;t.scale=scale;
+        t.width=scaledSize(width,scale);t.height=scaledSize(height,scale);
         t.count = (std::max)(targetCounts[surfaceKey], 1u);
         const auto samples = multisampling(d.regs[RB_SURFACE_INFO]);
         auto coversTarget = [&](const Draw& clear) {
             return clear.clearRects.empty() || (clear.clearRects.size() == 1 &&
                 clear.clearRects[0].left <= 0 && clear.clearRects[0].top <= 0 &&
-                clear.clearRects[0].right >= int32_t(t.width) && clear.clearRects[0].bottom >= int32_t(t.height));
+                clear.clearRects[0].right >= int32_t(t.guestWidth) && clear.clearRects[0].bottom >= int32_t(t.guestHeight));
         };
         RenderColor initialColors[4];
         bool newColors[4]={};
@@ -1267,7 +1318,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             if (clear != colorClears.end())
             {
                 const Draw& c = *clear->second;
-                if (!coversTarget(c)) list->clearColor(k, clearColorValue(c, t.rt[k]->format), c.clearRects.data(), uint32_t(c.clearRects.size()));
+                if (!coversTarget(c)){const auto rects=scaledRects(c,t.scale);list->clearColor(k, clearColorValue(c, t.rt[k]->format), rects.data(), uint32_t(rects.size()));}
                 t.rt[k]->explicitlyCleared = true;
             }
         }
@@ -1292,8 +1343,9 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             if (clear != depthClears.end())
             {
                 const Draw& c = *clear->second;
+                const auto rects=scaledRects(c,t.scale);
                 list->clearDepthStencil((c.clearFlags & 0x10) != 0, (c.clearFlags & 0x20) != 0,
-                    c.clearDepth, c.clearStencil, c.clearRects.data(), uint32_t(c.clearRects.size()));
+                    c.clearDepth, c.clearStencil, rects.data(), uint32_t(rects.size()));
             }
         }
         t.hadContents=true;
@@ -1520,6 +1572,8 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         const bool dlaa=upscaleMode!=UpscalerMode::Off&&up.ngx.Initialize(d3dDevice);
         if(!dlaa&&!frameGen)return;
         const uint32_t w=snap.width,h=snap.height;
+        // Super Resolution: the scene renders at renderScale, DLSS writes it at outputScale.
+        const uint32_t outW=superResolution?scaledSize(fbW,outputScale):w,outH=superResolution?scaledSize(fbH,outputScale):h;
         if(!up.pipeline)
         {
             up.vs=device->createShader(fd_native_motion_vs,sizeof(fd_native_motion_vs),"vs_main",RenderShaderFormat::DXIL);
@@ -1537,11 +1591,20 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             up.constants=device->createBuffer(RenderBufferDesc::UploadBuffer(512,RenderBufferFlag::CONSTANT));
             if(!up.pipeline||!static_cast<D3D12GraphicsPipeline*>(up.pipeline.get())->d3d){fprintf(stderr,"native upscaler: motion pipeline failed\n");up.pipeline.reset();return;}
         }
-        if(up.width!=w||up.height!=h||up.outputFormat!=snap.format)
+        if(up.width!=w||up.height!=h||up.outputFormat!=snap.format||up.outWidth!=outW||up.outHeight!=outH)
         {
             up.motion=CreateTexture(device.get(),RenderTextureDesc::ColorTarget(w,h,RenderFormat::R16G16_FLOAT));
             up.depth=CreateTexture(device.get(),RenderTextureDesc::ColorTarget(w,h,RenderFormat::R32_FLOAT));
-            up.output=CreateTexture(device.get(),RenderTextureDesc::Texture2D(w,h,1,snap.format,RenderTextureFlag::UNORDERED_ACCESS));
+            up.output=CreateTexture(device.get(),RenderTextureDesc::Texture2D(outW,outH,1,snap.format,RenderTextureFlag::UNORDERED_ACCESS));
+            up.outWidth=outW;up.outHeight=outH;
+            up.upscaled=Surface();
+            if(outW!=w||outH!=h)
+            {
+                up.upscaled.format=snap.format;
+                up.upscaled.texture=CreateTexture(device.get(),RenderTextureDesc::Texture2D(outW,outH,1,snap.format));
+                boundSurfaces.erase(&up.upscaled);
+                bindSurface(up.upscaled);
+            }
             const RenderTexture* colors[2]={up.motion.get(),up.depth.get()};
             RenderFramebufferDesc fb;fb.colorAttachments=colors;fb.colorAttachmentsCount=2;
             list->barriers(RenderBarrierStage::GRAPHICS,{RenderTextureBarrier(up.motion.get(),RenderTextureLayout::COLOR_WRITE),RenderTextureBarrier(up.depth.get(),RenderTextureLayout::COLOR_WRITE)});
@@ -1562,6 +1625,9 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         const float* previousViewport=up.hasPrevious?up.previousViewport:sceneViewport;
         std::copy(sceneViewport,sceneViewport+4,c.viewport);
         std::copy(previousViewport,previousViewport+4,c.previousViewport);
+        // Guest viewport -> host pixels of the (scaled) scene.
+        for(float& v:c.viewport)v*=float(renderScale);
+        for(float& v:c.previousViewport)v*=float(renderScale);
         c.depthTransform[0]=sceneDepth[0]?sceneDepth[0]:1.0f;c.depthTransform[1]=sceneDepth[1];
         c.depthIndex=t.ds->descriptor;c.sampleCount=t.ds->samples;c.sampleIndex=0;c.valid=valid;
         memcpy(up.constants->map(),&c,sizeof(c));up.constants->unmap();
@@ -1621,7 +1687,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             RenderTextureBarrier(up.depth.get(),RenderTextureLayout::SHADER_READ),
             RenderTextureBarrier(up.output.get(),RenderTextureLayout::GENERAL)});
         UpscalerSetup setup;
-        setup.renderWidth=setup.outputWidth=w;setup.renderHeight=setup.outputHeight=h;
+        setup.renderWidth=w;setup.renderHeight=h;setup.outputWidth=outW;setup.outputHeight=outH;
         setup.mode=upscaleMode;
         setup.hdr=snap.format==RenderFormat::R16G16B16A16_FLOAT||snap.format==RenderFormat::R32G32B32A32_FLOAT;
         UpscalerFrame in;
@@ -1646,11 +1712,20 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         current=nullptr;
         if(evaluated&&!CachedEnv("FD_UPSCALER_BYPASS"))
         {
+            // DLAA writes back into the scene copy; Super Resolution into its
+            // own output-size surface, which the post-processing then reads.
+            RenderTexture* destination=up.upscaled.texture?up.upscaled.texture.get():snap.surface.texture.get();
             list->barriers(RenderBarrierStage::COPY,{
                 RenderTextureBarrier(up.output.get(),RenderTextureLayout::COPY_SOURCE),
-                RenderTextureBarrier(snap.surface.texture.get(),RenderTextureLayout::COPY_DEST)});
-            list->copyTextureRegion(RenderTextureCopyLocation::Subresource(snap.surface.texture.get(),0),
+                RenderTextureBarrier(destination,RenderTextureLayout::COPY_DEST)});
+            list->copyTextureRegion(RenderTextureCopyLocation::Subresource(destination,0),
                 RenderTextureCopyLocation::Subresource(up.output.get(),0));
+            if(up.upscaled.texture)
+            {
+                list->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(destination,RenderTextureLayout::SHADER_READ));
+                up.upscaled.shaderRead=true;
+                resolved[d.copyDest]=&up.upscaled;
+            }
             if(++up.evaluated%600==1)fprintf(stderr,"native upscaler: %s applied (%llu frames, camera %d, jitter %.3f %.3f)\n",UpscalerModeName(upscaleMode),(unsigned long long)up.evaluated,int(sceneCamera),jitterX,jitterY);
             up.reset=false;
         }
@@ -1717,13 +1792,15 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                             auto& rt = *t.rt[k];
                             rt.explicitlyCleared = true;
                             wrote=true;
-                            list->clearColor(k, clearColorValue(d, rt.format), d.clearRects.data(), uint32_t(d.clearRects.size()));
+                            const auto rects=scaledRects(d,t.scale);
+                            list->clearColor(k, clearColorValue(d, rt.format), rects.data(), uint32_t(rects.size()));
                         }
                 if ((d.clearFlags & 0x30) && std::get<5>(key) == d.regs[RB_DEPTH_INFO]&&clearedDepths.insert(t.ds).second)
                 {
                     wrote=true;
+                    const auto rects=scaledRects(d,t.scale);
                     list->clearDepthStencil((d.clearFlags & 0x10) != 0, (d.clearFlags & 0x20) != 0,
-                        d.clearDepth, d.clearStencil, d.clearRects.data(), uint32_t(d.clearRects.size()));
+                        d.clearDepth, d.clearStencil, rects.data(), uint32_t(rects.size()));
                 }
                 if(wrote)t.lastWrite=++storage.writeSerial;
             }
@@ -1781,7 +1858,9 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                     if (CachedEnv("FD_REPLAY_TRACE"))
                         fprintf(stderr, "resolve %08X info %08X src %u bias %d count %u\n", d.copyDest, d.copyDestInfo,
                             source, resolvedBias[d.copyDest], t.count);
-                    const uint32_t copyW = (std::clamp)(d.copyWidth, 1u, t.width), copyH = (std::clamp)(d.copyHeight, 1u, t.height);
+                    // Copy size in host pixels (scaled targets copy their scaled contents).
+                    const uint32_t copyW = (std::min)(scaledSize((std::clamp)(d.copyWidth, 1u, t.guestWidth), t.scale), t.width);
+                    const uint32_t copyH = (std::min)(scaledSize((std::clamp)(d.copyHeight, 1u, t.guestHeight), t.scale), t.height);
                     if (source < t.count)
                     {
                         presentationSurface = t.rt[source].get();
@@ -1889,9 +1968,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                         const uint32_t mipW = (std::max)(1u, d.copyWidth >> d.copyMip);
                         const uint32_t mipH = (std::max)(1u, d.copyHeight >> d.copyMip);
                         if (d.copyX >= mipW || d.copyY >= mipH) continue;
-                        const uint32_t width = d.copyWidth, height = d.copyHeight;
-                        const uint32_t regionW = (std::min)(t.width, mipW - d.copyX);
-                        const uint32_t regionH = (std::min)(t.height, mipH - d.copyY);
+                        const double rs = t.scale;
+                        const uint32_t width = scaledSize(d.copyWidth, rs), height = scaledSize(d.copyHeight, rs);
+                        const uint32_t regionW = (std::min)(t.width, scaledSize(mipW - d.copyX, rs));
+                        const uint32_t regionH = (std::min)(t.height, scaledSize(mipH - d.copyY, rs));
+                        const uint32_t copyX = rs == 1.0 ? d.copyX : uint32_t(std::lround(d.copyX * rs));
+                        const uint32_t copyY = rs == 1.0 ? d.copyY : uint32_t(std::lround(d.copyY * rs));
                         auto& snap = snapshots[d.copyDest];
                         if (!snap || snap->format != rt.format || snap->width != width || snap->height != height || snap->mipCount != d.copyMipCount)
                         {
@@ -1912,20 +1994,22 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                             RenderTextureBarrier(snap->surface.texture.get(), RenderTextureLayout::COPY_DEST)});
                         const RenderBox box(0, 0, int32_t(regionW), int32_t(regionH));
                         list->copyTextureRegion(RenderTextureCopyLocation::Subresource(snap->surface.texture.get(), d.copyMip),
-                            RenderTextureCopyLocation::Subresource(rt.texture.get()), d.copyX, d.copyY, 0, &box);
+                            RenderTextureCopyLocation::Subresource(rt.texture.get()), copyX, copyY, 0, &box);
                         // Copy readbacks are diagnostic, never part of normal presentation.
                         if(!dir.empty()) {
                             Dump dump;
                             dump.dest = d.copyDest;
                             dump.order = colorDumpCount++;
                             dump.format = rt.format;
-                            dump.width = mipW;
-                            dump.height = mipH;
-                            dump.rowPitch = (mipW * FormatBytes(rt.format) + 255) & ~255u;
-                            dump.buffer = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(dump.rowPitch) * mipH));
+                            // The snapshot's mip in host pixels (scaled targets).
+                            const uint32_t dumpW = (std::max)(1u, width >> d.copyMip), dumpH = (std::max)(1u, height >> d.copyMip);
+                            dump.width = dumpW;
+                            dump.height = dumpH;
+                            dump.rowPitch = (dumpW * FormatBytes(rt.format) + 255) & ~255u;
+                            dump.buffer = device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(dump.rowPitch) * dumpH));
                             list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(snap->surface.texture.get(), RenderTextureLayout::COPY_SOURCE));
                             list->copyTextureRegion(
-                                RenderTextureCopyLocation::PlacedFootprint(dump.buffer.get(), rt.format, mipW, mipH, 1, dump.rowPitch / FormatBytes(rt.format)),
+                                RenderTextureCopyLocation::PlacedFootprint(dump.buffer.get(), rt.format, dumpW, dumpH, 1, dump.rowPitch / FormatBytes(rt.format)),
                                 RenderTextureCopyLocation::Subresource(snap->surface.texture.get(), d.copyMip));
                             dumps.push_back(std::move(dump));
                         }
@@ -1991,8 +2075,10 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         if(!jitterDraw.empty()&&jitterDraw[i])
         {
             // Shift the rasterized geometry by the jitter in pixels (+x right, +y down).
-            if(nativeViewport.format&0x80000000){halfPixel[0]+=2*jitterX/float(viewportWidth);halfPixel[1]-=2*jitterY/float(viewportHeight);}
-            else{halfPixel[0]+=jitterX/AsFloat(d.regs[VPORT_XSCALE]);halfPixel[1]+=jitterY/AsFloat(d.regs[VPORT_YSCALE]);}
+            // The jitter is in host (render) pixels; the offsets are in guest NDC.
+            const float jx=float(jitterX/renderScale),jy=float(jitterY/renderScale);
+            if(nativeViewport.format&0x80000000){halfPixel[0]+=2*jx/float(viewportWidth);halfPixel[1]-=2*jy/float(viewportHeight);}
+            else{halfPixel[0]+=jx/AsFloat(d.regs[VPORT_XSCALE]);halfPixel[1]+=jy/AsFloat(d.regs[VPORT_YSCALE]);}
         }
         memcpy(shared+520,halfPixel,sizeof(halfPixel));
         memcpy(shared+1712,nativeViewport.xy,sizeof(nativeViewport.xy));
@@ -2033,6 +2119,9 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         const uint32_t usedTextures=shaderCatalog?(shaderCatalog->Find(d.vs,ShaderStage::Vertex)->textureMask|
             (d.ps.empty()?0:shaderCatalog->Find(d.ps,ShaderStage::Pixel)->textureMask)):UINT32_MAX;
         Target& drawTarget=targetFor(d);
+        // vPos in guest pixels for scaled targets (XenosRecomp shader_common.h).
+        const float pixelScaleMinusOne=float(drawTarget.scale-1.0);
+        memcpy(shared+1740,&pixelScaleMinusOne,4);
         for (uint32_t slot = 0; slot < 32; ++slot)
         {
             if(!(usedTextures>>slot&1))continue;
@@ -2189,7 +2278,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                 current = &target;
             }
             // Hardware viewport transform (PA_CL_VPORT_*): NDC -> pixels.
-            const auto& viewport=nativeViewport.host;
+            auto viewport=nativeViewport.host;
+            if(target.scale!=1.0)
+            {
+                const float vs=float(target.scale);
+                viewport.x*=vs;viewport.y*=vs;viewport.width*=vs;viewport.height*=vs;
+            }
             list->setViewports(viewport);
             list->setScissors(RenderRect(0, 0, target.width, target.height));
             list->setPipeline(pipeline);
@@ -2388,6 +2482,8 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         status.available=upscale.ngx.Tried()?(upscale.ngx.Available()?1:0):-1;
         status.active=upscaleMode;status.evaluatedFrames=upscale.evaluated;
         status.sceneFound=sceneResolve!=SIZE_MAX;status.cameraFound=sceneCamera;
+        status.renderWidth=scaledSize(fbW,renderScale);status.renderHeight=scaledSize(fbH,renderScale);
+        status.outputWidth=scaledSize(fbW,outputScale);status.outputHeight=scaledSize(fbH,outputScale);
         PublishUpscalerStatus(status);
     }
     if(frame.continuous&&nativeOutput){outputTexture=static_cast<D3D12Texture*>(nativeOutput->texture.get());outputWidth=nativeWidth;outputHeight=nativeHeight;}

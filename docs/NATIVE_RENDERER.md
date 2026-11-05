@@ -1032,10 +1032,8 @@ its DLSS 5 neural-rendering fork) attach as they do to PC games.
   `FD_UPSCALER_BYPASS` are diagnostics. Diagnostic frame dumps add the scene
   before / after DLSS and the motion vectors (`resolve_*_D155*`).
 - Verified: thousands of evaluated frames with the D3D12 debug layer and no
-  errors. DLSS Super Resolution modes exist in the API but are not exposed:
-  the game's post-processing and HUD are fixed at 1024x600, so a higher
-  output resolution first needs internal resolution scaling of the whole
-  pipeline (Xenia's 2x/3x is known to break this game's effects).
+  errors. Super Resolution modes: see "Internal resolution and DLSS Super
+  Resolution" below.
 - DLSS 5 (3D-guided neural rendering): the public Streamline 2.14.16 declares
   `kFeatureDLSS_NR` but ships no plugin or header; the model is delivered to
   supported games over the air. Not integrated.
@@ -1104,3 +1102,37 @@ committed; the six DLLs it needs are copied next to the executable).
 - **Verified** (`tools/test_frame_generation.ps1`, 239 Hz monitor, VSync on):
   2x -> 2 frames per present; 4x -> 30 game frames/s, ~120 displayed/s, DLSS-G
   status OK, thousands of tagged frames.
+
+## Internal resolution and DLSS Super Resolution — 2026-11-05
+
+The native renderer can draw the game above 1024x600 (F1 > Gráficos >
+Resolução interna: 1x, 1.5x, 2x, 2.5x, 3x, applied live; `FD_NATIVE_SCALE`
+overrides, also for replays). Only **screen targets** are scaled: the front
+buffer's size, or its width with a letterbox up to 10% shorter (videos draw
+1024x588). The terrain / water simulation passes, shadow maps and the bloom
+chain keep their guest sizes, which is why the effects survive (Xenia's
+whole-EDRAM scaling breaks them).
+
+- `Target` keeps its guest and host sizes and its scale; the scale is part of
+  the target key, so one EDRAM surface can exist at two scales in a frame.
+  Host viewports, clear rectangles, resolve regions and the snapshots /
+  depth snapshots of scaled targets are scaled; the half-pixel offset stays
+  in guest pixels (it is half a guest pixel whatever the raster density).
+- `vPos`: XenosRecomp now emits `iPos.xy / (1 + g_NativePixelScaleMinusOne)`
+  (shared constant 1740, 0 at native size, so 1x is bit-exact), keeping screen
+  space reads (refraction, depth-based effects) in guest pixels. Rebuild the
+  catalogs with `tools/build_native_shaders.py` after updating XenosRecomp.
+- Changing the scale drops targets of the old scale and the colour / depth
+  surfaces only they referenced, and resets the resolve aliases.
+- **DLSS Super Resolution** (F1 > Anti-aliasing / DLSS: Qualidade 67%,
+  Equilibrado 58%, Desempenho 50%, Ultra desempenho 33%): the scene draws
+  (up to its copy) render at `scale x ratio`, DLSS writes the copy at the
+  internal resolution into its own surface, and the post-processing / HUD read
+  it at full size. With 2x and Desempenho the scene renders at 1024x600 and is
+  shown at 2048x1200. Jitter is in render pixels; frame generation's motion
+  vectors and depth are the render-size ones.
+- Cost (RTX 5060 Ti): 2x with DLAA ~11.5 ms render per frame in the level
+  (vs ~10 ms at 1x); the title at 2x ~6.4 ms. All still at the game's 30 FPS.
+- Verified: texture / geometry / memory-frame regressions exact at 1x with the
+  rebuilt catalog; title, menus, intro video and the first level match 1x at
+  2x; DLSS Performance 1024x600 -> 2048x1200 and Quality in the level.

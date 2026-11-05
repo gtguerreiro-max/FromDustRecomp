@@ -41,6 +41,17 @@ std::mutex g_statusLock;
 UpscalerStatus g_status;
 }
 
+std::atomic<double> g_renderScale{1.0};
+void SetRenderScaleSetting(double scale) { g_renderScale = (std::clamp)(scale, 1.0, 4.0); }
+double RenderScaleSetting() { return g_renderScale.load(); }
+double ConfiguredRenderScale(double configured)
+{
+    static const double forced = [] {
+        const char* value = getenv("FD_NATIVE_SCALE");
+        return value && *value ? atof(value) : 0.0;
+    }();
+    return forced > 0 ? (std::clamp)(forced, 0.25, 4.0) : configured;
+}
 void SetUpscalerSetting(UpscalerMode mode) { g_setting = uint32_t(mode); }
 UpscalerMode UpscalerSetting() { return UpscalerMode(g_setting.load()); }
 UpscalerStatus GetUpscalerStatus() { std::lock_guard lock(g_statusLock); return g_status; }

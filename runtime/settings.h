@@ -36,7 +36,8 @@ struct Data {
     int anisotropy = -1;
     int presentation = 0; // bilinear, FSR, CAS
     int sharpness = 20;
-    int upscaler = 0; // native renderer: off, DLAA (live)
+    int upscaler = 0; // native renderer: off, DLAA, DLSS quality / balanced / performance / ultra (live)
+    int renderScale = 100; // native renderer internal resolution, percent of 1024x600 (live)
     int frameGeneration = 0; // native renderer, DLSS-G: off, 2x, 3x, 4x (load on restart)
     int inputMode = 0; // automatic, keyboard/mouse, controller
     int sensitivity = 100;

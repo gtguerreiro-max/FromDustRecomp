@@ -38,11 +38,17 @@ struct UpscalerStatus
     UpscalerMode active = UpscalerMode::Off;
     uint64_t evaluatedFrames = 0;
     bool sceneFound = false, cameraFound = false;
+    uint32_t renderWidth = 0, renderHeight = 0, outputWidth = 0, outputHeight = 0;
 };
 UpscalerStatus GetUpscalerStatus();
 void PublishUpscalerStatus(const UpscalerStatus& status);
 // Render-size fraction of the output for a mode (1 for DLAA / off).
 double UpscalerRenderScale(UpscalerMode mode);
+// Internal resolution of the screen-size targets (output of DLSS Super
+// Resolution), applied from the next frame. FD_NATIVE_SCALE=<factor> overrides.
+void SetRenderScaleSetting(double scale);
+double RenderScaleSetting();
+double ConfiguredRenderScale(double configured);
 const char* UpscalerModeName(UpscalerMode mode);
 
 struct UpscalerSetup

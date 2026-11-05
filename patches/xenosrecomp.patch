@@ -1,5 +1,5 @@
 diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
-index 1c74034..c57a816 100644
+index 1c74034..a192715 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
 @@ -15,6 +15,9 @@
@@ -12,7 +12,7 @@ index 1c74034..c57a816 100644
  #ifdef __spirv__
  
  struct PushConstants
-@@ -26,10 +29,14 @@ struct PushConstants
+@@ -26,10 +29,19 @@ struct PushConstants
  
  [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
  
@@ -24,14 +24,19 @@ index 1c74034..c57a816 100644
 +#define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 516)
 +#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 520)
 +#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 528)
++#define g_VertexBaseOffset         vk::RawBufferLoad<int>(g_PushConstants.SharedConstants + 532)
 +#define g_LoopConstant(INDEX)      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 544 + (INDEX) * 4)
 +#define fdFetchScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1536 + (INDEX) * 4)
 +#define fdColorScale(INDEX)        vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1664 + (INDEX) * 4)
 +#define fdBoolean(INDEX)           ((vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 1680 + ((INDEX) / 32) * 4) & (1u << ((INDEX) % 32))) != 0)
++#define g_NativeViewportXY         vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 1712)
++#define g_NativeViewportZ          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 1728)
++#define g_NativeVertexFormat       vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 1736)
++#define g_NativePixelScaleMinusOne vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 1740)
  
  [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
  
-@@ -38,15 +45,100 @@ struct PushConstants
+@@ -38,15 +50,118 @@ struct PushConstants
  #else
  
  #define DEFINE_SHARED_CONSTANTS() \
@@ -43,11 +48,15 @@ index 1c74034..c57a816 100644
 +    uint g_SwappedTexcoords : packoffset(c32.y); \
 +    float2 g_HalfPixelOffset : packoffset(c32.z); \
 +    float g_AlphaThreshold : packoffset(c33.x); \
++    int g_VertexBaseOffset : packoffset(c33.y); \
 +    uint4 g_LoopConstants[8] : packoffset(c34); \
 +    uint4 g_VertexFetch[32] : packoffset(c64); \
 +    float4 g_FetchScales[8] : packoffset(c96); \
 +    float4 g_ColorScales : packoffset(c104); \
-+    uint4 g_AllBooleans[2] : packoffset(c105);
++    uint4 g_AllBooleans[2] : packoffset(c105); \
++    float4 g_NativeViewportXY : packoffset(c107); \
++    float2 g_NativeViewportZ : packoffset(c108.x); \
++    uint g_NativeVertexFormat : packoffset(c108.z);     float g_NativePixelScaleMinusOne : packoffset(c108.w);
 +
 +#define g_LoopConstant(INDEX) g_LoopConstants[(INDEX) / 4][(INDEX) % 4]
 +#define fdFetchScale(INDEX) g_FetchScales[(INDEX) / 4][(INDEX) % 4]
@@ -64,6 +73,20 @@ index 1c74034..c57a816 100644
 +// the fetch base, y stride | offset << 16 (bytes), z stream size in bytes,
 +// w format | signed << 8 | integer << 9 | exp_adjust << 10 | rounded << 16 | enabled << 31.
 +ByteAddressBuffer g_VertexStreams : register(t0, space5);
++
++float4 fdVertexPosition(float4 position,uint format,float4 viewportXY,float2 viewportZ,float2 halfPixel)
++{
++    if(!(format&0x400))position.w=rcp(position.w);
++    if(format&0x100)position.xy*=position.w;
++    if(format&0x200)position.z*=position.w;
++    if(format&0x80000000)
++    {
++        position.xy=position.xy*viewportXY.xy+position.w*viewportXY.zw;
++        position.z=position.z*viewportZ.x+position.w*viewportZ.y;
++    }
++    position.xy+=halfPixel*position.w;
++    return position;
++}
 +
 +float fdVertexComponent(uint value, uint bits, bool isSigned, bool isInteger)
 +{
@@ -136,7 +159,7 @@ index 1c74034..c57a816 100644
  Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
  Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
  TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
-@@ -59,10 +151,26 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+@@ -59,10 +174,26 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
      return dimensions;
  }
  
@@ -164,7 +187,7 @@ index 1c74034..c57a816 100644
  }
  
  float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
-@@ -135,17 +243,29 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+@@ -135,17 +266,29 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
      float h1y = h1(fy);
  
      float4 r =
@@ -199,7 +222,7 @@ index 1c74034..c57a816 100644
  }
  
  struct CubeMapData
-@@ -156,7 +276,12 @@ struct CubeMapData
+@@ -156,7 +299,12 @@ struct CubeMapData
  
  float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
  {
@@ -214,10 +237,22 @@ index 1c74034..c57a816 100644
  
  float4 tfetchR11G11B10(uint4 value)
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 698a418..061c72d 100644
+index 698a418..5abc086 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
-@@ -179,6 +179,20 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -170,6 +170,11 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+         ++indentation;
+     }
+ 
++    if (!instr.isMiniFetch)
++    {
++        indent();
++        println("fdVertexIndex = r{}.{};", uint32_t(instr.srcRegister), SWIZZLES[instr.srcSwizzle & 3]);
++    }
+     indent();
+     print("r{}.", instr.dstRegister);
+     printDstSwizzle(instr.dstSwizzle, false);
+@@ -179,6 +184,19 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
      auto findResult = vertexElements.find(address);
      assert(findResult != vertexElements.end());
  
@@ -232,13 +267,12 @@ index 698a418..061c72d 100644
 +        uint32_t(instr.isMiniFetch));
 +
 +    if (fetchOrdinal < 32)
-+        print("(g_VertexFetch[{0}].w >> 31 ? fdVertexFetch(g_VertexFetch[{0}], r{1}.{2}) : ", fetchOrdinal,
-+            uint32_t(instr.srcRegister), SWIZZLES[instr.srcSwizzle & 3]);
++        print("(g_VertexFetch[{0}].w >> 31 ? fdVertexFetch(g_VertexFetch[{0}], fdVertexIndex) : ", fetchOrdinal);
 +
      switch (findResult->second.usage)
      {
      case DeclUsage::Normal:
-@@ -208,6 +222,9 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -208,6 +226,9 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
          break;
      }
  
@@ -248,7 +282,7 @@ index 698a418..061c72d 100644
      out += '.';
      printDstSwizzle(instr.dstSwizzle, true);
  
-@@ -225,7 +242,8 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -225,7 +246,8 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
  
  void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
  {
@@ -258,7 +292,7 @@ index 698a418..061c72d 100644
          return;
  
      if (instr.isPredicated)
-@@ -246,6 +264,21 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -246,6 +268,21 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
                  out += SWIZZLES[((instr.srcSwizzle >> (i * 2))) & 0x3];
          };
  
@@ -280,7 +314,7 @@ index 698a418..061c72d 100644
      std::string constName;
      const char* constNamePtr = nullptr;
  #ifdef UNLEASHED_RECOMP
-@@ -253,6 +286,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -253,6 +290,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
  #endif
  
      auto findResult = samplers.find(instr.constIndex);
@@ -290,7 +324,7 @@ index 698a418..061c72d 100644
      if (findResult != samplers.end())
      {
          constNamePtr = findResult->second;
-@@ -282,6 +318,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -282,6 +322,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
      printDstSwizzle(instr.dstSwizzle, false);
  
      out += " = ";
@@ -301,7 +335,7 @@ index 698a418..061c72d 100644
      switch (instr.opcode)
      {
      case FetchOpcode::TextureFetch:
-@@ -325,13 +365,18 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -325,13 +369,18 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
      }
  
      out += dimension;
@@ -321,7 +355,7 @@ index 698a418..061c72d 100644
      printSrcRegister(componentCount);
  
      switch (instr.dimension)
-@@ -343,8 +388,13 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -343,8 +392,13 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
          out += ", cubeMapData";
          break;
      }
@@ -336,7 +370,7 @@ index 698a418..061c72d 100644
  
      printDstSwizzle(instr.dstSwizzle, true);
  
-@@ -949,7 +999,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+@@ -949,7 +1003,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
              break;
  
          case AluScalarOpcode::SetpInv:
@@ -345,7 +379,7 @@ index 698a418..061c72d 100644
              break;
  
          case AluScalarOpcode::SetpPop:
-@@ -1105,11 +1155,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1105,11 +1159,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
      assert(shaderContainer->constantTableOffset != NULL);
  
@@ -362,7 +396,7 @@ index 698a418..061c72d 100644
      const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
      constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
  
-@@ -1174,11 +1227,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1174,11 +1231,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
@@ -376,7 +410,7 @@ index 698a418..061c72d 100644
  
              samplers.emplace(constantInfo->registerIndex, constantName);
              break;
-@@ -1233,11 +1286,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1233,11 +1290,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",
@@ -390,7 +424,7 @@ index 698a418..061c72d 100644
          }
      }
  
-@@ -1288,6 +1341,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1288,6 +1345,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "#endif\n";
  
          auto pixelShader = reinterpret_cast<const PixelShader*>(shader);
@@ -398,7 +432,7 @@ index 698a418..061c72d 100644
          if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
              out += ",\n\tout float4 oC0 : SV_Target0";
          if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR1)
-@@ -1322,19 +1376,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1322,19 +1380,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              }
          #endif
  
@@ -439,7 +473,7 @@ index 698a418..061c72d 100644
  
              vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
          }
-@@ -1347,6 +1415,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1347,6 +1419,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
      #endif
  
@@ -450,7 +484,7 @@ index 698a418..061c72d 100644
          out += "\tout float4 oPos : SV_Position";
  
          for (auto& [usage, usageIndex] : INTERPOLATORS)
-@@ -1418,6 +1490,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1418,6 +1494,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\n";
      }
  
@@ -466,27 +500,38 @@ index 698a418..061c72d 100644
      bool printedRegisters[32]{};
  
      uint32_t interpolatorCount = (shader->interpolatorInfo >> 5) & 0x1F;
-@@ -1471,6 +1552,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1464,13 +1549,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             print("\tfloat4 r{} = ", i);
+             if (isPixelShader && i == ((shader->fieldC >> 8) & 0xFF))
+             {
+-                out += "float4((iPos.xy - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);\n";
++                // FromDust native renderer: targets rendered above the guest size report
++                // vPos in guest pixels (scale - 1 is 0 at native size, so this is exact).
++                out += "float4((iPos.xy / (1.0 + g_NativePixelScaleMinusOne) - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);\n";
+             }
+         #ifdef UNLEASHED_RECOMP
+             else if (!isPixelShader && hasIndexCount && i == 0)
              {
                  out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
              }
 +        #else
 +            else if (!isPixelShader && i == 0)
 +            {
-+                out += "float4(iVertexId, 0.0, 0.0, 0.0);\n";
++                out += "float4(int(iVertexId) + g_VertexBaseOffset, 0.0, 0.0, 0.0);\n";
 +            }
          #endif
              else
              {
-@@ -1482,6 +1568,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1482,6 +1574,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      out += "\tint a0 = 0;\n";
      out += "\tint aL = 0;\n";
      out += "\tbool p0 = false;\n";
 +    out += "\tfloat fdTextureLod = 0.0;\n";
++    out += "\tfloat fdVertexIndex = 0.0;\n";
      out += "\tfloat ps = 0.0;\n";
      if (isPixelShader)
      {
-@@ -1630,7 +1717,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1630,7 +1724,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  address = cfInstr.condExec.address;
                  count = cfInstr.condExec.count;
                  sequence = cfInstr.condExec.sequence;
@@ -500,7 +545,7 @@ index 698a418..061c72d 100644
                  break;
  
              case ControlFlowOpcode::CondExecPred:
-@@ -1639,6 +1731,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1639,6 +1738,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  count = cfInstr.condExecPred.count;
                  sequence = cfInstr.condExecPred.sequence;
                  shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd);
@@ -512,7 +557,7 @@ index 698a418..061c72d 100644
                  break;
  
              case ControlFlowOpcode::LoopStart:
-@@ -1694,11 +1791,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1694,11 +1798,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      }
                      else
                      {
@@ -525,7 +570,7 @@ index 698a418..061c72d 100644
                      }
  
                      if (simpleControlFlow)
-@@ -1809,6 +1902,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1809,6 +1909,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      indent();
                      out += "}";
  
@@ -545,6 +590,24 @@ index 698a418..061c72d 100644
                  #ifdef UNLEASHED_RECOMP
                      specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
  
+@@ -1832,7 +1945,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     if (!hasMtxProjection)
+                 #endif
+                     {
+-                        out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
++                        out += "\toPos = fdVertexPosition(oPos, g_NativeVertexFormat, g_NativeViewportXY, g_NativeViewportZ, g_HalfPixelOffset);\n";
+                     }
+                 }
+ 
+@@ -1881,7 +1994,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         out += "\t}\n";
+ 
+     if (!isPixelShader && hasMtxProjection)
+-        out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
++        out += "\toPos = fdVertexPosition(oPos, g_NativeVertexFormat, g_NativeViewportXY, g_NativeViewportZ, g_HalfPixelOffset);\n";
+ #endif
+ 
+     out += "}";
 diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
 index b2e317d..0ef6749 100644
 --- a/XenosRecomp/shader_recompiler.h

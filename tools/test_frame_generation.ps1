@@ -1,10 +1,10 @@
-# Bounded visible native session with DLSS Frame Generation on: checks that
+﻿# Bounded visible native session with DLSS Frame Generation on: checks that
 # Streamline loads, frames are tagged and generated frames are presented, and
 # captures the window at a few points.
 # Usage: tools/test_frame_generation.ps1 [-Frames 1..3] [-Dlaa 1] [-RunSeconds 150]
-param([ValidateRange(0,3)][int]$Frames=1, [ValidateRange(0,1)][int]$Dlaa=1,
+param([ValidateRange(0,3)][int]$Frames=1, [ValidateRange(0,5)][int]$Dlaa=1,
       [ValidateRange(20,1800)][int]$RunSeconds=150, [int[]]$CaptureAt=@(70,110,140),
-      [string]$Schedule='10:0010:600', [string]$OutputDirectory='', [switch]$Settings)
+      [string]$Schedule='10:0010:600', [string]$OutputDirectory='', [switch]$Settings, [string]$Graphics='', [int]$GuestCaptureAt=0, [int]$DumpAt=0)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 if(!$OutputDirectory){$OutputDirectory=Join-Path $root 'build\frame-generation'}
@@ -13,11 +13,13 @@ New-Item -ItemType Directory -Path $output -Force|Out-Null
 foreach($n in 'FD_NATIVE_DUMP_AT','FD_NATIVE_PROFILE','FD_REPLAY_DEBUG','FD_NATIVE_UPSCALER','FD_CAPTURE','FD_CAPTURE_SECONDS',
     'FD_SETTINGS_OPEN','FD_SETTINGS_TAB','FD_HIDE_WINDOW','FD_FRAME_GENERATION'){Remove-Item "Env:$n" -ErrorAction SilentlyContinue}
 if($Settings){$env:FD_SETTINGS_OPEN='1';$env:FD_SETTINGS_TAB='graphics'}
+if($GuestCaptureAt){$env:FD_CAPTURE=Join-Path $output 'guest.png';$env:FD_CAPTURE_SECONDS=[string]$GuestCaptureAt}
+if($DumpAt){$env:FD_NATIVE_DUMP_AT=[string]$DumpAt}
 $env:FD_RENDERER='native';$env:FD_HEADLESS='0';$env:FD_EXIT_SECONDS=[string]$RunSeconds;$env:FD_AUTOPRESS=$Schedule
 $env:FD_NATIVE_SHADER_CATALOG=Join-Path $root 'build\native-shaders-live\catalog.bin'
 $env:FD_NATIVE_AUDIT_REPORT=Join-Path $output 'native-session.json';$env:FD_NATIVE_GEOMETRY_REPORT=Join-Path $output 'geometry.json'
 $env:FD_SETTINGS_FILE=Join-Path $output 'settings.ini'
-[IO.File]::WriteAllText($env:FD_SETTINGS_FILE,"[Graphics]`nScale=1`nVSync=1`nFrameLimit=30`nAnisotropy=-1`nUpscaler=$Dlaa`nFrameGeneration=$Frames`n[Display]`nShowFps=1`n")
+[IO.File]::WriteAllText($env:FD_SETTINGS_FILE,"[Graphics]`nScale=1`nVSync=1`nFrameLimit=30`nAnisotropy=-1`nUpscaler=$Dlaa`nFrameGeneration=$Frames`n$Graphics`n[Display]`nShowFps=1`n")
 $p=Start-Process -FilePath "$root\build\FromDust.exe" -ArgumentList ('"'+"$root\game"+'"') -WorkingDirectory $output -PassThru `
     -RedirectStandardOutput "$output\stdout.log" -RedirectStandardError "$output\stderr.log"
 $start=Get-Date
@@ -38,3 +40,4 @@ $p.WaitForExit()
 "exit $($p.ExitCode)"
 Select-String -Path "$output\stderr.log","$output\stdout.log" -Pattern 'frame generation|streamline|Streamline' |
     Select-Object -First 40|ForEach-Object{$_.Line}
+

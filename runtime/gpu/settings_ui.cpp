@@ -74,7 +74,8 @@ void ApplyLive() {
     config.SetFsrSharpnessReduction(2.0f * (1.0f - d.sharpness / 100.0f));
     g_presenter->SetGuestOutputPaintConfigFromUIThread(config);
 #ifdef FD_NATIVE_RENDERER
-    gpu::native::SetUpscalerSetting(d.upscaler == 1 ? gpu::native::UpscalerMode::Dlaa : gpu::native::UpscalerMode::Off);
+    gpu::native::SetUpscalerSetting(gpu::native::UpscalerMode(d.upscaler));
+    gpu::native::SetRenderScaleSetting(d.renderScale / 100.0);
     if (gpu::native::fg::Loaded()) gpu::native::fg::SetFrames(gpu::native::fg::ConfiguredFrames(d.frameGeneration));
 #endif
     g_applied = d;
@@ -277,16 +278,29 @@ private:
                     const auto status = gpu::native::GetUpscalerStatus();
 #endif
                     ImGui::BeginDisabled(!nativeBackend_);
-                    ImGui::Combo("Anti-aliasing", &d.upscaler, "Original do jogo\0NVIDIA DLAA\0");
+                    constexpr int scales[] = {100, 150, 200, 250, 300};
+                    int scaleIndex = int(std::find(std::begin(scales), std::end(scales), d.renderScale) - std::begin(scales));
+                    if (scaleIndex >= 5) scaleIndex = 0;
+                    if (ImGui::Combo("Resolução interna", &scaleIndex,
+                            "Original (1024×600)\0" "1,5× (1536×900)\0" "2× (2048×1200)\0" "2,5× (2560×1500)\0" "3× (3072×1800)\0"))
+                        d.renderScale = scales[scaleIndex];
+                    Help("Desenha o jogo a uma resolução maior (imagem mais nítida, mais trabalho da GPU). "
+                         "A simulação do terreno e da água fica à resolução original. Aplica-se de imediato.");
+                    ImGui::Combo("Anti-aliasing / DLSS", &d.upscaler,
+                                 "Original do jogo\0" "NVIDIA DLAA\0" "DLSS Qualidade\0" "DLSS Equilibrado\0" "DLSS Desempenho\0" "DLSS Ultra desempenho\0");
                     ImGui::EndDisabled();
-                    Help("DLAA usa o DLSS da NVIDIA à resolução nativa para suavizar arestas e estabilizar a imagem. "
+                    Help("DLAA usa o DLSS da NVIDIA à resolução interna para suavizar arestas e estabilizar a imagem. "
+                         "Os modos DLSS desenham a cena abaixo da resolução interna (67%, 58%, 50% ou 33%) e reconstroem-na: "
+                         "com resolução interna 2× e DLSS Desempenho, a cena é desenhada a 1024×600 e mostrada a 2048×1200. "
                          "Precisa de uma GPU NVIDIA RTX e do renderer nativo. Aplica-se de imediato.");
                     if (!nativeBackend_) ImGui::TextDisabled("Disponível com o renderer nativo (Jogar-nativo.cmd).");
 #ifdef FD_NATIVE_RENDERER
                     else if (d.upscaler == 0) ImGui::TextDisabled("Desligado: imagem original do jogo.");
                     else if (status.available == 0) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "DLSS indisponível: requer GPU NVIDIA RTX, driver recente e nvngx_dlss.dll.");
                     else if (status.available < 0 || !status.sceneFound) ImGui::TextDisabled("Ativo quando houver uma cena 3D (menus e vídeos ficam iguais).");
-                    else ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "DLAA ativo  |  %llu frames  |  câmara %s", (unsigned long long)status.evaluatedFrames,
+                    else ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "%s ativo  |  %u×%u → %u×%u  |  %llu frames  |  câmara %s",
+                                            gpu::native::UpscalerModeName(status.active), status.renderWidth, status.renderHeight,
+                                            status.outputWidth, status.outputHeight, (unsigned long long)status.evaluatedFrames,
                                             status.cameraFound ? "detetada" : "não detetada (sem vetores)");
 #endif
                 }
@@ -294,7 +308,7 @@ private:
                 {
                     ImGui::BeginDisabled(!nativeBackend_);
                     ImGui::Combo("DLSS Frame Generation", &d.frameGeneration,
-                                 "Desligada " "2× (DLSS FG) " "3× (DLSS Multi Frame) " "4× (DLSS Multi Frame) ");
+                                 "Desligada\0" "2× (DLSS FG)\0" "3× (DLSS Multi Frame)\0" "4× (DLSS Multi Frame)\0");
                     ImGui::EndDisabled();
                     Help("O jogo corre a 30 FPS; a geração de frames da NVIDIA cria 1 a 3 imagens intermédias entre cada "
                          "frame real, para 60, 90 ou 120 FPS no ecrã. A latência mantém-se a dos 30 FPS. "
@@ -318,11 +332,11 @@ private:
 #endif
                 }
                 Section("RENDERIZAÇÃO (APLICA AO REINICIAR)");
-                int scale = nativeBackend_ ? 0 : d.scale - 1;
-                ImGui::BeginDisabled(nativeBackend_);
-                if (ImGui::Combo("Resolução interna", &scale, "Nativa (1×)\0Alta (2×)\0Muito alta (3×)\0")) d.scale = scale + 1;
-                ImGui::EndDisabled();
-                ImGui::TextDisabled(nativeBackend_ ? "Nesta versão do renderer nativo, a resolução interna é 1×." : "2× e 3× aumentam o detalhe e o trabalho da GPU.");
+                if (!nativeBackend_) {
+                    int scale = d.scale - 1;
+                    if (ImGui::Combo("Resolução interna (Xenia)", &scale, "Nativa (1×)\0Alta (2×)\0Muito alta (3×)\0")) d.scale = scale + 1;
+                    ImGui::TextDisabled("2× e 3× aumentam o detalhe e o trabalho da GPU.");
+                }
                 ImGui::Checkbox("Sincronização vertical (VSync)", &d.vsync);
                 Help("Sincroniza com o monitor e evita cortes na imagem. O jogo foi feito para 30 FPS; a física da água depende do ritmo dos frames.");
                 constexpr int limits[] = {30, 60, 120, 0};

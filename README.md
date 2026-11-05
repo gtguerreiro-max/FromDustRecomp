@@ -37,11 +37,14 @@ rendering while the panel is open.
   FSR / CAS presentation, and sharpness. Changes apply immediately. **F11** or
   Alt+Enter toggles fullscreen.
 - **Gráficos:** anti-aliasing (original or **NVIDIA DLAA**, native renderer and
-  RTX GPU, applied immediately, with a live status line); **DLSS Frame
+  RTX GPU, applied immediately, with a live status line); **internal
+  resolution** 1x-3x and **DLSS Super Resolution** (Qualidade / Equilibrado /
+  Desempenho / Ultra desempenho) for the native renderer, applied
+  immediately; **DLSS Frame
   Generation** off / 2× / 3× / 4× (RTX 40 for 2×, RTX 50 for 3× / 4×; on or off
   applies on restart, the multiplier immediately; paused while the panel is
   open or the window is not focused); 1× / 2× / 3× internal
-  resolution, VSync, 30 / 60 / 120 / unlimited FPS, and anisotropic filtering.
+  resolution for the Xenia backend, VSync, 30 / 60 / 120 / unlimited FPS, and anisotropic filtering.
   The latter apply on restart, with an explicit **Reiniciar o jogo** button. VSync synchronizes the Windows swapchain;
   the guest frame limiter also runs at the point where frames are presented.
 - **Controlos:** automatic, keyboard/mouse or XInput controller. PC-style
