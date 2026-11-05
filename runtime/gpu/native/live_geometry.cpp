@@ -8,6 +8,9 @@
 #include "operations.h"
 #include "command_stream.h"
 #include "../xenia_bridge.h"
+#include "../../pointer.h"
+#include <bit>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <map>
@@ -90,6 +93,8 @@ struct LiveGeometryCapture::Impl
     std::optional<PendingResolve> resolve;
     GeometryBatch batch;
     std::map<std::string, VertexProgram> programs;
+    std::map<const NativeShader*, bool> cameraShaders;
+    bool frameCamera = false;
     struct VertexLoad{const NativeShader* shader=nullptr;bool immediate=false;uint32_t start=0;std::vector<uint8_t> code;};
     std::map<uint32_t,VertexLoad> vertexLoads; // per device: the vertex microcode the GPU last loaded
     bool reportFailed = false;
@@ -159,6 +164,24 @@ struct LiveGeometryCapture::Impl
         {
             if (!pending.shader) throw std::runtime_error("Unknown live vertex shader");
             if (!pending.state) throw std::runtime_error(pending.stateError);
+            // Scene camera for mouse pointing: the first full-screen terrain draw.
+            if (!frameCamera && pending.shader)
+            {
+                auto [known, inserted] = cameraShaders.try_emplace(pending.shader, false);
+                if (inserted)
+                {
+                    const auto& text = pending.shader->source;
+                    known->second = text.find("VS_DustConst(8)") != std::string::npos && text.find("VS_DustConst(11)") != std::string::npos;
+                }
+                const float width = 2 * std::fabs(std::bit_cast<float>(pending.state->regs[VPORT_XSCALE]));
+                if (known->second && width >= 1000)
+                {
+                    float rows[16];
+                    for (int i = 0; i < 16; ++i) rows[i] = std::bit_cast<float>(pending.vertexConstants[28 * 4 + i]);
+                    pointer::SetCamera(rows, width, 2 * std::fabs(std::bit_cast<float>(pending.state->regs[VPORT_YSCALE])));
+                    frameCamera = true;
+                }
+            }
             AppendCommands(pending.commands,pending.before,mem::Read32(pending.device+0x30));
             const uint32_t after=uint32_t(pending.commands.size());
             auto word=[&](uint32_t at){return CommandWord(pending.commands,at);};
@@ -416,7 +439,7 @@ void LiveGeometryCapture::Swap(uint64_t previousIndexed)
             c.batch.streams.bytes.reserve(streamBytes+streamBytes/4+65536);
             c.TrackStreams();
             c.geometryPackets=c.clearPackets=c.resolvePackets=c.patchedShaderSnapshots=0;
-            c.thread=0;
+            c.thread=0;c.frameCamera=false;
             return;
         }
         if(!c.failures&&c.patchedShaderSnapshots<c.minimumPatched) {

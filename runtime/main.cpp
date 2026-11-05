@@ -152,6 +152,7 @@ int main(int argc, char** argv)
         debug::StartProfiler(unsigned(atoi(profile)));
     debug::StartFloatScan();
     debug::StartWriteWatch();
+    debug::StartWordSearch();
 
     Module* main = MainModule();
     if (gpu::xenia::HasWindow()) {

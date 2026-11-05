@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <mutex>
 #include <vector>
 #define WIN32_LEAN_AND_MEAN
@@ -63,6 +64,8 @@ struct ScriptedPress { Gamepad pad; ULONGLONG from, until; };
 std::mutex g_scriptMutex;
 std::vector<ScriptedPress> g_script;
 std::atomic<bool> g_lastKeyboard{true};
+std::atomic<bool (*)()> g_pointerActive{nullptr};
+bool PointerActive() { auto query = g_pointerActive.load(); return query && query(); }
 std::atomic<uint32_t> g_promptGeneration{1};
 uint64_t g_promptSignature = 0;
 void UpdatePrompts(const settings::Data& d) {
@@ -173,7 +176,16 @@ uint32_t GetState(uint32_t user, State& state) {
             const bool pcMouse = d.mouseBreath || d.mouseButtons || d.cameraButton || d.wheelZoom;
             const int cameraKey = d.cameraButton == 1 ? VK_RBUTTON : d.cameraButton == 2 ? VK_MBUTTON : 0;
             const bool turning = cameraKey && (GetAsyncKeyState(cameraKey) & 0x8000);
-            if (pcMouse && d.mouseBreath) Capture(window, true);
+            const bool pointing = d.mouseBreath && PointerActive();
+            if (pcMouse && d.mouseBreath && !pointing) Capture(window, true);
+            if (pointing) {
+                // Visible cursor kept inside the window; the Breath follows it.
+                if (g_captured) Capture(window, false);
+                POINT centre{}; RECT screen{}; RECT current{};
+                if (WindowCentre(window, centre, screen) && (!GetClipCursor(&current) || current.left != screen.left ||
+                    current.top != screen.top || current.right != screen.right || current.bottom != screen.bottom))
+                    ClipCursor(&screen);
+            }
             if (GetCursorPos(&mouse)) {
                 const float elapsed = float(std::max<ULONGLONG>(1, now - g_mouseTick));
                 float dx = g_mouseValid ? float(mouse.x - g_mouse.x) : 0.0f;
@@ -190,7 +202,7 @@ uint32_t GetState(uint32_t user, State& state) {
                     state.pad.rightX = Axis(state.pad.rightX + dx * 40000.0f / elapsed);
                     state.pad.rightY = Axis(state.pad.rightY - dy * 40000.0f / elapsed);
                 }
-                if (d.mouseBreath && !turning) {
+                if (d.mouseBreath && !turning && !pointing) {
                     // Mouse speed (px/ms) -> left stick; ~0.8 px/ms is full deflection at 100 %.
                     const float gain = 32767.0f / 0.8f * (d.mouseSpeed / 100.0f) / elapsed;
                     g_breathX = g_breathX * 0.35f + dx * gain * 0.65f;
@@ -263,6 +275,37 @@ uint32_t GetState(uint32_t user, State& state) {
     state.packet = previous.packet + (memcmp(&state.pad, &previous.pad, sizeof(Gamepad)) != 0);
     previous = state;
     return ERROR_SUCCESS;
+}
+void SetPointerQuery(bool (*active)()) { g_pointerActive = active; }
+bool MousePosition(float& x, float& y) {
+    // FD_MOUSE_POINTS=<s>:<x>,<y>;...: diagnostic scripted mouse positions
+    // (fractions of the window) from those times after start.
+    static const std::vector<std::array<float, 3>> scripted = [] {
+        std::vector<std::array<float, 3>> points;
+        if (const char* text = getenv("FD_MOUSE_POINTS"))
+            for (const char* p = text; *p;) {
+                float t, px, py;
+                if (sscanf(p, "%f:%f,%f", &t, &px, &py) == 3) points.push_back({t, px, py});
+                const char* next = strchr(p, ';');
+                if (!next) break;
+                p = next + 1;
+            }
+        return points;
+    }();
+    static const ULONGLONG started = GetTickCount64();
+    if (!scripted.empty()) {
+        const float now = (GetTickCount64() - started) / 1000.0f;
+        const std::array<float, 3>* current = nullptr;
+        for (const auto& point : scripted) if (now >= point[0]) current = &point;
+        if (current) { x = (*current)[1]; y = (*current)[2]; return true; }
+    }
+    HWND window = g_window.load();
+    if (!window || GetForegroundWindow() != window || Blocked()) return false;
+    POINT mouse{}; RECT client{};
+    if (!GetCursorPos(&mouse) || !ScreenToClient(window, &mouse) || !GetClientRect(window, &client)) return false;
+    if (client.right <= 0 || client.bottom <= 0 || mouse.x < 0 || mouse.y < 0 || mouse.x >= client.right || mouse.y >= client.bottom) return false;
+    x = (mouse.x + 0.5f) / client.right; y = (mouse.y + 0.5f) / client.bottom;
+    return true;
 }
 bool KeyboardPrompts() {
     const int mode = settings::Get().inputMode;

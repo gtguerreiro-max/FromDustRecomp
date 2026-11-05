@@ -1334,3 +1334,33 @@ between sessions. The Breath's bounding box centre (object +16) is written by
 `sub_821CD4F8 -> sub_82111448 -> sub_82189670`, and by `sub_821F0FB0 <-
 sub_821F10A0 <- sub_82113100`. Arrays of repeated positions near it look like
 the Breath's trail. The gameplay position itself is not identified yet.
+
+## Mouse pointing (experimental, `FD_MOUSE_POINTING=1`) — 2026-11-05
+
+Found through the decompiled code and dustai's reflection metadata (Jade
+engine, AI scripts compiled to native code in `dustai.x360.f`):
+- `DustAi::UI_AbstractInterface` script fields (descriptor offsets):
+  v_CursorVirtualPos +0x64, v_joystickValues +0x74, v_PosCursor +0x80,
+  c_DeplacementCurseur +0x98, i_ForcePosCursor +0xAC, v_ForcePosCursor +0xB0.
+  The Xbox build has no pointer / mouse code (`IO_JoystickPointerGet`,
+  `IO_MouseMove` are never called).
+- `sub_8A1FA470` reads the pad stick (`IO_JoystickStickGet`, AI function 578,
+  with the invert-axis options) into input object +32.
+- `sub_8A1F4298` is the cursor update: it reads both sticks through
+  `sub_8A1FA230`, builds a camera-relative displacement, adds it to a vec3 at
+  +1744 of the object pointed to by `0x8A295318`, projects it on the terrain
+  (`sub_8A23AD78`, `sub_8A23B0F8`), stores it back and, with flag 0x80 of
+  +380, keeps it within radius +340 of the point +304 (the "small rectangle"
+  of the 2011 PC port). The engine is Z-up.
+
+`runtime/pointer.cpp` casts a ray from the mouse through the scene camera
+(VS_DustConst 8..11, base register 20, captured on the game thread) onto the
+cursor's height plane; `cursor_probe.cpp` writes the result after
+`sub_8A1F4298`. Projected, the +1744 point lands next to the lead villager
+during the "follow the men" tutorial while the Breath glow is elsewhere, and
+writes there do not stick: it looks like a scripted camera / virtual cursor,
+with the Breath catching up to it. Not enabled by default.
+
+Diagnostics: `FD_PROBE_STICK=<s>` (watchpoint on the stick vector),
+`FD_TRACE_POINTER=1`, `FD_POINTER_DRY=1`, `FD_MOUSE_POINTS=<s>:<x>,<y>;...`
+(scripted mouse), `FD_FIND_WORDS`, `FD_WATCH_READS`, `tools/test_mouse_pointer.ps1`.

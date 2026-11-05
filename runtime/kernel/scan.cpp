@@ -19,7 +19,7 @@
 
 namespace kernel::debug
 {
-void ArmWriteWatch(uint32_t address);
+void ArmWriteWatch(uint32_t address, bool readsToo = false);
 namespace
 {
 float ReadFloat(uint32_t address)
@@ -86,6 +86,26 @@ void StartFloatScan()
             return px != py ? py : x.score > y.score;
         });
         Log("float scan: %zu words moved there and back and then rested", hits.size());
+        // DustAi UI_AbstractInterface script block (reflection offsets):
+        // v_CursorVirtualPos +0x64, v_joystickValues +0x74, v_PosCursor +0x80,
+        // i_ForcePosCursor +0xAC, v_ForcePosCursor +0xB0.
+        {
+            std::vector<uint32_t> bases;
+            for (const auto& hit : hits)
+                for (uint32_t field : {0x80u, 0x84u, 0x88u, 0x64u, 0x68u, 0x6Cu})
+                {
+                    const uint32_t at = addresses[hit.index], baseAddress = at - field;
+                    uint32_t force; memcpy(&force, mem::Translate(baseAddress + 0xAC), 4); force = _byteswap_ulong(force);
+                    if (force > 1 || std::find(bases.begin(), bases.end(), baseAddress) != bases.end()) continue;
+                    bases.push_back(baseAddress);
+                    if (bases.size() > 40) break;
+                    Log("float scan: ui block? %08X (moved field +%02X)  virtual (%.2f %.2f %.2f)  joystick (%.2f %.2f %.2f)  pos (%.2f %.2f %.2f)  force %u (%.2f %.2f %.2f)",
+                        baseAddress, field, ReadFloat(baseAddress + 0x64), ReadFloat(baseAddress + 0x68), ReadFloat(baseAddress + 0x6C),
+                        ReadFloat(baseAddress + 0x74), ReadFloat(baseAddress + 0x78), ReadFloat(baseAddress + 0x7C),
+                        ReadFloat(baseAddress + 0x80), ReadFloat(baseAddress + 0x84), ReadFloat(baseAddress + 0x88), force,
+                        ReadFloat(baseAddress + 0xB0), ReadFloat(baseAddress + 0xB4), ReadFloat(baseAddress + 0xB8));
+                }
+        }
         // A moved vector followed by a unit scale (1, 1, 1): an object transform.
         for (const auto& hit : hits)
         {
@@ -93,7 +113,7 @@ void StartFloatScan()
             if (ReadFloat(at + 12) == 1.0f && ReadFloat(at + 16) == 1.0f && ReadFloat(at + 20) == 1.0f)
             {
                 Log("float scan: transform candidate %08X = (%.2f %.2f %.2f)", at, ReadFloat(at), ReadFloat(at + 4), ReadFloat(at + 8));
-                if (const char* watch = getenv("FD_WATCH_WRITE"); watch && !strcmp(watch, "auto")) { ArmWriteWatch(at); break; }
+                if (const char* watch = getenv("FD_WATCH_WRITE"); watch && !strcmp(watch, "auto")) { ArmWriteWatch(at, false); break; }
             }
         }
         for (size_t n = 0; n < hits.size() && n < 120; ++n)
@@ -130,7 +150,7 @@ LONG WINAPI WatchHandler(EXCEPTION_POINTERS* info)
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 }
-void ArmWriteWatch(uint32_t address)
+void ArmWriteWatch(uint32_t address, bool readsToo)
 {
         g_watchGuest = address;
         g_watchHost = reinterpret_cast<uintptr_t>(mem::Translate(address));
@@ -150,7 +170,7 @@ void ArmWriteWatch(uint32_t address)
                 if (GetThreadContext(thread, &context))
                 {
                     context.Dr0 = g_watchHost;
-                    context.Dr7 = (context.Dr7 & ~0xF0003ull) | 1 | (1ull << 16) | (3ull << 18);
+                    context.Dr7 = (context.Dr7 & ~0xF0003ull) | 1 | ((readsToo ? 3ull : 1ull) << 16) | (3ull << 18);
                     if (SetThreadContext(thread, &context)) ++armed;
                 }
                 ResumeThread(thread);
@@ -170,7 +190,51 @@ void StartWriteWatch()
     const ULONGLONG start = GetTickCount64();
     std::thread([address, seconds, start] {
         while (GetTickCount64() < start + ULONGLONG(seconds * 1000)) Sleep(10);
-        ArmWriteWatch(address);
+        ArmWriteWatch(address, getenv("FD_WATCH_READS") != nullptr);
+    }).detach();
+}
+}
+
+// FD_FIND_WORDS=<hex>,<hex>...@<seconds>: logs every aligned big-endian
+// occurrence of those words in the guest allocations and module images, with
+// the 48 bytes around each (reflection tables, pointers to known strings).
+namespace kernel::debug
+{
+void StartWordSearch()
+{
+    const char* option = getenv("FD_FIND_WORDS");
+    if (!option) return;
+    std::vector<uint32_t> words;
+    for (const char* p = option; *p && *p != '@';)
+    {
+        words.push_back(uint32_t(strtoul(p, nullptr, 16)));
+        const char* comma = strchr(p, ',');
+        if (!comma) break;
+        p = comma + 1;
+    }
+    const char* at = strchr(option, '@');
+    const double seconds = at ? atof(at + 1) : 0;
+    const ULONGLONG start = GetTickCount64();
+    std::thread([words, seconds, start] {
+        while (GetTickCount64() < start + ULONGLONG(seconds * 1000)) Sleep(10);
+        auto ranges = mem::AllocatedRanges();
+        ranges.push_back({0x82000000u, 0x0A000000u}); // module images
+        unsigned found = 0;
+        for (const auto& [address, size] : ranges)
+            for (uint32_t a = address; a + 4 <= address + size && found < 200; a += 4)
+            {
+                uint32_t raw; memcpy(&raw, mem::Translate(a), 4); raw = _byteswap_ulong(raw);
+                if (std::find(words.begin(), words.end(), raw) == words.end()) continue;
+                ++found;
+                std::string bytes;
+                for (int k = -16; k < 32; k += 4)
+                {
+                    uint32_t w; memcpy(&w, mem::Translate(a + k), 4);
+                    char text[12]; snprintf(text, sizeof(text), k == 0 ? " [%08X]" : " %08X", _byteswap_ulong(w)); bytes += text;
+                }
+                Log("word search: %08X at %08X:%s", raw, a, bytes.c_str());
+            }
+        Log("word search: %u hits", found);
     }).detach();
 }
 }

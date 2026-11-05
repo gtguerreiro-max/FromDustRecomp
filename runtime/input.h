@@ -27,6 +27,12 @@ void SchedulePad(const Gamepad& pad, uint32_t delayMs, uint32_t durationMs);
 // On-screen prompts: keyboard / mouse glyphs while the keyboard or mouse was
 // the last device used (or always / never, per the input mode setting).
 bool KeyboardPrompts();
+// The mouse in the game window, normalized to [0, 1] (false when the window is
+// not focused, input is blocked by the menu, or the mouse is outside).
+bool MousePosition(float& x, float& y);
+// Mouse pointing (pointer.cpp) registers whether it drives the Breath; the
+// relative mouse-as-stick emulation and cursor capture are off meanwhile.
+void SetPointerQuery(bool (*active)());
 // Changes whenever the prompt style or a binding shown in prompts changes.
 uint32_t PromptGeneration();
 }
