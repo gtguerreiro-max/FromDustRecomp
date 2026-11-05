@@ -161,8 +161,11 @@ uint32_t GetState(uint32_t user, State& state) {
             if (pcMouse && d.mouseBreath) Capture(window, true);
             if (GetCursorPos(&mouse)) {
                 const float elapsed = float(std::max<ULONGLONG>(1, now - g_mouseTick));
-                const float dx = g_mouseValid ? float(mouse.x - g_mouse.x) : 0.0f;
-                const float dy = g_mouseValid ? float(mouse.y - g_mouse.y) : 0.0f;
+                float dx = g_mouseValid ? float(mouse.x - g_mouse.x) : 0.0f;
+                float dy = g_mouseValid ? float(mouse.y - g_mouse.y) : 0.0f;
+                // A jump of more than a third of the screen in one poll is the
+                // cursor being clipped / warped, not a hand movement.
+                if (std::abs(dx) > 600 || std::abs(dy) > 400) dx = dy = 0;
                 if (turning) {
                     state.pad.rightX = Axis(state.pad.rightX + dx * 40000.0f / elapsed);
                     state.pad.rightY = Axis(state.pad.rightY - dy * 40000.0f / elapsed);
@@ -184,7 +187,15 @@ uint32_t GetState(uint32_t user, State& state) {
                 // Keep the hidden cursor inside the window so movement never stops at an edge.
                 POINT centre{}; RECT screen{};
                 if (g_captured && WindowCentre(window, centre, screen)) {
-                    ClipCursor(&screen);
+                    RECT current{};
+                    if (!GetClipCursor(&current) || current.left != screen.left || current.top != screen.top ||
+                        current.right != screen.right || current.bottom != screen.bottom) {
+                        // Clipping (re)starts: the OS moves the cursor inside;
+                        // the next poll measures from the new position.
+                        ClipCursor(&screen);
+                        SetCursorPos(centre.x, centre.y);
+                        g_mouse = centre;
+                    }
                     if (std::abs(mouse.x - centre.x) > (screen.right - screen.left) / 4 ||
                         std::abs(mouse.y - centre.y) > (screen.bottom - screen.top) / 4) {
                         SetCursorPos(centre.x, centre.y);
@@ -198,8 +209,12 @@ uint32_t GetState(uint32_t user, State& state) {
             }
             // Each wheel notch holds the camera's vertical axis (zoom) briefly.
             if (const int wheel = g_wheel.exchange(0); wheel && d.wheelZoom) {
-                g_wheelDirection = (wheel > 0 ? 1 : -1) * (d.wheelZoom == 2 ? -1 : 1);
-                g_wheelUntil = now + ULONGLONG(90 * std::min(4, std::max(1, std::abs(wheel) / WHEEL_DELTA)));
+                const int direction = (wheel > 0 ? 1 : -1) * (d.wheelZoom == 2 ? -1 : 1);
+                // 220 ms of full deflection per notch; notches in the same
+                // direction accumulate (up to ~1.3 s), a reversal restarts.
+                const ULONGLONG start = direction == g_wheelDirection && g_wheelUntil > now ? g_wheelUntil : now;
+                g_wheelDirection = direction;
+                g_wheelUntil = std::min(now + 1300, start + ULONGLONG(220 * std::min(6, std::max(1, std::abs(wheel) / WHEEL_DELTA))));
             }
             if (now < g_wheelUntil) state.pad.rightY = Axis(state.pad.rightY + g_wheelDirection * 32767.0f);
         }

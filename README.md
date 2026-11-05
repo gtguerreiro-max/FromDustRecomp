@@ -20,8 +20,9 @@ The executable can also be opened directly from `build/`: it finds the sibling
 
 The experimental native D3D12 renderer can be selected with `Jogar-nativo.cmd`
 or `.\play.ps1 -Renderer native`, using `build/native-shaders-live/catalog.bin`.
-It now reaches the Breath tutorial, but visual fidelity, transitions and speed
-are still being validated. The regular launcher keeps Xenia as its default.
+It plays the game (title, introduction, tutorial levels) at the game's 30 FPS,
+with NVIDIA DLAA available in the F1 panel on RTX GPUs. Synchronized frames
+compare with Xenia at 50-52 dB. The regular launcher keeps Xenia as its default.
 
 ## PC settings panel
 
@@ -34,12 +35,17 @@ rendering while the panel is open.
   and frame interval counters, HUD corner, 75–150% interface scale, bilinear /
   FSR / CAS presentation, and sharpness. Changes apply immediately. **F11** or
   Alt+Enter toggles fullscreen.
-- **Gráficos:** 1× / 2× / 3× internal resolution, VSync, 30 / 60 / 120 / unlimited
-  FPS, and anisotropic filtering. These options apply on restart, with an
-  explicit **Reiniciar o jogo** button. VSync synchronizes the Windows swapchain;
+- **Gráficos:** anti-aliasing (original or **NVIDIA DLAA**, native renderer and
+  RTX GPU, applied immediately, with a live status line); 1× / 2× / 3× internal
+  resolution, VSync, 30 / 60 / 120 / unlimited FPS, and anisotropic filtering.
+  The latter apply on restart, with an explicit **Reiniciar o jogo** button. VSync synchronizes the Windows swapchain;
   the guest frame limiter also runs at the point where frames are presented.
-- **Controlos:** automatic, keyboard/mouse or XInput controller; camera
-  sensitivity, stick deadzone, invert Y, mouse camera and controller vibration.
+- **Controlos:** automatic, keyboard/mouse or XInput controller. PC-style
+  mouse: moving the mouse guides the Breath (with its own speed), left button
+  absorbs (LT), right button releases (RT), holding the middle button turns
+  the camera and the wheel zooms; the cursor is hidden while playing and
+  returns with F1 / Esc. Camera sensitivity, stick deadzone, invert Y and
+  controller vibration. Hover an option for an explanation.
   Click any keyboard binding, then press the new key. Escape cancels. Reusing a
   key swaps the two assignments. F1, F11 and Escape are reserved for the panel.
 - **Renderer e estatísticas:** active backend, GPU, local memory usage/budget,

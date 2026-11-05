@@ -1008,3 +1008,50 @@ tracking, resource persistence across frames, complete submitted-draw expansion
 and native presentation remain pending. Mip-only views, 3D/stacked textures,
 cube mip chains, float mip tables and overlapping base rows fail explicitly;
 they are not silently replaced or inferred.
+
+## DLAA / DLSS and CPU frame production — 2026-11-05
+
+**DLAA** (`runtime/gpu/native/upscaler.{h,cpp}`, `motion.hlsl`) uses the NGX
+DLSS SDK directly (github.com/NVIDIA/DLSS, sparse checkout in
+`third_party/dlss_sdk`, not committed; `nvngx_dlss.dll` is copied next to the
+executable). Standard NGX calls also let NGX injectors such as OptiScaler (and
+its DLSS 5 neural-rendering fork) attach as they do to PC games.
+
+- Scene boundary: the last colour resolve with the front buffer's size that is
+  followed by a smaller pass (in From Dust: the copy to `0x00DBC000` before
+  the 512x300 / 256x150 bloom chain and the HUD). DLSS evaluates that copy and
+  the result replaces it, so post-processing and HUD are unchanged.
+- Jitter: Halton(2,3), 8+ phases, added to the shared half-pixel offset of
+  scene draws at output size (index count > 6, so screen quads are excluded).
+- Motion vectors: camera-only reprojection of the scene depth with this and the
+  previous frame's world-to-clip matrix — `VS_DustConst[8..11]` (c28..c31) of
+  the terrain shaders, detected by shader source. Moving units and deforming
+  water/terrain get camera motion only (DLSS treats the rest as disocclusion).
+- F1 > Gráficos > Anti-aliasing selects it live; `FD_NATIVE_UPSCALER=dlaa`
+  overrides; `FD_UPSCALER_NO_JITTER`, `FD_UPSCALER_JITTER_FLIP`,
+  `FD_UPSCALER_BYPASS` are diagnostics. Diagnostic frame dumps add the scene
+  before / after DLSS and the motion vectors (`resolve_*_D155*`).
+- Verified: thousands of evaluated frames with the D3D12 debug layer and no
+  errors. DLSS Super Resolution modes exist in the API but are not exposed:
+  the game's post-processing and HUD are fixed at 1024x600, so a higher
+  output resolution first needs internal resolution scaling of the whole
+  pipeline (Xenia's 2x/3x is known to break this game's effects).
+- DLSS 5 (3D-guided neural rendering): the public Streamline 2.14.16 declares
+  `kFeatureDLSS_NR` but ships no plugin or header; the model is delivered to
+  supported games over the air. Not integrated.
+
+**CPU frame production** was the native path's real bottleneck (15–16 FPS,
+renderer ~10 ms). With a game-thread profile (`FD_PROFILE`, which now also
+prints self <- caller pairs) and `FD_NATIVE_PROFILE` capture timings:
+vertex streams / indices cached across frames by guest range and write-watch
+revision with bulk byte swaps; per-frame command / stream vectors keep their
+capacity; `DescribeTextureStorage` cached by fetch; texture revisions re-read
+only after watched writes; fixed16 decode hoisted; hot `getenv` removed.
+Result: 30–31 FPS (the game's own rate) with DLAA. Texture, geometry and
+memory-frame regression tests still match exactly. Remaining per-frame cost:
+~6 ms re-decoding the two CPU-written water textures (3 MB), ~3 ms geometry,
+~10 ms rendering.
+
+Synchronized native vs Xenia frames (same swap, `validate_native_textures.ps1
+-NativeFrame`): 50.44 dB / 15 of 614,400 pixels over 32 at 325 s, 52.41 dB /
+0 pixels at 410 s.

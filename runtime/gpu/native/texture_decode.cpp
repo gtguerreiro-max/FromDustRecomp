@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <future>
+#include <thread>
 
 namespace gpu::native
 {
@@ -172,7 +174,10 @@ DecodedTexture Decode(std::span<const uint32_t,6> fetch,std::span<const uint8_t>
         fixedPower=std::ldexp(1.0,int(((fetch[3]>>13&63)^32))-32);
         for(uint32_t c=0;c<fixedComponents;++c)fixedSigned[c]=(fetch[0]>>(2+c*2)&3)==1;
     }
-    for(uint32_t y=0;y<rows;++y)for(uint32_t x=0;x<columns;++x)
+    // Large images (the CPU-written water textures change every frame) are
+    // decoded in row bands on a few threads; each band writes its own rows.
+    auto decodeRows=[&](uint32_t firstRow,uint32_t endRow){
+    for(uint32_t y=firstRow;y<endRow;++y)for(uint32_t x=0;x<columns;++x)
     {
         const uint64_t at=offset+(tiled?(volumeRows?TextureBlockAddress3D(x,y,volumeZ,pitchBlocks,volumeRows,storage.bytes):Tiled(x+xBlocks,y+yBlocks,(pitchBlocks+31)&~31u,storage.bytes)):
             (uint64_t(y+yBlocks)*pitchBlocks+x+xBlocks)*storage.bytes);
@@ -202,6 +207,18 @@ DecodedTexture Decode(std::span<const uint32_t,6> fetch,std::span<const uint8_t>
             const auto pixel=Texel(raw,at,info.format);
             memcpy(result.pixels.data()+(size_t(y)*width+x)*4,pixel.data(),4);
         }
+    }
+    };
+    const uint32_t bands=rows>=256&&uint64_t(rows)*columns>=65536?(std::min)(4u,(std::max)(1u,std::thread::hardware_concurrency()/2)):1u;
+    if(bands<=1)decodeRows(0,rows);
+    else
+    {
+        std::vector<std::future<void>> work;
+        const uint32_t step=(rows+bands-1)/bands;
+        for(uint32_t band=1;band<bands;++band)
+            work.push_back(std::async(std::launch::async,decodeRows,(std::min)(rows,band*step),(std::min)(rows,(band+1)*step)));
+        decodeRows(0,(std::min)(rows,step));
+        for(auto& done:work)done.get(); // rethrows decode errors
     }
     return result;
 }

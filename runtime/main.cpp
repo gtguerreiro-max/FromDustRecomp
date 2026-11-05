@@ -123,15 +123,15 @@ int main(int argc, char** argv)
             std::this_thread::sleep_for(std::chrono::seconds(seconds));
             ExitProcess(gpu::native::audit::Finish() ? 0 : 1);
         }).detach();
-    // FD_AUTOPRESS=<seconds>:<hex buttons>[:<ms>[:<LT>:<RT>[:<LX>:<LY>]]][,...] drives pad 0,
+    // FD_AUTOPRESS=<seconds>:<hex buttons>[:<ms>[:<LT>:<RT>[:<LX>:<LY>[:<RX>:<RY>]]]][,...] drives pad 0,
     // e.g. "40:0010" = Start, "160:0:4000:255:0" = hold LT for 4 s, "170:0:2000:0:0:20000:0" = left stick right.
     if (const char* press = getenv("FD_AUTOPRESS"); press && *press)
     {
         for (const char* p = press; p && *p; p = strchr(p, ','), p = p ? p + 1 : nullptr)
         {
             unsigned seconds = 0, buttons = 0, ms = 300, lt = 0, rt = 0;
-            int lx = 0, ly = 0;
-            if (sscanf(p, "%u:%x:%u:%u:%u:%d:%d", &seconds, &buttons, &ms, &lt, &rt, &lx, &ly) >= 2)
+            int lx = 0, ly = 0, rx = 0, ry = 0;
+            if (sscanf(p, "%u:%x:%u:%u:%u:%d:%d:%d:%d", &seconds, &buttons, &ms, &lt, &rt, &lx, &ly, &rx, &ry) >= 2)
             {
                 pcinput::Gamepad pad;
                 pad.buttons = uint16_t(buttons);
@@ -139,6 +139,8 @@ int main(int argc, char** argv)
                 pad.rightTrigger = uint8_t(std::min(rt, 255u));
                 pad.leftX = int16_t(lx);
                 pad.leftY = int16_t(ly);
+                pad.rightX = int16_t(rx);
+                pad.rightY = int16_t(ry);
                 pcinput::SchedulePad(pad, seconds * 1000, ms);
             }
         }
