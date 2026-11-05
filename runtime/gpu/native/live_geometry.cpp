@@ -76,7 +76,7 @@ struct LiveGeometryCapture::Impl
     bool reportFailed = false;
     bool pullPrimary=false;
     std::function<void(Draw&)> onCommand;
-    std::function<void(const GeometryBatch&)> onFrame;
+    std::function<void(GeometryBatch&)> onFrame;
     std::map<std::pair<uint32_t,uint32_t>,uint64_t> watchedStreams;
     // FD_NATIVE_PROFILE: CPU cost of the live collection, per frame.
     bool profile=getenv("FD_NATIVE_PROFILE")!=nullptr;
@@ -458,7 +458,7 @@ audit::Status LiveGeometryCapture::Status() const {
     result.geometryPackets=c.geometryPackets;result.clearPackets=c.clearPackets;result.resolvePackets=c.resolvePackets;result.captureFailures=c.failures;
     return result;
 }
-void LiveGeometryCapture::SetContinuous(std::function<void(Draw&)> command,std::function<void(const GeometryBatch&)> frame)
+void LiveGeometryCapture::SetContinuous(std::function<void(Draw&)> command,std::function<void(GeometryBatch&)> frame)
 {
     auto& c=*impl;
     c.onCommand=std::move(command);c.onFrame=std::move(frame);c.pullPrimary=true;c.state=Impl::State::Capturing;

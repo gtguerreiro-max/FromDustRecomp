@@ -25,7 +25,7 @@ public:
     void ArmFrame(uint64_t serial);
     bool Finish();
     const GeometryBatch* Captured() const;
-    void SetContinuous(std::function<void(Draw&)> command,std::function<void(const GeometryBatch&)> frame);
+    void SetContinuous(std::function<void(Draw&)> command,std::function<void(GeometryBatch&)> frame); // frame may take the batch's vectors
     void CommandBlock(uint32_t device,bool begin);
 private:
     struct Impl;

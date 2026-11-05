@@ -1136,3 +1136,24 @@ whole-EDRAM scaling breaks them).
 - Verified: texture / geometry / memory-frame regressions exact at 1x with the
   rebuilt catalog; title, menus, intro video and the first level match 1x at
   2x; DLSS Performance 1024x600 -> 2048x1200 and Quality in the level.
+
+## Rendering off the game thread — 2026-11-05
+
+The native renderer used to run inside VdSwap on the game's render thread:
+in the level's opening flight the thread spent ~46% in VdSwap (render, present)
+and ~32% capturing draws, leaving ~23% (about 11 ms) for the game itself, so
+heavy scenes ran at 20-22 FPS. `live_audit.cpp` now hands each captured frame
+to a render worker: the batch's command / stream vectors are swapped with
+recycled ones, the frame's texture references are copied (resources are
+immutable `shared_ptr`s, replaced on change), and the game goes on capturing
+the next frame while the worker builds the draws, renders, presents and paces.
+One frame is in flight; the next hand-over waits for it. `FD_NATIVE_SYNC=1`
+restores inline rendering. The renderer never reads guest memory, so the
+overlap is safe; geometry bytes are copied into each frame's own arena.
+
+Result: the level's opening flight holds 30 FPS (was 20-22). With
+`FD_VBLANK_HZ=120` and no frame limit the game loop itself reaches 60 FPS
+there, and 40 in the menus. At 60 FPS the camera of that cutscene stays on time
+(it is time-based), but the sea and the narration run ahead: the simulation
+steps per frame, so a higher rate needs the simulation decoupled from the
+render loop first (in progress).

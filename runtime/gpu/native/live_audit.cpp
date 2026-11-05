@@ -18,6 +18,8 @@
 #include <span>
 #include <stdexcept>
 #include <chrono>
+#include <condition_variable>
+#include <thread>
 #include "replay_frame.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -34,6 +36,85 @@ struct Frame
     std::map<std::pair<uint32_t, uint32_t>, uint64_t> missing;
     uint64_t Draws() const { return calls[0] + calls[1] + calls[2]; }
 };
+// Off-thread native rendering. At VdSwap the game's render thread hands the
+// captured frame (commands, converted streams, texture references) to the
+// render worker and goes on with the next frame while this one is rendered,
+// submitted and presented. One frame is in flight: the next hand-over waits for
+// it, and the vectors come back for reuse. FD_NATIVE_SYNC=1 renders inline.
+struct RenderJob
+{
+    std::vector<GeometryBatch::Command> commands;
+    std::vector<uint8_t> bytes;
+    std::vector<StreamArena::Entry> entries;
+    std::vector<std::shared_ptr<TextureResource>> textures;
+    uint32_t frontBuffer = 0;
+    bool dump = false;
+};
+class RenderWorker
+{
+public:
+    explicit RenderWorker(std::function<void(RenderJob&)> render) : render(std::move(render))
+    {
+        sync = getenv("FD_NATIVE_SYNC") != nullptr;
+        if (!sync) thread = std::thread([this] { Run(); });
+    }
+    // Game thread: waits for the previous frame, then takes this frame's data.
+    void Submit(GeometryBatch& batch, std::span<const std::shared_ptr<TextureResource>> textures, uint32_t frontBuffer, bool dump)
+    {
+        std::unique_lock lock(mutex);
+        idle.wait(lock, [&] { return !pending && !busy; });
+        job.commands.swap(batch.commands);
+        job.bytes.swap(batch.streams.bytes);
+        job.entries.swap(batch.streams.entries);
+        job.textures.assign(textures.begin(), textures.end());
+        job.frontBuffer = frontBuffer;
+        job.dump = dump;
+        if (sync)
+        {
+            lock.unlock();
+            Execute();
+            return;
+        }
+        pending = true;
+        ready.notify_one();
+    }
+private:
+    void Execute()
+    {
+        try { render(job); }
+        catch (const std::exception& error)
+        {
+            kernel::Log("native frame: %s", error.what());
+            ExitProcess(1);
+        }
+        job.commands.clear();job.bytes.clear();job.entries.clear();job.textures.clear();
+    }
+    void Run()
+    {
+        kernel::Log("native renderer: rendering off the game thread");
+        for (;;)
+        {
+            {
+                std::unique_lock lock(mutex);
+                ready.wait(lock, [&] { return pending; });
+                pending = false;
+                busy = true;
+            }
+            Execute();
+            {
+                std::lock_guard lock(mutex);
+                busy = false;
+            }
+            idle.notify_all();
+        }
+    }
+    std::function<void(RenderJob&)> render;
+    std::mutex mutex;
+    std::condition_variable ready, idle;
+    RenderJob job;
+    bool pending = false, busy = false, sync = false;
+    std::thread thread;
+};
 struct Context
 {
     explicit Context(ShaderCatalog value) : catalog(std::move(value)) {}
@@ -49,6 +130,7 @@ struct Context
     uint32_t frontBuffer=0;
     std::unique_ptr<Renderer> renderer;
     LiveResources resources;
+    std::unique_ptr<RenderWorker> worker;
     uint64_t dumpAt=UINT64_MAX;
     double packMs=0,renderMs=0,presentMs=0;
     uint64_t frames = 0, initializations = 0, matched = 0, invalid = 0;
@@ -169,7 +251,7 @@ bool Initialize()
                 created->geometry->SetContinuous([c](gpu::native::Draw& draw){
                     if(draw.resolve)c->resources.Resolve(draw.textureFetches[0]);
                     else if(!draw.clear)c->resources.Bind(draw,c->catalog);
-                },[c](const GeometryBatch& batch){
+                },[c](GeometryBatch& batch){
                     if(batch.commands.empty()){c->resources.BeginFrame();return;}
                     static const bool profile=getenv("FD_NATIVE_PROFILE")!=nullptr;
                     static uint64_t profileFrames=0;
@@ -181,14 +263,20 @@ bool Initialize()
                         for(const auto& command:batch.commands){mesh+=command.pixelShader=="086";terrain+=command.pixelShader=="146";depth+=command.vertexShader=="067";}
                         kernel::Log("native CPU frame %llu: %zu records, mesh %u terrain %u mesh-depth %u",c->frames+1,batch.commands.size(),mesh,terrain,depth);
                     }
+                    const bool dump=GetTickCount64()>=c->dumpAt;
+                    if(dump)c->dumpAt=UINT64_MAX;
+                    c->worker->Submit(batch,c->resources.FrameResources(),c->frontBuffer,dump);
+                    c->resources.BeginFrame();
+                });
+                created->worker=std::make_unique<RenderWorker>([c](RenderJob& job){
                     if(!c->renderer->CompletedFrames()&&!c->renderer->UseDevice(xenia::NativeDevice()))throw std::runtime_error("Native UI device unavailable");
                     const auto started=std::chrono::steady_clock::now();
-                    std::vector<gpu::native::Draw> draws;draws.reserve(batch.commands.size());
-                    for(const auto& command:batch.commands){gpu::native::Draw draw;command.BindGeometryAndConstants(draw);draws.push_back(std::move(draw));}
-                    FrameInput input;input.draws=draws;input.resources=c->resources.FrameResources();
-                    input.streams=batch.streams.bytes;input.continuous=true;input.frontBufferBase=c->frontBuffer;
+                    std::vector<gpu::native::Draw> draws;draws.reserve(job.commands.size());
+                    for(const auto& command:job.commands){gpu::native::Draw draw;command.BindGeometryAndConstants(draw);draws.push_back(std::move(draw));}
+                    FrameInput input;input.draws=draws;input.resources=job.textures;
+                    input.streams=job.bytes;input.continuous=true;input.frontBufferBase=job.frontBuffer;
                     std::string diagnostic;
-                    if(GetTickCount64()>=c->dumpAt){diagnostic="native-session-frame";ReplayFrame::Save(input,diagnostic);c->dumpAt=UINT64_MAX;}
+                    if(job.dump){diagnostic="native-session-frame";ReplayFrame::Save(input,diagnostic);}
                     const auto packed=std::chrono::steady_clock::now();
                     if(c->renderer->RenderFrame(input,diagnostic))throw std::runtime_error("Native frame execution failed");
                     const auto rendered=std::chrono::steady_clock::now();
@@ -198,7 +286,6 @@ bool Initialize()
                     c->renderMs+=std::chrono::duration<double,std::milli>(rendered-packed).count();
                     c->presentMs+=std::chrono::duration<double,std::milli>(presented-rendered).count();
                     if(c->renderer->CompletedFrames()%60==0){kernel::Log("native frame costs: pack %.2f ms, render %.2f ms, present/pace %.2f ms",c->packMs/60,c->renderMs/60,c->presentMs/60);c->packMs=c->renderMs=c->presentMs=0;}
-                    c->resources.BeginFrame();
                 });
             }
         }
