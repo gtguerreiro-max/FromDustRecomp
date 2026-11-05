@@ -90,7 +90,10 @@ int main(int argc, char** argv)
     debug::InstallCrashHandler();
 
     vfs::SetGameDirectory(gameDir);
-    vfs::SetUserDirectory(exeDir / "user");
+    // FD_USER_DIR: another profile / save folder (bounded test sessions start
+    // from a clean save so menu flows are reproducible).
+    if (const char* user = getenv("FD_USER_DIR"); user && *user) vfs::SetUserDirectory(std::filesystem::path(user));
+    else vfs::SetUserDirectory(exeDir / "user");
     if (const char* test = getenv("FD_SELFTEST"); test && !strcmp(test, "save"))
         return selftest::RunSave() ? 0 : 1;
     if (!gpu::native::audit::Initialize() || !LoadModules(gameDir))

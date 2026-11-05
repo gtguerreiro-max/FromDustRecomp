@@ -431,15 +431,19 @@ namespace gpu
             kernel::AdoptHostThread(0x10000);
             auto next = std::chrono::steady_clock::now();
             uint64_t lastFrames = 0, ticks = 0;
+            // FD_VBLANK_HZ: experimental vblank rate (the game presents every
+            // second vblank, so 120 Hz lets it run its loop at 60 FPS).
+            static const int hz = [] { const char* v = getenv("FD_VBLANK_HZ"); return v && atoi(v) >= 30 ? atoi(v) : 60; }();
+            const auto period = std::chrono::nanoseconds(1000000000LL / hz);
             for (;;)
             {
-                next += std::chrono::microseconds(16667);
+                next += period;
                 std::this_thread::sleep_until(next);
                 ++g_vblankCounter;
                 // D3D's vblank handler checks the vblank status register first.
                 mem::Write32(kMmioBase + reg::D1MODE_VBLANK_VLINE_STATUS * 4, 1);
                 DispatchInterrupt(0, 2);
-                if (++ticks % 60 == 0)
+                if (++ticks % uint64_t(hz) == 0)
                 {
                     const uint64_t frames = g_stats.frames.load();
                     kernel::Log("gpu: %llu fps, %llu draws total, %llu packets total", frames - lastFrames,

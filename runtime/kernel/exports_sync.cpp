@@ -391,10 +391,18 @@ KFUNC(KeWaitForMultipleObjects)
 // OwningThread @0x18. The lock word only ever holds -1 (free) or 0 (taken),
 // which read the same in either byte order, so it can be used natively with
 // WaitOnAddress.
+//
+// Fairness: the header's SignalState (+4, unused by this implementation of the
+// Rtl functions; only the kernel touches it) counts waiting threads. When a
+// thread leaves with waiters present, it hands the section over (the lock
+// stays taken and the owner becomes kCsHandoff) instead of releasing it, so a
+// thread that re-enters every frame (the main thread) cannot starve the others.
+// Without this the level loader could wait on the main thread forever.
 
 namespace
 {
-    constexpr uint32_t kCsLock = 0x10, kCsRecursion = 0x14, kCsOwner = 0x18;
+    constexpr uint32_t kCsWaiters = 0x04, kCsLock = 0x10, kCsRecursion = 0x14, kCsOwner = 0x18;
+    constexpr uint32_t kCsHandoff = 0xFFFFFFFE;
 
     void InitCriticalSection(uint32_t cs)
     {
@@ -418,6 +426,18 @@ namespace
         mem::Write32(cs + kCsRecursion, 1);
         return true;
     }
+
+    // A section handed over by its last owner: claimed by exactly one waiter.
+    bool TryClaimHandoff(uint32_t cs, uint32_t me)
+    {
+        auto* owner = mem::Ptr<volatile long>(cs + kCsOwner);
+        // The owner field is big-endian guest memory (read with mem::Read32).
+        const long handoff = long(_byteswap_ulong(kCsHandoff)), mine = long(_byteswap_ulong(me));
+        if (_InterlockedCompareExchange(owner, mine, handoff) != handoff)
+            return false;
+        mem::Write32(cs + kCsRecursion, 1);
+        return true;
+    }
 }
 
 KFUNC(RtlInitializeCriticalSection) { InitCriticalSection(ARG0); RETURN(0); }
@@ -431,17 +451,29 @@ KFUNC(RtlEnterCriticalSection)
         mem::Write32(cs + kCsRecursion, mem::Read32(cs + kCsRecursion) + 1);
         RETURN(0);
     }
-    auto* lock = mem::Ptr<volatile long>(cs + kCsLock);
-    for (int spin = 0; !TryEnter(cs, me); spin++)
+    for (int spin = 0; spin < 128; spin++)
     {
-        if (spin < 128)
-        {
-            _mm_pause();
-            continue;
-        }
+        if (TryEnter(cs, me)) RETURN(0);
+        _mm_pause();
+    }
+    auto* lock = mem::Ptr<volatile long>(cs + kCsLock);
+    auto* waiters = mem::Ptr<volatile long>(cs + kCsWaiters);
+    _InterlockedIncrement(waiters);
+    for (int wait = 0; !TryClaimHandoff(cs, me) && !TryEnter(cs, me); wait++)
+    {
         long taken = 0;
         WaitOnAddress(lock, &taken, sizeof(taken), 10);
+        // Diagnostics: report a critical section held for more than 5 s once.
+        if (wait == 500)
+        {
+            const uint32_t owner = mem::Read32(cs + kCsOwner);
+            const GuestThread* self = CurrentThread();
+            Log("critical section %08X: thread %u waits 5 s; owner kthread %08X (thread %u), recursion %u",
+                cs, self ? self->id : 0, owner, owner > 1 && owner != kCsHandoff ? mem::Read32(owner + 0x14C) : 0,
+                mem::Read32(cs + kCsRecursion));
+        }
     }
+    _InterlockedDecrement(waiters);
     RETURN(0);
 }
 
@@ -466,10 +498,20 @@ KFUNC(RtlLeaveCriticalSection)
         RETURN(0);
     }
     mem::Write32(cs + kCsRecursion, 0);
-    mem::Write32(cs + kCsOwner, 0);
     auto* lock = mem::Ptr<volatile long>(cs + kCsLock);
+    auto* waiters = mem::Ptr<volatile long>(cs + kCsWaiters);
+    if (*waiters > 0)
+    {
+        // Hand over: the lock stays taken; one waiter claims the owner slot.
+        _InterlockedExchange(mem::Ptr<volatile long>(cs + kCsOwner), long(_byteswap_ulong(kCsHandoff)));
+        WakeByAddressAll((void*)lock);
+        RETURN(0);
+    }
+    mem::Write32(cs + kCsOwner, 0);
     _InterlockedExchange(lock, -1);
-    WakeByAddressSingle((void*)lock);
+    // A waiter may have registered between the check and the release.
+    if (*waiters > 0) WakeByAddressAll((void*)lock);
+    else WakeByAddressSingle((void*)lock);
     RETURN(0);
 }
 
