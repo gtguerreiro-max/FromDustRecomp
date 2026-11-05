@@ -7,6 +7,7 @@
 #include "native/live_audit.h"
 #ifdef FD_NATIVE_RENDERER
 #include "native/upscaler.h"
+#include "native/frame_generation.h"
 #endif
 #include <wrl/client.h>
 #include <algorithm>
@@ -74,6 +75,7 @@ void ApplyLive() {
     g_presenter->SetGuestOutputPaintConfigFromUIThread(config);
 #ifdef FD_NATIVE_RENDERER
     gpu::native::SetUpscalerSetting(d.upscaler == 1 ? gpu::native::UpscalerMode::Dlaa : gpu::native::UpscalerMode::Off);
+    if (gpu::native::fg::Loaded()) gpu::native::fg::SetFrames(gpu::native::fg::ConfiguredFrames(d.frameGeneration));
 #endif
     g_applied = d;
     g_appliedValid = true;
@@ -150,6 +152,9 @@ private:
     std::chrono::steady_clock::time_point sample_ = std::chrono::steady_clock::now();
     void Toggle() {
         visible_ = !visible_;
+#ifdef FD_NATIVE_RENDERER
+        gpu::native::fg::SetMenuOpen(visible_);
+#endif
         capture_ = -1;
         pcinput::SetBlocked(visible_);
     }
@@ -214,7 +219,15 @@ private:
                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove;
         ImGui::Begin("##pc_hud", nullptr, hudFlags);
         if (ImGui::Button(visible_ ? "Fechar  [F1]" : "Definições  [F1]")) Toggle();
-        if (d.showFps) { ImGui::SameLine(); ImGui::Text("%.0f FPS", fps_); }
+        if (d.showFps) {
+            ImGui::SameLine();
+#ifdef FD_NATIVE_RENDERER
+            const auto fgs = gpu::native::fg::GetStatus();
+            if (fgs.active && fgs.presentedPerFrame > 1) ImGui::Text("%.0f FPS  (DLSS FG %u×: %.0f)", fps_, fgs.presentedPerFrame, fps_ * fgs.presentedPerFrame);
+            else
+#endif
+            ImGui::Text("%.0f FPS", fps_);
+        }
         if(d.showFrameTime&&timing_.count){ImGui::SameLine();ImGui::Text("%.1f ms",timing_.meanMs);}
         ImGui::End();
         if (!visible_) return;
@@ -275,6 +288,33 @@ private:
                     else if (status.available < 0 || !status.sceneFound) ImGui::TextDisabled("Ativo quando houver uma cena 3D (menus e vídeos ficam iguais).");
                     else ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "DLAA ativo  |  %llu frames  |  câmara %s", (unsigned long long)status.evaluatedFrames,
                                             status.cameraFound ? "detetada" : "não detetada (sem vetores)");
+#endif
+                }
+                Section("GERAÇÃO DE FRAMES");
+                {
+                    ImGui::BeginDisabled(!nativeBackend_);
+                    ImGui::Combo("DLSS Frame Generation", &d.frameGeneration,
+                                 "Desligada " "2× (DLSS FG) " "3× (DLSS Multi Frame) " "4× (DLSS Multi Frame) ");
+                    ImGui::EndDisabled();
+                    Help("O jogo corre a 30 FPS; a geração de frames da NVIDIA cria 1 a 3 imagens intermédias entre cada "
+                         "frame real, para 60, 90 ou 120 FPS no ecrã. A latência mantém-se a dos 30 FPS. "
+                         "2× precisa de uma RTX 40 ou mais recente; 3× e 4× de uma RTX 50. Desliga-se sozinha com este menu aberto. "
+                         "Ligar ou desligar aplica ao reiniciar; o multiplicador muda de imediato.");
+#ifdef FD_NATIVE_RENDERER
+                    if (nativeBackend_) {
+                        const auto fgs = gpu::native::fg::GetStatus();
+                        if (!gpu::native::fg::Loaded()) {
+                            if (d.frameGeneration > 0) ImGui::TextColored(ImVec4(1, .8f, .4f, 1), "%s",
+                                fgs.reason[0] ? fgs.reason : "Reinicia o jogo para ativar.");
+                            else ImGui::TextDisabled("Desligada.");
+                        } else if (fgs.available == 0) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Indisponível: %s", fgs.reason);
+                        else if (d.frameGeneration == 0) ImGui::TextDisabled("Desligada (reinicia para descarregar o Streamline).");
+                        else if (fgs.maxFrames && d.frameGeneration > fgs.maxFrames)
+                            ImGui::TextColored(ImVec4(1, .8f, .4f, 1), "Esta GPU gera no máximo %d frame(s): %d×.", fgs.maxFrames, fgs.maxFrames + 1);
+                        else if (fgs.taggedFrames) ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "Ativa no jogo (%d×)  |  %llu frames  |  em pausa com este menu aberto",
+                                                                      (std::min)(d.frameGeneration, fgs.maxFrames ? fgs.maxFrames : 3) + 1, (unsigned long long)fgs.taggedFrames);
+                        else ImGui::TextDisabled("À espera de uma cena 3D (menus e vídeos ficam a 30 FPS).");
+                    }
 #endif
                 }
                 Section("RENDERIZAÇÃO (APLICA AO REINICIAR)");

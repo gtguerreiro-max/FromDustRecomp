@@ -1055,3 +1055,52 @@ memory-frame regression tests still match exactly. Remaining per-frame cost:
 Synchronized native vs Xenia frames (same swap, `validate_native_textures.ps1
 -NativeFrame`): 50.44 dB / 15 of 614,400 pixels over 32 at 325 s, 52.41 dB /
 0 pixels at 410 s.
+
+## DLSS Frame Generation (2x-4x) — 2026-11-05
+
+From Dust simulates and renders at 30 FPS. NVIDIA DLSS Frame Generation
+(DLSS-G, multi frame generation on RTX 50) adds 1-3 generated frames between
+real ones, so the display shows 60 / 90 / 120 FPS while the game keeps its own
+rate (latency stays that of 30 FPS). Implementation:
+`runtime/gpu/native/frame_generation.{h,cpp}` on the public Streamline SDK
+2.14.16 (`third_party/streamline`, the extracted release package, not
+committed; the six DLLs it needs are copied next to the executable).
+
+- **Manual hooking.** Streamline is initialized only when the setting is on at
+  start-up, before the Xenia D3D12 provider exists. The provider hands its DXGI
+  factory to `slUpgradeInterface`, so the swap chain the presenter creates is
+  the Streamline proxy; everything else keeps the native D3D12 interfaces.
+  `sl.interposer.dll` is delay-loaded after `sl::security::verifyEmbeddedSignature`.
+  The hooks are `xe::ui::d3d12::fd_present_hooks` (patches/xenia.patch).
+- **Inputs.** The renderer reuses the DLAA motion pass (now also run with DLAA
+  off): R32F reversed depth and RG16F camera motion vectors at 1024x600,
+  tagged as `eOnlyValidNow` on the renderer's command list (Streamline copies
+  them; the next frame rewrites them before this one is presented), with
+  `mvecScale = 1/size`, `clipToPrevClip` (transposed: Streamline is
+  row-vector) and depth inverted. The presenter tags the back buffer subrect
+  holding the guest output and, as hudless colour, the back buffer right
+  after the guest output is drawn and before the PC overlay (F1 button, FPS,
+  menu) — so the overlay is not warped.
+- **Frames and pacing.** One frame token per rendered frame; Reflex low
+  latency with `slReflexSleep` and PCL markers (simulation / render submit at
+  the renderer, present start / end around the Streamline `Present`).
+  Xenia repaints the window for the UI far more often than the game renders
+  (240 Hz here); while frame generation is on, repaints of an already
+  presented frame are skipped so each game frame reaches the pacer once.
+  DLSS-G is switched off (resources retained) when a frame has no scene (menus,
+  videos) and while the F1 panel is open. It also pauses itself when the window
+  is not focused.
+- **Settings.** F1 > Gráficos > DLSS Frame Generation: off / 2x / 3x / 4x.
+  Enabling or disabling applies on restart (Streamline must hook the factory
+  first); the multiplier changes live and is capped by the GPU's
+  `numFramesToGenerateMax` (5 on the RTX 5060 Ti). The status line shows
+  availability and the tagged frame count; the FPS counter shows game and
+  displayed rates. `FD_FRAME_GENERATION=0..3` overrides the setting,
+  `FD_FG_SHOW_GENERATED` shows only generated frames (artifact inspection),
+  `FD_STREAMLINE_VERBOSE` forwards Streamline's info log, `FD_FG_REFLEX_OFF`
+  leaves Reflex off.
+- **Coexistence with DLAA.** The direct NGX DLAA path and Streamline share the
+  driver's NGX runtime; both run in the same frame.
+- **Verified** (`tools/test_frame_generation.ps1`, 239 Hz monitor, VSync on):
+  2x -> 2 frames per present; 4x -> 30 game frames/s, ~120 displayed/s, DLSS-G
+  status OK, thousands of tagged frames.

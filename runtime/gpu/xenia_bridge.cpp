@@ -14,6 +14,9 @@
 #include "settings_ui.h"
 #ifdef FD_NATIVE_RENDERER
 #include "native/renderer.h"
+#ifdef FD_NATIVE_RENDERER
+#include "native/frame_generation.h"
+#endif
 #endif
 #include "../settings.h"
 #include "../kernel/kernel.h"
@@ -268,6 +271,18 @@ bool Initialize() {
   const bool native=renderer&&!strcmp(renderer,"native");
   if(native) {
 #ifdef FD_NATIVE_RENDERER
+    // DLSS Frame Generation: Streamline must hook the DXGI factory before the
+    // provider creates it (the swap chain then belongs to Streamline).
+    namespace fg=gpu::native::fg;
+    if(const int frames=fg::ConfiguredFrames(settings::Get().frameGeneration);frames>0&&g_window){
+      if(fg::Startup(frames)){
+        auto& hooks=xe::ui::d3d12::fd_present_hooks;
+        hooks.factory_created=fg::FactoryCreated;hooks.device_created=fg::DeviceCreated;
+        hooks.guest_output_painted=fg::GuestOutputPainted;
+        hooks.before_present=fg::BeforePresent;hooks.after_present=fg::AfterPresent;
+        kernel::Log("gpu: NVIDIA Streamline loaded for DLSS Frame Generation (%dx)",frames+1);
+      } else kernel::Log("gpu: DLSS Frame Generation unavailable: %s",fg::GetStatus().reason);
+    }
     g_nativeProvider=xe::ui::d3d12::D3D12Provider::Create();
     if(!g_nativeProvider)return false;
     g_nativePresenter=g_nativeProvider->CreatePresenter();
@@ -318,7 +333,9 @@ bool PresentNative(gpu::native::Renderer& renderer) {
   const bool presented=g_nativePresenter->RefreshGuestOutput(renderer.OutputWidth(),renderer.OutputHeight(),16,9,[&](xe::ui::Presenter::GuestOutputRefreshContext& context){
     context.SetIs8bpc(true);
     auto& d3d=static_cast<xe::ui::d3d12::D3D12Presenter::D3D12GuestOutputRefreshContext&>(context);
-    return renderer.PresentTo(d3d.resource_uav_capable(),g_nativeProvider->GetDirectQueue());
+    const bool copied=renderer.PresentTo(d3d.resource_uav_capable(),g_nativeProvider->GetDirectQueue());
+    if(copied)gpu::native::fg::Delivered();
+    return copied;
   });
   PaceFrame();gpu::RecordFrameTiming();return presented;
 #else

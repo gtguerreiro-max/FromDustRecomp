@@ -130,7 +130,7 @@ index 2be7329..0d6855d 100644
        (static_cast<unsigned long long>(pa_sc_window_offset_window_y_offset)
         << 32));
 diff --git a/src/xenia/ui/d3d12/d3d12_presenter.cc b/src/xenia/ui/d3d12/d3d12_presenter.cc
-index 554e901..c3065aa 100644
+index 554e901..8253c6c 100644
 --- a/src/xenia/ui/d3d12/d3d12_presenter.cc
 +++ b/src/xenia/ui/d3d12/d3d12_presenter.cc
 @@ -22,6 +22,10 @@
@@ -144,17 +144,63 @@ index 554e901..c3065aa 100644
  DEFINE_bool(
      d3d12_allow_variable_refresh_rate_and_tearing, true,
      "In fullscreen, allow using variable refresh rate on displays supporting "
-@@ -1083,10 +1087,19 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+@@ -516,6 +520,10 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+     // (and multiple threads can't paint the main target at the same time).
+   }
+ 
++#if defined(FD_XENIA_GPU)
++  int32_t fd_guest_x = 0, fd_guest_y = 0;
++  uint32_t fd_guest_width = 0, fd_guest_height = 0;
++#endif
+   if (guest_output_resource) {
+     GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
+         guest_output_properties, paint_context_.swap_chain_width,
+@@ -758,6 +766,12 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+           }
+           effect_rect_x = guest_output_flow.output_x;
+           effect_rect_y = guest_output_flow.output_y;
++#if defined(FD_XENIA_GPU)
++          fd_guest_x = guest_output_flow.output_x;
++          fd_guest_y = guest_output_flow.output_y;
++          fd_guest_width = guest_output_flow.effect_output_sizes[i].first;
++          fd_guest_height = guest_output_flow.effect_output_sizes[i].second;
++#endif
+         } else {
+           effect_dest_resource =
+               paint_context_.guest_output_intermediate_textures[i].Get();
+@@ -1039,6 +1053,15 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+     back_buffer_clear_needed = false;
+   }
+ 
++#if defined(FD_XENIA_GPU)
++  if (fd_present_hooks.guest_output_painted) {
++    fd_present_hooks.guest_output_painted(command_list, back_buffer,
++                                          fd_guest_x, fd_guest_y,
++                                          fd_guest_width, fd_guest_height);
++    // The hook may record its own commands; rebind the target for the UI.
++    back_buffer_bound = false;
++  }
++#endif
+   if (execute_ui_drawers) {
+     // Draw the UI.
+     if (!back_buffer_bound) {
+@@ -1083,10 +1106,25 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
    // fullscreen is ever used in, the allow tearing flag must not be passed in
    // fullscreen, but DXGI fullscreen is largely unneeded with the flip
    // presentation model used in Direct3D 12).
 +#if defined(FD_XENIA_GPU)
 +  // The PC settings panel applies this before workers start. Disable tearing
 +  // flags when synchronizing presentation to the monitor's vertical blank.
-+  HRESULT present_result = paint_context_.swap_chain->Present(
-+      cvars::vsync ? 1 : 0,
-+      cvars::vsync ? 0 : (DXGI_PRESENT_RESTART |
-+          (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0)));
++  HRESULT present_result = S_OK;
++  if (!fd_present_hooks.before_present || fd_present_hooks.before_present()) {
++    present_result = paint_context_.swap_chain->Present(
++        cvars::vsync ? 1 : 0,
++        cvars::vsync ? 0 : (DXGI_PRESENT_RESTART |
++            (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0)));
++    if (fd_present_hooks.after_present) {
++      fd_present_hooks.after_present();
++    }
++  }
 +#else
    HRESULT present_result = paint_context_.swap_chain->Present(
        0, DXGI_PRESENT_RESTART | (paint_context_.swap_chain_allows_tearing
@@ -164,3 +210,65 @@ index 554e901..c3065aa 100644
    // Even if presentation has failed, work might have been enqueued anyway
    // internally before the failure according to Jesse Natalie from the DirectX
    // Discord server.
+diff --git a/src/xenia/ui/d3d12/d3d12_provider.cc b/src/xenia/ui/d3d12/d3d12_provider.cc
+index 52954dd..e9b3328 100644
+--- a/src/xenia/ui/d3d12/d3d12_provider.cc
++++ b/src/xenia/ui/d3d12/d3d12_provider.cc
+@@ -38,6 +38,10 @@ namespace xe {
+ namespace ui {
+ namespace d3d12 {
+ 
++#if defined(FD_XENIA_GPU)
++FdPresentHooks fd_present_hooks;
++#endif
++
+ bool D3D12Provider::IsD3D12APIAvailable() {
+   HMODULE library_d3d12 = LoadLibraryW(L"D3D12.dll");
+   if (!library_d3d12) {
+@@ -416,6 +420,14 @@ bool D3D12Provider::Initialize() {
+     }
+   }
+ 
++#if defined(FD_XENIA_GPU)
++  if (fd_present_hooks.factory_created) {
++    fd_present_hooks.factory_created(&dxgi_factory);
++  }
++  if (fd_present_hooks.device_created) {
++    fd_present_hooks.device_created(device);
++  }
++#endif
+   dxgi_factory_ = dxgi_factory;
+   device_ = device;
+   direct_queue_ = direct_queue;
+diff --git a/src/xenia/ui/d3d12/d3d12_provider.h b/src/xenia/ui/d3d12/d3d12_provider.h
+index 6542341..a67900b 100644
+--- a/src/xenia/ui/d3d12/d3d12_provider.h
++++ b/src/xenia/ui/d3d12/d3d12_provider.h
+@@ -25,6 +25,27 @@ enum {
+   UPLOAD_RESULT_CREATE_CPUVISIBLE = 2
+ };
+ 
++#if defined(FD_XENIA_GPU)
++// From Dust: optional presentation hooks (NVIDIA Streamline frame generation).
++// All are null unless the runtime installs them before the provider is created.
++struct FdPresentHooks {
++  // Lets the hook replace the factory with a proxy before swap chain creation.
++  void (*factory_created)(IDXGIFactory2** factory) = nullptr;
++  void (*device_created)(ID3D12Device* device) = nullptr;
++  // After the guest output is drawn into the back buffer (in the render target
++  // state) and before the UI drawers; width 0 when no guest output is drawn.
++  void (*guest_output_painted)(ID3D12GraphicsCommandList* command_list,
++                               ID3D12Resource* back_buffer, int32_t x,
++                               int32_t y, uint32_t width,
++                               uint32_t height) = nullptr;
++  // Returns false to skip this present (a repaint of an already presented
++  // frame while frame generation is on).
++  bool (*before_present)() = nullptr;
++  void (*after_present)() = nullptr;
++};
++extern FdPresentHooks fd_present_hooks;
++#endif
++
+ class D3D12Provider : public GraphicsProvider {
+  public:
+   ~D3D12Provider();

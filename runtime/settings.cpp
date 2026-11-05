@@ -25,6 +25,7 @@ void Normalize(Data& d) {
     d.presentation = std::clamp(d.presentation, 0, 2);
     d.sharpness = std::clamp(d.sharpness, 0, 100);
     d.upscaler = std::clamp(d.upscaler, 0, 1);
+    d.frameGeneration = std::clamp(d.frameGeneration, 0, 3);
     d.mouseSpeed = std::clamp(d.mouseSpeed, 25, 300);
     d.cameraButton = std::clamp(d.cameraButton, 0, 2);
     d.wheelZoom = std::clamp(d.wheelZoom, 0, 2);
@@ -58,6 +59,7 @@ void Load(const std::filesystem::path& path) {
     d.presentation = read(L"Graphics", L"Presentation", d.presentation);
     d.sharpness = read(L"Graphics", L"Sharpness", d.sharpness);
     d.upscaler = read(L"Graphics", L"Upscaler", d.upscaler);
+    d.frameGeneration = read(L"Graphics", L"FrameGeneration", d.frameGeneration);
     d.inputMode = read(L"Controls", L"Mode", d.inputMode);
     d.sensitivity = read(L"Controls", L"Sensitivity", d.sensitivity);
     d.deadzone = read(L"Controls", L"Deadzone", d.deadzone);
@@ -102,6 +104,7 @@ bool Save() {
     write(L"Graphics", L"Presentation", d.presentation);
     write(L"Graphics", L"Sharpness", d.sharpness);
     write(L"Graphics", L"Upscaler", d.upscaler);
+    write(L"Graphics", L"FrameGeneration", d.frameGeneration);
     write(L"Controls", L"Mode", d.inputMode);
     write(L"Controls", L"Sensitivity", d.sensitivity);
     write(L"Controls", L"Deadzone", d.deadzone);

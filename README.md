@@ -21,7 +21,8 @@ The executable can also be opened directly from `build/`: it finds the sibling
 The experimental native D3D12 renderer can be selected with `Jogar-nativo.cmd`
 or `.\play.ps1 -Renderer native`, using `build/native-shaders-live/catalog.bin`.
 It plays the game (title, introduction, tutorial levels) at the game's 30 FPS,
-with NVIDIA DLAA available in the F1 panel on RTX GPUs. Synchronized frames
+with NVIDIA DLAA and DLSS Frame Generation (2x-4x: 60-120 FPS on screen)
+available in the F1 panel on RTX GPUs. Synchronized frames
 compare with Xenia at 50-52 dB. The regular launcher keeps Xenia as its default.
 
 ## PC settings panel
@@ -36,7 +37,10 @@ rendering while the panel is open.
   FSR / CAS presentation, and sharpness. Changes apply immediately. **F11** or
   Alt+Enter toggles fullscreen.
 - **Gráficos:** anti-aliasing (original or **NVIDIA DLAA**, native renderer and
-  RTX GPU, applied immediately, with a live status line); 1× / 2× / 3× internal
+  RTX GPU, applied immediately, with a live status line); **DLSS Frame
+  Generation** off / 2× / 3× / 4× (RTX 40 for 2×, RTX 50 for 3× / 4×; on or off
+  applies on restart, the multiplier immediately; paused while the panel is
+  open or the window is not focused); 1× / 2× / 3× internal
   resolution, VSync, 30 / 60 / 120 / unlimited FPS, and anisotropic filtering.
   The latter apply on restart, with an explicit **Reiniciar o jogo** button. VSync synchronizes the Windows swapchain;
   the guest frame limiter also runs at the point where frames are presented.

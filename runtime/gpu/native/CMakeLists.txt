@@ -51,19 +51,29 @@ if(CMAKE_MSVC_RUNTIME_LIBRARY AND NOT CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
 else()
     set(FD_NGX_LIB "${FD_DLSS_SDK}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib")
 endif()
-add_library(fd_native_renderer STATIC renderer.cpp shader_catalog.cpp replay_frame.cpp geometry.cpp device_state.cpp texture_decode.cpp texture_storage.cpp texture_tables.cpp operations.cpp frame_builder.cpp upscaler.cpp ${FD_NATIVE_BUILTIN_HEADERS})
+add_library(fd_native_renderer STATIC renderer.cpp shader_catalog.cpp replay_frame.cpp geometry.cpp device_state.cpp texture_decode.cpp texture_storage.cpp texture_tables.cpp operations.cpp frame_builder.cpp upscaler.cpp frame_generation.cpp ${FD_NATIVE_BUILTIN_HEADERS})
 target_compile_features(fd_native_renderer PUBLIC cxx_std_20)
 target_include_directories(fd_native_renderer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(fd_native_renderer PRIVATE ${FD_NATIVE_ROOT}/third_party/xenia/third_party/stb)
-target_include_directories(fd_native_renderer PRIVATE "${FD_NATIVE_BUILTINS}" "${FD_DLSS_SDK}/include")
-target_link_libraries(fd_native_renderer PUBLIC plume d3d12 dxgi dxguid "${FD_NGX_LIB}")
+# NVIDIA Streamline SDK (DLSS Frame Generation): third_party/streamline is the
+# extracted release package (https://github.com/NVIDIA-RTX/Streamline). The
+# interposer is delay-loaded, only after its NVIDIA signature has been checked.
+set(FD_STREAMLINE_SDK "${FD_NATIVE_ROOT}/third_party/streamline")
+target_include_directories(fd_native_renderer PRIVATE "${FD_NATIVE_BUILTINS}" "${FD_DLSS_SDK}/include" "${FD_STREAMLINE_SDK}/include")
+target_link_libraries(fd_native_renderer PUBLIC plume d3d12 dxgi dxguid "${FD_NGX_LIB}"
+    "${FD_STREAMLINE_SDK}/lib/x64/sl.interposer.lib" delayimp)
+target_link_options(fd_native_renderer INTERFACE /DELAYLOAD:sl.interposer.dll)
 target_compile_options(fd_native_renderer PRIVATE -w /EHsc)
 
 function(fd_native_copy_sdk target)
+    set(streamline "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../../third_party/streamline/bin/x64")
+    set(streamline_dlls "${streamline}/sl.interposer.dll" "${streamline}/sl.common.dll" "${streamline}/sl.dlss_g.dll"
+        "${streamline}/sl.reflex.dll" "${streamline}/sl.pcl.dll" "${streamline}/nvngx_dlssg.dll")
     set(sdk "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../../third_party/agility/pkg/build/native/bin/x64")
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/D3D12"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${sdk}/D3D12Core.dll" "${sdk}/d3d12SDKLayers.dll" "$<TARGET_FILE_DIR:${target}>/D3D12"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../../third_party/dlss_sdk/lib/Windows_x86_64/rel/nvngx_dlss.dll" "$<TARGET_FILE_DIR:${target}>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${streamline_dlls} "$<TARGET_FILE_DIR:${target}>"
         VERBATIM)
 endfunction()

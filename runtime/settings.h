@@ -37,6 +37,7 @@ struct Data {
     int presentation = 0; // bilinear, FSR, CAS
     int sharpness = 20;
     int upscaler = 0; // native renderer: off, DLAA (live)
+    int frameGeneration = 0; // native renderer, DLSS-G: off, 2x, 3x, 4x (load on restart)
     int inputMode = 0; // automatic, keyboard/mouse, controller
     int sensitivity = 100;
     int deadzone = 15;

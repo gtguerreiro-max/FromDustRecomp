@@ -468,6 +468,7 @@ RenderMultisampling Multisampling(uint32_t surface,bool noMsaa,bool xenosPattern
 #include "present.h"
 #include "motion_vs.h"
 #include "motion_ps.h"
+#include "frame_generation.h"
 
 struct gpu::native::Renderer::Impl
 {
@@ -1115,11 +1116,14 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     // draws before it at that size receive the sub-pixel jitter. The camera's
     // world-to-clip matrix comes from the terrain shaders (VS_DustConst[8..11]).
     const UpscalerMode upscaleMode=frame.continuous&&shaderCatalog?ConfiguredUpscalerMode(UpscalerSetting()):UpscalerMode::Off;
+    // DLSS Frame Generation needs the same depth / motion vectors (no jitter).
+    const bool frameGen=frame.continuous&&shaderCatalog&&fg::WantsInputs();
+    if(frame.continuous)fg::BeginFrame();
     size_t sceneResolve=SIZE_MAX;
     std::vector<uint8_t> jitterDraw;
     float jitterX=0,jitterY=0,sceneVP[16]{},sceneViewport[4]{},sceneDepth[2]{};
     bool sceneCamera=false;
-    if(upscaleMode!=UpscalerMode::Off)
+    if(upscaleMode!=UpscalerMode::Off||frameGen)
     {
         uint32_t maxW=0,maxH=0;
         // Scene size = the copy to the front buffer (the game's output size).
@@ -1142,7 +1146,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             sceneResolve==SIZE_MAX?"not found":std::to_string(sceneResolve).c_str(),maxW,maxH);
         if(sceneResolve!=SIZE_MAX)
         {
-            UpscalerJitter(upscale.frameIndex,UpscalerRenderScale(upscaleMode),jitterX,jitterY);
+            if(upscaleMode!=UpscalerMode::Off)UpscalerJitter(upscale.frameIndex,UpscalerRenderScale(upscaleMode),jitterX,jitterY);
             if(CachedEnv("FD_UPSCALER_NO_JITTER"))jitterX=jitterY=0;
             jitterDraw.assign(draws.size(),0);
             auto isCamera=[&](const std::string& vs){
@@ -1513,7 +1517,8 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             dumps.push_back(std::move(dump));
         };
         auto* d3dDevice=externalDevice?externalDevice.Get():static_cast<D3D12Device*>(device.get())->d3d;
-        if(!up.ngx.Initialize(d3dDevice))return;
+        const bool dlaa=upscaleMode!=UpscalerMode::Off&&up.ngx.Initialize(d3dDevice);
+        if(!dlaa&&!frameGen)return;
         const uint32_t w=snap.width,h=snap.height;
         if(!up.pipeline)
         {
@@ -1574,6 +1579,39 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         list->drawInstanced(3,1,0,0);
         list->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(t.ds->texture.get(),RenderTextureLayout::DEPTH_WRITE));
         t.ds->shaderRead=false;
+        auto* commandList=static_cast<D3D12CommandList*>(list.get());
+        if(frameGen)
+        {
+            // Streamline copies the depth and motion vectors now (they are
+            // rewritten by the next frame before this one is presented).
+            fg::FrameInputs inputs;
+            inputs.list=commandList->d3d;
+            inputs.depth=static_cast<D3D12Texture*>(up.depth.get())->d3d;
+            inputs.motion=static_cast<D3D12Texture*>(up.motion.get())->d3d;
+            inputs.width=w;inputs.height=h;
+            std::copy(c.currentToPrevious,c.currentToPrevious+16,inputs.clipToPrevClip);
+            inputs.valid=valid;inputs.reset=up.reset||!valid;
+            inputs.jitterX=jitterX;inputs.jitterY=jitterY;
+            fg::Tag(inputs);
+            commandList->notifyDescriptorHeapWasChangedExternally();
+            commandList->activeTopology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+            commandList->activeGraphicsPipeline=nullptr;
+            commandList->activeGraphicsPipelineLayout=nullptr;
+            commandList->activeComputePipelineLayout=nullptr;
+            commandList->targetFramebuffer=nullptr;
+            current=nullptr;
+            if(!dlaa)up.reset=false;
+        }
+        if(!dlaa)
+        {
+            if(sceneCamera)
+            {
+                std::copy(sceneVP,sceneVP+16,up.previousVP);
+                std::copy(sceneViewport,sceneViewport+4,up.previousViewport);
+                up.hasPrevious=true;
+            }
+            return;
+        }
         dumpTexture(snap.surface.texture.get(),snap.format,w,h,0xD1550000,RenderTextureLayout::SHADER_READ);
         dumpTexture(up.motion.get(),RenderFormat::R16G16_FLOAT,w,h,0xD155AA00,RenderTextureLayout::COLOR_WRITE);
         // NGX reads in compute and writes the output as a UAV.
@@ -1597,7 +1635,6 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         in.frameTimeMs=up.last.time_since_epoch().count()?float(std::chrono::duration<double,std::milli>(now-up.last).count()):16.7f;
         up.last=now;
         in.reset=up.reset||!valid;
-        auto* commandList=static_cast<D3D12CommandList*>(list.get());
         const bool evaluated=up.ngx.Evaluate(commandList->d3d,setup,in);
         // NGX changes the descriptor heaps, root signature, pipeline and topology.
         commandList->notifyDescriptorHeapWasChangedExternally();

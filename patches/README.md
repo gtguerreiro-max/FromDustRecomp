@@ -29,6 +29,14 @@ git -C third_party/xenia submodule update --init --depth 1 \
 git -C third_party/xenia apply ../../patches/xenia.patch
 ```
 
+The native renderer's NVIDIA SDKs are not committed either:
+
+- `third_party/dlss_sdk`: sparse checkout of https://github.com/NVIDIA/DLSS
+  (`include`, `lib/Windows_x86_64/{x64,rel}`) for DLAA.
+- `third_party/streamline`: `streamline-sdk-v2.14.16.zip` from
+  https://github.com/NVIDIA-RTX/Streamline/releases, extracted (`include`,
+  `lib/x64`, `bin/x64`) for DLSS Frame Generation.
+
 `third_party/xenia/third_party/DirectXShaderCompiler/include` holds two public
 headers from microsoft/DirectXShaderCompiler (see `third_party/xenia_gpu/README.md`).
 The game files (`game/`) must come from your own copy of From Dust (XBLA).
