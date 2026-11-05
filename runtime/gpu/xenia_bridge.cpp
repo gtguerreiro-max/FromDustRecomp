@@ -147,11 +147,20 @@ void Memory::EnablePhysicalMemoryAccessCallbacks(uint32_t address, uint32_t leng
                                       uint64_t(0x20000000)) / 0x1000);
   auto global = global_critical_region::AcquireDirect();
   std::lock_guard lock(watch_mutex_);
-  if (!mem::ProtectPhysical(first*0x1000,(end-first)*0x1000,true)) {
-    ::kernel::Log("gpu: failed to watch physical memory: %lu", GetLastError());
-    return;
+  // Protect only runs of pages not watched yet. Re-protecting a whole range
+  // that was already watched cost four VirtualProtect calls (one per
+  // physical alias) per call, every draw window of a dynamic vertex buffer.
+  for (uint32_t page = first; page < end;) {
+    if (watched_pages_[page]) { ++page; continue; }
+    uint32_t runEnd = page + 1;
+    while (runEnd < end && !watched_pages_[runEnd]) ++runEnd;
+    if (!mem::ProtectPhysical(page*0x1000,(runEnd-page)*0x1000,true)) {
+      ::kernel::Log("gpu: failed to watch physical memory: %lu", GetLastError());
+      return;
+    }
+    std::fill(watched_pages_.begin() + page, watched_pages_.begin() + runEnd, true);
+    page = runEnd;
   }
-  std::fill(watched_pages_.begin() + first, watched_pages_.begin() + end, true);
 }
 bool Memory::OnPhysicalWrite(uint32_t address, uint32_t length) {
   if (!length || address >= 0x20000000) return false;

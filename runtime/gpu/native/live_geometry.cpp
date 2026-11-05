@@ -74,6 +74,19 @@ struct LiveGeometryCapture::Impl
     // and moving it by value copied all of that three times per draw.
     std::vector<std::unique_ptr<Pending>> stack;
     std::unique_ptr<Pending> inlineDraw;
+    // Finished pending draws, reused (allocating and zeroing one cost more
+    // than the draw's own bookkeeping).
+    std::vector<std::unique_ptr<Pending>> freePending;
+    std::unique_ptr<Pending> TakePending()
+    {
+        if (freePending.empty()) return std::make_unique<Pending>();
+        auto pending = std::move(freePending.back()); freePending.pop_back();
+        pending->shader = nullptr; pending->pixelShader.clear(); pending->state.reset(); pending->stateError.clear();
+        pending->physical.clear(); pending->physicalBefore.clear(); pending->physicalAddress = 0;
+        pending->completedShader = false; pending->primitive = 0; pending->count = UINT32_MAX; pending->commands.clear();
+        return pending;
+    }
+    void Recycle(std::unique_ptr<Pending> pending) { if (pending && freePending.size() < 16) freePending.push_back(std::move(pending)); }
     std::optional<PendingResolve> resolve;
     GeometryBatch batch;
     std::map<std::string, VertexProgram> programs;
@@ -241,11 +254,9 @@ struct LiveGeometryCapture::Impl
             }
             vertexBytes += geometry.vertices.size(); indexBytes += geometry.IndexBytes().size();
             const auto commitStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-            auto& command = batch.commands.emplace_back();
-            command.vertexShader = pending.shader->name; command.pixelShader = pending.pixelShader;
-            command.vertexConstants = pending.vertexConstants; command.pixelConstants = pending.pixelConstants;
-            command.state = *pending.state;command.state.regs[VGT_INDX_OFFSET]=baseVertex;
-            command.geometry = std::move(geometry);
+            auto& command = batch.commands.emplace_back(pending.shader->name, pending.pixelShader,
+                pending.vertexConstants, pending.pixelConstants, *pending.state, std::move(geometry));
+            command.state.regs[VGT_INDX_OFFSET]=baseVertex;
             Notify(command);
             if(profile)profileMs[2]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-commitStart).count();
             ++geometryPackets;
@@ -320,7 +331,7 @@ void LiveGeometryCapture::Begin(uint32_t device, audit::DrawKind kind, const Nat
     struct BeginTimer{Impl& c;std::chrono::steady_clock::time_point start;
         ~BeginTimer(){if(c.profile)c.profileMs[0]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}
     } beginTimer{c,beginStart};
-    auto owned = std::make_unique<Pending>(); Pending& pending = *owned;
+    auto owned = c.TakePending(); Pending& pending = *owned;
     pending.device = device; pending.kind = kind; pending.shader = shader;
     pending.primitive=primitive;pending.count=count;
     if (pixelShader) pending.pixelShader = pixelShader->name;
@@ -365,12 +376,12 @@ void LiveGeometryCapture::End(uint32_t device, audit::DrawKind kind)
         pending.completedShader=true;
     }
     if (kind == audit::DrawKind::BeginVertices) c.inlineDraw = std::move(owned);
-    else c.Process(pending);
+    else { c.Process(pending); c.Recycle(std::move(owned)); }
 }
 void LiveGeometryCapture::FlushInline()
 {
     auto& c = *impl;
-    if (c.inlineDraw) { auto pending = std::move(c.inlineDraw); c.Process(*pending); }
+    if (c.inlineDraw) { auto pending = std::move(c.inlineDraw); c.Process(*pending); c.Recycle(std::move(pending)); }
 }
 void LiveGeometryCapture::Swap(uint64_t previousIndexed)
 {

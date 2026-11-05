@@ -1286,3 +1286,12 @@ FD_PROFILE_DELAY=300 FD_PROFILE_THREAD=3`, `FD_PROFILE_TOP=<n>` lists more):
 Next candidates: copy only the used vertex range for dynamic streams and stop
 watching them, pool the per-draw allocations, and avoid zero-filling
 buffers that are fully overwritten.
+
+Follow-up the same day: 67-78 FPS (average 72) in the same session.
+- `EnablePhysicalMemoryAccessCallbacks` (our Xenia override) re-protected the
+  whole range in all four physical aliases on every watch, even when every
+  page was already watched. It now protects only runs of unwatched pages.
+- Pending live draws come from a small pool, and commands are copy-constructed
+  instead of value-initialized and then overwritten.
+- Capture per frame: begin 0.59 ms, geometry 2.15 ms (was 3.2-4.4), commit
+  1.37 ms, other 0.82 ms.
