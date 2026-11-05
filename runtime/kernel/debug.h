@@ -18,6 +18,9 @@ namespace kernel::debug
 
     // Samples the main guest thread for N seconds (FD_PROFILE=<seconds>).
     void StartProfiler(unsigned seconds);
+    // FD_SCAN_FLOATS diagnostic (kernel/scan.cpp).
+    void StartFloatScan();
+    void StartWriteWatch();
 
     // Diagnostic: logs the guest call chain of a write fault (host CONTEXT*),
     // once per distinct chain. Used by FD_TRACE_WRITE_PHYS.

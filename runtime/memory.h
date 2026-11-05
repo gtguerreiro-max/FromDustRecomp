@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 #include "be.h"
 
@@ -28,6 +30,8 @@ namespace mem
     // Allocations return guest addresses; 0 on failure.
     uint32_t AllocVirtual(uint32_t size, uint32_t alignment = 0x10000);
     uint32_t AllocPhysical(uint32_t size, uint32_t alignment = 0x1000);
+    // Diagnostics: every live allocation (address, size).
+    std::vector<std::pair<uint32_t, uint32_t>> AllocatedRanges();
     void Free(uint32_t address);
     uint32_t AllocationSize(uint32_t address);
 

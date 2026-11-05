@@ -150,6 +150,8 @@ int main(int argc, char** argv)
     }
     if (const char* profile = getenv("FD_PROFILE"); profile && atoi(profile) > 0)
         debug::StartProfiler(unsigned(atoi(profile)));
+    debug::StartFloatScan();
+    debug::StartWriteWatch();
 
     Module* main = MainModule();
     if (gpu::xenia::HasWindow()) {

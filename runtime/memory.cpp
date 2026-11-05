@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <array>
 #include <map>
+#include <vector>
 #include <mutex>
 
 #define WIN32_LEAN_AND_MEAN
@@ -96,6 +97,12 @@ namespace mem
                     }
                 }
                 free_[start] = len;
+            }
+
+            std::vector<std::pair<uint32_t, uint32_t>> Used()
+            {
+                std::lock_guard lock(mutex_);
+                return {used_.begin(), used_.end()};
             }
 
         private:
@@ -192,6 +199,13 @@ namespace mem
     }
 
     uint32_t AllocVirtual(uint32_t size, uint32_t alignment) { return g_virtual->Alloc(size, alignment < 16 ? 16 : alignment); }
+    std::vector<std::pair<uint32_t, uint32_t>> AllocatedRanges()
+    {
+        auto ranges = g_virtual->Used();
+        for (auto& range : g_physical->Used()) ranges.push_back(range);
+        for (auto& range : g_system->Used()) ranges.push_back(range);
+        return ranges;
+    }
     uint32_t AllocPhysical(uint32_t size, uint32_t alignment) { return g_physical->Alloc(size, alignment < 16 ? 16 : alignment); }
     uint32_t AllocSystem(uint32_t size, uint32_t alignment) { return g_system->Alloc(size, alignment < 16 ? 16 : alignment); }
 

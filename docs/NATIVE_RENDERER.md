@@ -1316,3 +1316,21 @@ dropped when patched.
 The F1 menu and key names are now in English, and the permanent "Settings
 [F1]" button is gone: a hint shows for the first 15 seconds, afterwards only
 the FPS / frame-time counters when enabled.
+
+## Mouse control research (Breath position) — 2026-11-05
+
+Diagnostics for finding game state (`runtime/kernel/scan.cpp`):
+- `FD_SCAN_FLOATS=t1,t2,t3,t4`: records every plausible big-endian float in
+  the guest allocations at t1 and re-reads them at t2..t4; logs words that
+  moved one way, back, then rested (script the stick: move, move back, rest).
+  It also logs "transform candidates" (a moved vector followed by 1, 1, 1).
+- `FD_WATCH_WRITE=<hex>@<s>` or `auto` (the first transform candidate): a
+  hardware write watchpoint (DR0) on every thread; each distinct guest writer
+  chain is logged once.
+
+Findings (first level, stick right 5 s then left 5 s): heap addresses change
+between sessions. The Breath's bounding box centre (object +16) is written by
+`sub_821EFCE0` (centre / half size from min and max) from the render path
+`sub_821CD4F8 -> sub_82111448 -> sub_82189670`, and by `sub_821F0FB0 <-
+sub_821F10A0 <- sub_82113100`. Arrays of repeated positions near it look like
+the Breath's trail. The gameplay position itself is not identified yet.
