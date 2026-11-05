@@ -1,6 +1,7 @@
 #include "pointer.h"
 #include "input.h"
 #include "settings.h"
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -49,12 +50,11 @@ void SetCamera(const float rows[16], float, float)
 }
 bool Active()
 {
-    // Experimental until the Breath's own position is confirmed (see
-    // docs/NATIVE_RENDERER.md, "Mouse pointing"): FD_MOUSE_POINTING=1.
-    static const bool enabled = getenv("FD_MOUSE_POINTING") != nullptr;
-    if (!enabled) return false;
+    // Direct mode (F1 > Controls), while the keyboard / mouse is the last
+    // device used. FD_MOUSE_CLASSIC=1 forces the classic stick emulation.
+    static const bool classic = getenv("FD_MOUSE_CLASSIC") != nullptr;
     const auto d = settings::Get();
-    if (!d.mouseBreath || !pcinput::KeyboardPrompts()) return false;
+    if (classic || !d.mouseBreath || d.mouseMode != 0 || !pcinput::KeyboardPrompts()) return false;
     std::lock_guard lock(g_mutex);
     return g_camera;
 }
@@ -85,6 +85,65 @@ bool Target(float height, float& x, float& y)
     x = float(p[0][0] + (p[1][0] - p[0][0]) * t);
     y = float(p[0][1] + (p[1][1] - p[0][1]) * t);
     return std::isfinite(x) && std::isfinite(y);
+}
+namespace
+{
+bool Unproject(float sx, float sy, float height, float& x, float& y)
+{
+    double inv[16];
+    {
+        std::lock_guard lock(g_mutex);
+        if (!g_camera || !Invert(g_rows, inv)) return false;
+    }
+    const double cx = sx * 2 - 1, cy = 1 - sy * 2;
+    double p[2][3];
+    for (int k = 0; k < 2; ++k)
+    {
+        double v[4];
+        for (int r = 0; r < 4; ++r) v[r] = inv[r * 4] * cx + inv[r * 4 + 1] * cy + inv[r * 4 + 2] * k + inv[r * 4 + 3];
+        if (std::fabs(v[3]) < 1e-9) return false;
+        for (int c = 0; c < 3; ++c) p[k][c] = v[c] / v[3];
+    }
+    const double dz = p[1][2] - p[0][2];
+    if (std::fabs(dz) < 1e-9) return false;
+    const double t = (height - p[0][2]) / dz;
+    // Behind the camera or beyond the far plane: no ground point there.
+    if (!std::isfinite(t) || t < 0 || t > 1) return false;
+    x = float(p[0][0] + (p[1][0] - p[0][0]) * t);
+    y = float(p[0][1] + (p[1][1] - p[0][1]) * t);
+    return std::isfinite(x) && std::isfinite(y);
+}
+}
+bool Grab(float x, float y, float z, float& outX, float& outY)
+{
+    if (!Active() || pcinput::MouseAbsolute()) return false;
+    float dx, dy;
+    if (!pcinput::TakeMouseDelta(dx, dy) || (dx == 0 && dy == 0)) return false;
+    const float speed = settings::Get().mouseSpeed / 100.0f;
+    float sx, sy;
+    if (!Project(x, y, z, sx, sy)) return false;
+    // Planar mapping: the mouse moves the Breath over the ground along the
+    // camera's right and forward directions at one rate, scaled so that a
+    // sideways movement matches the screen at the Breath's distance. Mapping
+    // the screen one to one instead made vertical movement depend on the
+    // camera's low pitch (far too fast towards the horizon).
+    constexpr float step = 0.01f;
+    float rx, ry;
+    if (!Unproject(sx + step, sy, z, rx, ry)) return false;
+    const float rightX = rx - x, rightY = ry - y, length = std::sqrt(rightX * rightX + rightY * rightY);
+    if (!(length > 1e-5f)) return false;
+    const float perWidth = length / step; // world units per window width
+    const float ux = rightX / length, uy = rightY / length;
+    // Forward on the ground: perpendicular to right, pointing away from the
+    // camera (towards the top of the screen).
+    float fx = -uy, fy = ux, upX, upY;
+    if (Unproject(sx, sy - step, z, upX, upY) && (upX - x) * fx + (upY - y) * fy < 0) { fx = -fx; fy = -fy; }
+    float width = 16, height = 9;
+    pcinput::WindowAspect(width, height);
+    const float sideways = dx * perWidth * speed, forward = -dy * (height / width) * perWidth * speed;
+    outX = x + ux * sideways + fx * forward;
+    outY = y + uy * sideways + fy * forward;
+    return std::isfinite(outX) && std::isfinite(outY);
 }
 bool Project(float x, float y, float z, float& sx, float& sy)
 {

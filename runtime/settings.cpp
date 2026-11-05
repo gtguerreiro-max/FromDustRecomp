@@ -31,6 +31,7 @@ void Normalize(Data& d) {
     d.cameraButton = std::clamp(d.cameraButton, 0, 2);
     d.wheelZoom = std::clamp(d.wheelZoom, 0, 2);
     d.inputMode = std::clamp(d.inputMode, 0, 2);
+    d.mouseMode = std::clamp(d.mouseMode, 0, 1);
     d.sensitivity = std::clamp(d.sensitivity, 25, 300);
     d.deadzone = std::clamp(d.deadzone, 0, 30);
     d.volume = std::clamp(d.volume, 0, 100);
@@ -69,6 +70,7 @@ void Load(const std::filesystem::path& path) {
     d.invertY = read(L"Controls", L"InvertY", d.invertY) != 0;
     d.mouseCamera = read(L"Controls", L"MouseCamera", d.mouseCamera) != 0;
     d.mouseBreath = read(L"Controls", L"MouseBreath", d.mouseBreath) != 0;
+    d.mouseMode = read(L"Controls", L"MouseMode", d.mouseMode);
     d.mouseSpeed = read(L"Controls", L"MouseSpeed", d.mouseSpeed);
     d.mouseButtons = read(L"Controls", L"MouseButtons", d.mouseButtons) != 0;
     d.cameraButton = read(L"Controls", L"CameraButton", d.cameraButton);
@@ -116,6 +118,7 @@ bool Save() {
     write(L"Controls", L"InvertY", d.invertY);
     write(L"Controls", L"MouseCamera", d.mouseCamera);
     write(L"Controls", L"MouseBreath", d.mouseBreath);
+    write(L"Controls", L"MouseMode", d.mouseMode);
     write(L"Controls", L"MouseSpeed", d.mouseSpeed);
     write(L"Controls", L"MouseButtons", d.mouseButtons);
     write(L"Controls", L"CameraButton", d.cameraButton);

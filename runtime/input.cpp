@@ -63,8 +63,12 @@ std::array<std::atomic<ULONGLONG>, 4> g_emptyUntil{};
 struct ScriptedPress { Gamepad pad; ULONGLONG from, until; };
 std::mutex g_scriptMutex;
 std::vector<ScriptedPress> g_script;
+const ULONGLONG g_inputStart = GetTickCount64();
 std::atomic<bool> g_lastKeyboard{true};
 std::atomic<bool (*)()> g_pointerActive{nullptr};
+float g_grabX = 0, g_grabY = 0;      // pending grabbed mouse movement (pixels)
+float g_grabWidth = 1, g_grabHeight = 1;
+ULONGLONG g_grabTick = 0;
 bool PointerActive() { auto query = g_pointerActive.load(); return query && query(); }
 std::atomic<uint32_t> g_promptGeneration{1};
 uint64_t g_promptSignature = 0;
@@ -177,8 +181,9 @@ uint32_t GetState(uint32_t user, State& state) {
             const int cameraKey = d.cameraButton == 1 ? VK_RBUTTON : d.cameraButton == 2 ? VK_MBUTTON : 0;
             const bool turning = cameraKey && (GetAsyncKeyState(cameraKey) & 0x8000);
             const bool pointing = d.mouseBreath && PointerActive();
-            if (pcMouse && d.mouseBreath && !pointing) Capture(window, true);
-            if (pointing) {
+            const bool absolute = pointing && MouseAbsolute();
+            if (pcMouse && d.mouseBreath && !absolute) Capture(window, true);
+            if (absolute) {
                 // Visible cursor kept inside the window; the Breath follows it.
                 if (g_captured) Capture(window, false);
                 POINT centre{}; RECT screen{}; RECT current{};
@@ -201,6 +206,14 @@ uint32_t GetState(uint32_t user, State& state) {
                     // Legacy mode: right-button drag turns the camera.
                     state.pad.rightX = Axis(state.pad.rightX + dx * 40000.0f / elapsed);
                     state.pad.rightY = Axis(state.pad.rightY - dy * 40000.0f / elapsed);
+                }
+                if (pointing && !absolute && !turning) {
+                    // Grabbed: the cursor update hook moves the Breath by this much on screen.
+                    g_grabX += dx; g_grabY += dy;
+                    RECT client{};
+                    if (GetClientRect(window, &client) && client.right > 0 && client.bottom > 0) {
+                        g_grabWidth = float(client.right); g_grabHeight = float(client.bottom);
+                    }
                 }
                 if (d.mouseBreath && !turning && !pointing) {
                     // Mouse speed (px/ms) -> left stick; ~0.8 px/ms is full deflection at 100 %.
@@ -277,6 +290,42 @@ uint32_t GetState(uint32_t user, State& state) {
     return ERROR_SUCCESS;
 }
 void SetPointerQuery(bool (*active)()) { g_pointerActive = active; }
+void WindowAspect(float& width, float& height) {
+    std::lock_guard lock(g_pollMutex);
+    if (g_grabWidth > 1 && g_grabHeight > 1) { width = g_grabWidth; height = g_grabHeight; }
+}
+bool MouseAbsolute() { static const bool absolute = getenv("FD_MOUSE_ABSOLUTE") != nullptr; return absolute; }
+bool TakeMouseDelta(float& dx, float& dy) {
+    std::lock_guard lock(g_pollMutex);
+    dx = g_grabX / g_grabWidth; dy = g_grabY / g_grabHeight;
+    g_grabX = g_grabY = 0;
+    // Movement collected while the cursor update did not run (menus, cut
+    // scenes) is dropped rather than applied as one jump.
+    if (g_grabTick && GetTickCount64() - g_grabTick > 250) dx = dy = 0;
+    // FD_MOUSE_MOVES=<s>:<vx>,<vy>;...: diagnostic scripted grabbed movement
+    // (window fractions per second) from those times after start.
+    static const std::vector<std::array<float, 3>> scripted = [] {
+        std::vector<std::array<float, 3>> moves;
+        if (const char* text = getenv("FD_MOUSE_MOVES"))
+            for (const char* p = text; *p;) {
+                float t, vx, vy;
+                if (sscanf(p, "%f:%f,%f", &t, &vx, &vy) == 3) moves.push_back({t, vx, vy});
+                const char* next = strchr(p, ';');
+                if (!next) break;
+                p = next + 1;
+            }
+        return moves;
+    }();
+    const ULONGLONG now = GetTickCount64();
+    if (!scripted.empty() && g_grabTick) {
+        const float t = (now - g_inputStart) / 1000.0f, step = (now - g_grabTick) / 1000.0f;
+        const std::array<float, 3>* current = nullptr;
+        for (const auto& move : scripted) if (t >= move[0]) current = &move;
+        if (current) { dx += (*current)[1] * step; dy += (*current)[2] * step; }
+    }
+    g_grabTick = now;
+    return true;
+}
 bool MousePosition(float& x, float& y) {
     // FD_MOUSE_POINTS=<s>:<x>,<y>;...: diagnostic scripted mouse positions
     // (fractions of the window) from those times after start.
@@ -292,9 +341,8 @@ bool MousePosition(float& x, float& y) {
             }
         return points;
     }();
-    static const ULONGLONG started = GetTickCount64();
     if (!scripted.empty()) {
-        const float now = (GetTickCount64() - started) / 1000.0f;
+        const float now = (GetTickCount64() - g_inputStart) / 1000.0f;
         const std::array<float, 3>* current = nullptr;
         for (const auto& point : scripted) if (now >= point[0]) current = &point;
         if (current) { x = (*current)[1]; y = (*current)[2]; return true; }

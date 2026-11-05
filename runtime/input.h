@@ -33,6 +33,13 @@ bool MousePosition(float& x, float& y);
 // Mouse pointing (pointer.cpp) registers whether it drives the Breath; the
 // relative mouse-as-stick emulation and cursor capture are off meanwhile.
 void SetPointerQuery(bool (*active)());
+// Mouse movement since the last call while the Breath is grabbed by the mouse
+// (hidden cursor), as fractions of the window size (+x right, +y down).
+bool TakeMouseDelta(float& dx, float& dy);
+// FD_MOUSE_ABSOLUTE=1: the Breath goes to the visible cursor instead.
+bool MouseAbsolute();
+// The game window's client size (for aspect-correct mouse mapping).
+void WindowAspect(float& width, float& height);
 // Changes whenever the prompt style or a binding shown in prompts changes.
 uint32_t PromptGeneration();
 }

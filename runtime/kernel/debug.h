@@ -22,6 +22,8 @@ namespace kernel::debug
     void StartFloatScan();
     void StartWriteWatch();
     void StartWordSearch();
+    void StartCameraSearch();
+    void StartIntScan();
 
     // Diagnostic: logs the guest call chain of a write fault (host CONTEXT*),
     // once per distinct chain. Used by FD_TRACE_WRITE_PHYS.

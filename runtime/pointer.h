@@ -13,6 +13,10 @@ void SetCamera(const float rows[16], float viewportWidth, float viewportHeight);
 // mouse; false when the mouse is not pointing (setting off, controller in use,
 // menu open, no camera).
 bool Target(float height, float& x, float& y);
+// Grabbed mode: moves the world point (x, y, z) on screen by the mouse
+// movement since the last call (scaled by the Breath speed setting), back on
+// its height plane. False when not pointing or nothing moved.
+bool Grab(float x, float y, float z, float& outX, float& outY);
 // True while mouse pointing drives the Breath (the stick emulation stays off).
 bool Active();
 // Diagnostics: the screen position [0, 1] of a world point with the camera.

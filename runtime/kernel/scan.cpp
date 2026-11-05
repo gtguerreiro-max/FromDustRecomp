@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -235,6 +236,95 @@ void StartWordSearch()
                 Log("word search: %08X at %08X:%s", raw, a, bytes.c_str());
             }
         Log("word search: %u hits", found);
+    }).detach();
+}
+}
+
+// FD_FIND_CAMERA=<seconds>: diagnostic search for the DustAi camera parameter
+// block (reflection offsets: helico focale +0x94, distance to cursor +0x98,
+// global focale +0x12C, height +0x130, distance +0x134, sandbox distance
+// min / max +0x140 / +0x144); logs every block whose values are consistent.
+namespace kernel::debug
+{
+void StartCameraSearch()
+{
+    const char* option = getenv("FD_FIND_CAMERA");
+    if (!option) return;
+    const double seconds = atof(option);
+    const ULONGLONG start = GetTickCount64();
+    std::thread([seconds, start] {
+        while (GetTickCount64() < start + ULONGLONG(seconds * 1000)) Sleep(10);
+        auto ranges = mem::AllocatedRanges();
+        ranges.push_back({0x8A000000u, 0x00400000u});
+        unsigned found = 0;
+        auto ok = [](float v, float lo, float hi) { return std::isfinite(v) && v > lo && v < hi; };
+        for (const auto& [address, size] : ranges)
+            for (uint32_t o = address; o + 0x150 <= address + size && found < 40; o += 4)
+            {
+                const float helico = ReadFloat(o + 0x98), global = ReadFloat(o + 0x134);
+                if (!ok(helico, 5, 2000) || !ok(global, helico * 1.3f + 5, 20000)) continue;
+                const float smin = ReadFloat(o + 0x140), smax = ReadFloat(o + 0x144);
+                if (!ok(smin, 0, 20000) || !ok(smax, smin * 1.2f + 5, 50000)) continue;
+                const float hf = ReadFloat(o + 0x94), gf = ReadFloat(o + 0x12C), gh = ReadFloat(o + 0x130);
+                if (!ok(hf, 0.01f, 500) || !ok(gf, 0.01f, 500) || !ok(gh, -1000, 20000)) continue;
+                ++found;
+                Log("camera search: %08X helico (focale %.3f distance %.2f time-to-global %.2f min height %.2f) global (focale %.3f height %.2f distance %.2f min height %.2f) sandbox %.2f..%.2f",
+                    o, hf, helico, ReadFloat(o + 0x90), ReadFloat(o + 0x8C), gf, gh, global, ReadFloat(o + 0x128), smin, smax);
+            }
+        Log("camera search: %u candidates", found);
+    }).detach();
+}
+}
+
+// FD_SCAN_INTS=<t1>,<t2>,<t3>,<t4>: diagnostic search for state toggled by
+// scripted input (for example a camera mode): 32-bit words with
+// t1 == t3 == t4 and t2 different (press, press back, rest).
+namespace kernel::debug
+{
+void StartIntScan()
+{
+    const char* option = getenv("FD_SCAN_INTS");
+    if (!option) return;
+    double t[4]{};
+    if (sscanf(option, "%lf,%lf,%lf,%lf", &t[0], &t[1], &t[2], &t[3]) != 4) { Log("int scan: FD_SCAN_INTS needs four times"); return; }
+    const ULONGLONG start = GetTickCount64();
+    std::thread([t0 = t[0], t1 = t[1], t2 = t[2], t3 = t[3], start] {
+        const double times[4] = {t0, t1, t2, t3};
+        auto waitUntil = [&](double s) { while (GetTickCount64() < start + ULONGLONG(s * 1000)) Sleep(5); };
+        std::vector<std::pair<uint32_t, uint32_t>> ranges;
+        for (const auto& range : mem::AllocatedRanges()) if (range.first < 0xA0000000u) ranges.push_back(range);
+        ranges.push_back({0x8A000000u, 0x00400000u});
+        // One raw copy at t1; at t2 only the words that changed are kept.
+        std::vector<std::vector<uint8_t>> first;
+        waitUntil(times[0]);
+        for (const auto& [address, size] : ranges) first.emplace_back(mem::Ptr<uint8_t>(address), mem::Ptr<uint8_t>(address) + size);
+        std::vector<uint32_t> addresses;
+        std::vector<uint32_t> values[4];
+        waitUntil(times[1]);
+        for (size_t r = 0; r < ranges.size(); ++r)
+            for (uint32_t o = 0; o + 4 <= ranges[r].second; o += 4)
+            {
+                uint32_t before; memcpy(&before, first[r].data() + o, 4); before = _byteswap_ulong(before);
+                const uint32_t now = mem::Read32(ranges[r].first + o);
+                if (before != now && before <= 0xFFFF && now <= 0xFFFF) { addresses.push_back(ranges[r].first + o); values[0].push_back(before); values[1].push_back(now); }
+            }
+        first.clear(); first.shrink_to_fit();
+        for (int k = 2; k < 4; ++k)
+        {
+            waitUntil(times[k]);
+            values[k].resize(addresses.size());
+            for (size_t i = 0; i < addresses.size(); ++i) values[k][i] = mem::Read32(addresses[i]);
+        }
+        unsigned hits = 0;
+        for (size_t i = 0; i < addresses.size() && hits < 80; ++i)
+        {
+            const uint32_t a = values[0][i], b = values[1][i], c = values[2][i], d = values[3][i];
+            if (a != c || c != d || a == b || a > 0xFFFF || b > 0xFFFF) continue;
+            ++hits;
+            Log("int scan: %08X  %u -> %u -> %u -> %u   (%08X %08X [%08X] %08X %08X)", addresses[i], a, b, c, d,
+                mem::Read32(addresses[i] - 8), mem::Read32(addresses[i] - 4), mem::Read32(addresses[i]), mem::Read32(addresses[i] + 4), mem::Read32(addresses[i] + 8));
+        }
+        Log("int scan: %u hits of %zu words", hits, addresses.size());
     }).detach();
 }
 }

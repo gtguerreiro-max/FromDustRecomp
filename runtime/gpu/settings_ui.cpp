@@ -387,7 +387,12 @@ private:
                 ImGui::Checkbox("Move the Breath with the mouse", &d.mouseBreath);
                 Help("The cursor is hidden and mouse movement guides the Breath over the terrain. F1 shows the cursor.");
                 ImGui::BeginDisabled(!d.mouseBreath);
-                ImGui::SliderInt("Breath speed", &d.mouseSpeed, 25, 300, "%d %%");
+                ImGui::Combo("Breath mouse control", &d.mouseMode, "Direct (follows the mouse)\0Classic (mouse as stick)\0");
+                Help("Direct moves the Breath over the ground with the mouse, at the same rate in every direction (at 100 %, a sideways "
+                     "movement matches the screen at the Breath), and keeps it where you leave it "
+                     "(no snapping to villagers). It needs the native renderer; otherwise, or with the controller, the classic "
+                     "mode is used. Classic turns mouse speed into the left stick, as the original PC port did.");
+                ImGui::SliderInt(d.mouseMode == 0 ? "Breath sensitivity" : "Breath speed", &d.mouseSpeed, 25, 300, "%d %%");
                 ImGui::EndDisabled();
                 ImGui::Checkbox("Left button absorbs, right button releases", &d.mouseButtons);
                 Help("Left = LT (absorb matter), right = RT (release). Hold them like the triggers.");

@@ -49,6 +49,7 @@ struct Data {
     // right buttons absorb / release (LT / RT), a held button turns the
     // camera (right stick) and the wheel zooms.
     bool mouseBreath = true;
+    int mouseMode = 0; // 0 direct (the Breath moves with the mouse on screen), 1 classic (mouse as stick)
     int mouseSpeed = 100;
     bool mouseButtons = true;
     int cameraButton = 2; // 0 off, 1 right button, 2 middle button

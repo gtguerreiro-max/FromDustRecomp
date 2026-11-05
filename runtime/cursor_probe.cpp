@@ -45,12 +45,38 @@ void WriteFloat(uint32_t address, float value) { uint32_t v; memcpy(&v, &value, 
 PPC_FUNC_IMPL(__imp__sub_8A1F4298);
 PPC_FUNC(sub_8A1F4298)
 {
+    const uint32_t self = ctx.r3.u32;
     __imp__sub_8A1F4298(ctx, base);
     const uint32_t cursor = mem::Read32(0x8A295318);
     if (!cursor || cursor < 0x40000000u || cursor >= 0xC0000000u) return;
+    // FD_PROBE_CURSOR=<seconds>: diagnostic read/write watchpoint on the
+    // cursor vector (+1744), logging every guest function touching it.
+    static const char* probeCursor = getenv("FD_PROBE_CURSOR");
+    static bool cursorArmed = false;
+    if (probeCursor && !cursorArmed && GetTickCount64() - g_processStart >= ULONGLONG(atof(probeCursor) * 1000))
+    {
+        cursorArmed = true;
+        kernel::Log("cursor probe: object %08X, vector %08X", cursor, cursor + 1744);
+        std::thread([cursor] { kernel::debug::ArmWriteWatch(cursor + 1744, true); }).detach();
+    }
     const float height = ReadFloat(cursor + 1752);
     float x, y;
-    if (!std::isfinite(height) || !pointer::Target(height, x, y)) return;
+    if (!std::isfinite(height)) return;
+    if (pcinput::MouseAbsolute()) { if (!pointer::Target(height, x, y)) return; }
+    else if (!pointer::Grab(ReadFloat(cursor + 1744), ReadFloat(cursor + 1748), height, x, y))
+    {
+        // Grabbed but idle: keep the position (no snapping to villagers).
+        if (pointer::Active() && ReadFloat(self + 280) == 0.0f && ReadFloat(self + 284) == 0.0f && ReadFloat(self + 288) == 0.0f)
+            WriteFloat(self + 280, 1e-6f);
+        return;
+    }
+    // The game's own limit (flag 0x80 of +380): within radius +340 of +304.
+    if (mem::Read32(self + 380) & 0x80)
+    {
+        const float cx = ReadFloat(self + 304), cy = ReadFloat(self + 308), radius = ReadFloat(self + 340);
+        const float ox = x - cx, oy = y - cy, distance = std::sqrt(ox * ox + oy * oy);
+        if (std::isfinite(radius) && radius > 0 && distance > radius) { x = cx + ox * radius / distance; y = cy + oy * radius / distance; }
+    }
     static const bool trace = getenv("FD_TRACE_POINTER") != nullptr;
     if (trace)
     {
@@ -68,4 +94,9 @@ PPC_FUNC(sub_8A1F4298)
     if (dry) return;
     WriteFloat(cursor + 1744, x);
     WriteFloat(cursor + 1748, y);
+    // sub_8A1F5BF0 snaps the cursor to a nearby object (villagers) while the
+    // left stick copy at +280 is zero; a negligible non-zero value keeps the
+    // pointed position.
+    if (ReadFloat(self + 280) == 0.0f && ReadFloat(self + 284) == 0.0f && ReadFloat(self + 288) == 0.0f)
+        WriteFloat(self + 280, 1e-6f);
 }
