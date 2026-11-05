@@ -75,6 +75,7 @@ namespace gpu
         std::mutex g_regLock;
         VisibleSampleCounter g_visibleSamples;
         std::atomic<uint32_t> g_vblankCounter{0};
+        std::atomic<int> g_vblankHz{60};
         int g_traceVS=-1,g_tracePS=-1;
         uint32_t g_traceDraws=0,g_traceMesh=0,g_traceTerrain=0,g_traceDepth=0;
 
@@ -433,17 +434,22 @@ namespace gpu
             uint64_t lastFrames = 0, ticks = 0;
             // FD_VBLANK_HZ: experimental vblank rate (the game presents every
             // second vblank, so 120 Hz lets it run its loop at 60 FPS).
-            static const int hz = [] { const char* v = getenv("FD_VBLANK_HZ"); return v && atoi(v) >= 30 ? atoi(v) : 60; }();
-            const auto period = std::chrono::nanoseconds(1000000000LL / hz);
+            static const int forced = [] { const char* v = getenv("FD_VBLANK_HZ"); return v && atoi(v) >= 30 ? atoi(v) : 0; }();
+            uint64_t lastHz = 0, secondTicks = 0;
             for (;;)
             {
-                next += period;
+                const int hz = forced ? forced : g_vblankHz.load();
+                next += std::chrono::nanoseconds(1000000000LL / hz);
+                // Keep up after a rate change rather than bursting ticks.
+                if (next < std::chrono::steady_clock::now() - std::chrono::milliseconds(50)) next = std::chrono::steady_clock::now();
+                if (uint64_t(hz) != lastHz) { lastHz = uint64_t(hz); secondTicks = 0; }
                 std::this_thread::sleep_until(next);
                 ++g_vblankCounter;
                 // D3D's vblank handler checks the vblank status register first.
                 mem::Write32(kMmioBase + reg::D1MODE_VBLANK_VLINE_STATUS * 4, 1);
                 DispatchInterrupt(0, 2);
-                if (++ticks % uint64_t(hz) == 0)
+                ++ticks;
+                if (++secondTicks % uint64_t(hz) == 0)
                 {
                     const uint64_t frames = g_stats.frames.load();
                     kernel::Log("gpu: %llu fps, %llu draws total, %llu packets total", frames - lastFrames,
@@ -518,6 +524,8 @@ namespace gpu
         g_interruptCallback = callback;
         g_interruptUserData = userData;
     }
+
+    void SetVblankRate(int hz) { g_vblankHz = hz < 30 ? 30 : hz > 480 ? 480 : hz; }
 
     void Start()
     {

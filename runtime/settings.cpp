@@ -62,6 +62,7 @@ void Load(const std::filesystem::path& path) {
     d.upscaler = read(L"Graphics", L"Upscaler", d.upscaler);
     d.renderScale = read(L"Graphics", L"RenderScale", d.renderScale);
     d.frameGeneration = read(L"Graphics", L"FrameGeneration", d.frameGeneration);
+    d.decoupledSim = read(L"Graphics", L"DecoupledSimulation", d.decoupledSim) != 0;
     d.inputMode = read(L"Controls", L"Mode", d.inputMode);
     d.sensitivity = read(L"Controls", L"Sensitivity", d.sensitivity);
     d.deadzone = read(L"Controls", L"Deadzone", d.deadzone);
@@ -108,6 +109,7 @@ bool Save() {
     write(L"Graphics", L"Upscaler", d.upscaler);
     write(L"Graphics", L"RenderScale", d.renderScale);
     write(L"Graphics", L"FrameGeneration", d.frameGeneration);
+    write(L"Graphics", L"DecoupledSimulation", d.decoupledSim);
     write(L"Controls", L"Mode", d.inputMode);
     write(L"Controls", L"Sensitivity", d.sensitivity);
     write(L"Controls", L"Deadzone", d.deadzone);

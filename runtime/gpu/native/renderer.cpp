@@ -2552,6 +2552,16 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
     d3d->CreateShaderResourceView(outputTexture->d3d,&source,srv);
     D3D12_UNORDERED_ACCESS_VIEW_DESC target={};target.Format=targetDesc.Format;target.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
     d3d->CreateUnorderedAccessView(destination,nullptr,&target,uav);
+    // The previous copy must be done before its allocator is reused (it
+    // normally is: one frame has passed).
+    if(presentSerial&&presentFence->GetCompletedValue()<presentSerial)
+    {
+        HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+        if(!event)return false;
+        const bool done=SUCCEEDED(presentFence->SetEventOnCompletion(presentSerial,event))&&WaitForSingleObject(event,10000)==WAIT_OBJECT_0;
+        CloseHandle(event);
+        if(!done)return false;
+    }
     if(FAILED(presentAllocator->Reset())||FAILED(presentList->Reset(presentAllocator.Get(),presentPipeline.Get())))return false;
     D3D12_RESOURCE_BARRIER barriers[2]={};
     for(auto& barrier:barriers){barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;barrier.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;}
@@ -2568,10 +2578,18 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
     if(FAILED(presentList->Close()))return false;
     ID3D12CommandList* commands[]={presentList.Get()};destinationQueue->ExecuteCommandLists(1,commands);
     if(FAILED(destinationQueue->Signal(presentFence.Get(),++presentSerial)))return false;
-    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
-    if(!event)return false;
-    const bool waited=SUCCEEDED(presentFence->SetEventOnCompletion(presentSerial,event))&&WaitForSingleObject(event,10000)==WAIT_OBJECT_0;
-    CloseHandle(event);
+    // No CPU wait: the renderer's queue waits on the GPU for this copy before
+    // it rewrites the output texture (the destination queue then presents in
+    // order). FD_NATIVE_PRESENT_WAIT=1 restores the CPU wait.
+    bool waited=true;
+    if(CachedEnv("FD_NATIVE_PRESENT_WAIT"))
+    {
+        HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+        if(!event)return false;
+        waited=SUCCEEDED(presentFence->SetEventOnCompletion(presentSerial,event))&&WaitForSingleObject(event,10000)==WAIT_OBJECT_0;
+        CloseHandle(event);
+    }
+    else if(FAILED(static_cast<D3D12CommandQueue*>(queue.get())->d3d->Wait(presentFence.Get(),presentSerial)))return false;
     PrintDebugMessages(infoQueue,debugErrors,debugWarnings,"native present");
     return waited&&!debugErrors;
 }

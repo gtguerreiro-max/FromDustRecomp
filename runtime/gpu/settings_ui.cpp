@@ -8,6 +8,7 @@
 #ifdef FD_NATIVE_RENDERER
 #include "native/upscaler.h"
 #include "native/frame_generation.h"
+#include "../game_loop.h"
 #endif
 #include <wrl/client.h>
 #include <algorithm>
@@ -77,6 +78,9 @@ void ApplyLive() {
     gpu::native::SetUpscalerSetting(gpu::native::UpscalerMode(d.upscaler));
     gpu::native::SetRenderScaleSetting(d.renderScale / 100.0);
     if (gpu::native::fg::Loaded()) gpu::native::fg::SetFrames(gpu::native::fg::ConfiguredFrames(d.frameGeneration));
+    // Fixed-rate world: 30 world steps per second, the game loop up to 120 FPS.
+    gameloop::SetSimulationRate(d.decoupledSim ? 30.0 : 0.0);
+    gpu::SetVblankRate(d.decoupledSim ? 240 : 60);
 #endif
     g_applied = d;
     g_appliedValid = true;
@@ -303,6 +307,20 @@ private:
                                             status.outputWidth, status.outputHeight, (unsigned long long)status.evaluatedFrames,
                                             status.cameraFound ? "detetada" : "não detetada (sem vetores)");
 #endif
+                }
+                Section("FLUIDEZ");
+                {
+                    ImGui::BeginDisabled(!nativeBackend_);
+                    ImGui::Checkbox("Física a ritmo fixo (experimental)", &d.decoupledSim);
+                    ImGui::EndDisabled();
+                    Help("O jogo original faz avançar o mundo (água, terreno, pessoas) um passo por frame, por isso fica preso a 30 FPS. "
+                         "Com esta opção o mundo avança sempre 30 vezes por segundo e o resto do jogo (câmara, imagem) corre ao ritmo "
+                         "do 'Limite de FPS' (60, 120 ou sem limite; aplica ao reiniciar). A água e as pessoas continuam a 30 Hz. "
+                         "Aplica-se de imediato.");
+                    if (nativeBackend_ && d.decoupledSim)
+                        ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "Mundo a 30 Hz  |  imagem até %s FPS",
+                            d.frameLimit ? std::to_string((std::min)(d.frameLimit, 120)).c_str() : "120");
+                    else if (!nativeBackend_) ImGui::TextDisabled("Disponível com o renderer nativo.");
                 }
                 Section("GERAÇÃO DE FRAMES");
                 {

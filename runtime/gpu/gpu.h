@@ -40,6 +40,9 @@ namespace gpu
 
     // Starts the command processor and the 60 Hz vblank thread.
     void Start();
+    // Vblank rate (the game presents every second vblank; 240 Hz lets the
+    // game loop run up to 120 FPS when the world runs at a fixed rate).
+    void SetVblankRate(int hz);
 
     uint32_t ReadRegister(uint32_t index);
     void WriteRegister(uint32_t index, uint32_t value);

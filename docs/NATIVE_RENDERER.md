@@ -1157,3 +1157,40 @@ there, and 40 in the menus. At 60 FPS the camera of that cutscene stays on time
 (it is time-based), but the sea and the narration run ahead: the simulation
 steps per frame, so a higher rate needs the simulation decoupled from the
 render loop first (in progress).
+
+## World simulation at a fixed rate (experimental) — 2026-11-05
+
+On the Xbox and in the PC port, From Dust steps its world once per frame:
+the PC frame-rate unlockers (gibbed's startup hook, an0nymooose's
+FromDustHook fix) speed up the water, lava, vegetation and AI with the
+frame rate, and their authors note that the physics stay locked to the FPS.
+
+The recompiled frame loop shows why and where. `sub_825803A8` is the
+per-frame component update: a manager calls the Update (vtable slot 5) of
+each registered component. In play there are three. The world (dustai
+`sub_8A237C20`) kicks the GalileoKernel jobs that step the water, terrain
+and AI simulation; the main thread waits for them later in the frame. The
+camera is updated outside the components, every rendered frame (with the
+world gated the camera matrix still changed every frame).
+
+`runtime/game_loop.cpp` overrides `sub_825803A8`. With a simulation rate
+set, the world component runs from a real-time accumulator at that rate
+(30 = original speed) and the other components every frame. The world
+logic detects pad presses as edges, so `XamInputGetState` lets buttons and
+triggers change only before an update that steps the world, with a
+synthesized packet number (the game ignores a state whose packet did not
+change). The sticks stay live.
+
+F1 > Gráficos > Fluidez > "Física a ritmo fixo" turns it on live: the world
+at 30 Hz and the vblank at 240 Hz. The game presents every second vblank, so
+its loop can run up to 120 FPS, capped by "Limite de FPS". `FD_SIM_HZ`,
+`FD_SIM_HZ_AFTER`, `FD_SIM_GATE` and `FD_VBLANK_HZ` override it for tests.
+
+Verified (first level, RTX 5060 Ti): the menus, the intro video and the
+level work. At the same time the sea matches the 30 FPS session, while the
+camera changes every frame at 37-46 FPS. The limit is now CPU work on the
+game thread, where capturing draws takes ~57% (geometry conversion, texture
+capture, write-watch protection). Rendering off the game thread and the
+present without a CPU wait (`FD_NATIVE_PRESENT_WAIT=1` restores it) brought
+the render worker to ~17 ms per frame. Unverified: the Breath cursor's rate
+in play, the in-game pause menu, and level transitions.
