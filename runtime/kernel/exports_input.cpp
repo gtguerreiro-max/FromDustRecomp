@@ -1,6 +1,7 @@
 // Xbox gamepad exports backed by Windows XInput and remappable PC keys.
 #include "kernel.h"
 #include "../input.h"
+#include "../game_loop.h"
 #include <cstring>
 
 namespace {
@@ -18,6 +19,23 @@ KFUNC(XamInputGetState) {
     if (ARG2) memset(mem::Translate(ARG2), 0, 16);
     pcinput::State state;
     const auto result = pcinput::GetState(ARG0, state);
+    // Decoupled simulation: buttons and triggers change for the game only
+    // before a world step (the world logic detects presses as edges); the
+    // sticks stay live for the per-frame camera.
+    // The packet number follows the state the game actually sees (it ignores
+    // a state whose packet number did not change).
+    static pcinput::Gamepad held[4], shown[4];
+    static uint32_t packets[4];
+    if (!result && ARG0 < 4) {
+        if (gameloop::InputMayChange()) held[ARG0] = state.pad;
+        else {
+            state.pad.buttons = held[ARG0].buttons;
+            state.pad.leftTrigger = held[ARG0].leftTrigger;
+            state.pad.rightTrigger = held[ARG0].rightTrigger;
+        }
+        if (memcmp(&shown[ARG0], &state.pad, sizeof(state.pad))) { shown[ARG0] = state.pad; ++packets[ARG0]; }
+        state.packet = packets[ARG0];
+    }
     if (!result && ARG2) {
         mem::Write32(ARG2, state.packet);
         WritePad(ARG2 + 4, state.pad);

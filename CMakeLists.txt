@@ -92,7 +92,7 @@ if(FD_BUILD_TESTS)
     enable_testing()
     add_executable(RuntimeSettingsInputTests
         tests/settings_input_tests.cpp runtime/settings.cpp runtime/input.cpp
-        runtime/kernel/exports_input.cpp)
+        runtime/kernel/exports_input.cpp tests/game_loop_stub.cpp)
     target_include_directories(RuntimeSettingsInputTests PRIVATE runtime ppc/Default
         XenonRecomp/thirdparty/simde)
     target_compile_options(RuntimeSettingsInputTests PRIVATE -march=x86-64-v3 /EHsc /utf-8

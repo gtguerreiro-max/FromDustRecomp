@@ -2475,6 +2475,17 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     }
     completedDraws += frameDraws;
     ++completedFrames;
+    // FD_TRACE_CAMERA: how often the scene camera (VS_DustConst[8..11]) changes.
+    if(frame.continuous&&sceneCamera&&CachedEnv("FD_TRACE_CAMERA"))
+    {
+        static float lastVP[16]{};
+        static uint64_t frames=0,changes=0;
+        static auto since=std::chrono::steady_clock::now();
+        ++frames;
+        if(memcmp(lastVP,sceneVP,sizeof(lastVP))){++changes;memcpy(lastVP,sceneVP,sizeof(lastVP));}
+        const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-since).count();
+        if(seconds>=5){fprintf(stderr,"camera trace: %.1f frames/s, camera changed %.1f/s\n",frames/seconds,changes/seconds);frames=changes=0;since=std::chrono::steady_clock::now();}
+    }
     if(sceneResolve!=SIZE_MAX)++upscale.frameIndex;
     if(frame.continuous)
     {

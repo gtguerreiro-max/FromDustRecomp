@@ -1,11 +1,17 @@
 // Threads, waits, events, semaphores, mutants, critical sections, TLS, time.
 
 #include <atomic>
+#include <algorithm>
+#include <map>
+#include <mutex>
+#include <tuple>
+#include <vector>
 #include <thread>
 
 #include "kernel.h"
 #include "objects.h"
 #include "thread.h"
+#include "debug.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -198,6 +204,51 @@ KFUNC(ObReferenceObject) { RETURN(0); }
 
 // --- Events / semaphores / mutants ----------------------------------------
 
+
+// FD_TRACE_SYNC=1: every 10 s, the most frequent (operation, thread, guest
+// caller, object) tuples of event / semaphore signals and waits. Used to find
+// which thread drives which (for example the per-frame simulation steps).
+namespace
+{
+    struct SyncTrace
+    {
+        std::mutex lock;
+        std::map<std::tuple<char, uint32_t, uint32_t, const void*>, uint32_t> counts;
+        uint64_t lastDump = 0;
+    };
+    void TraceSync(char op, uint32_t lr, const void* object)
+    {
+        static const bool enabled = getenv("FD_TRACE_SYNC") != nullptr;
+        if (!enabled) return;
+        static SyncTrace trace;
+        const GuestThread* thread = CurrentThread();
+        // FD_TRACE_SYNC_CHAIN=<thread id>: guest call chains of that thread's signals.
+        static const int chainThread = [] { const char* v = getenv("FD_TRACE_SYNC_CHAIN"); return v ? atoi(v) : -1; }();
+        if (thread && int(thread->id) == chainThread && op != 'W')
+        {
+            char tag[16]; snprintf(tag, sizeof(tag), "%c%p", op, object);
+            debug::TraceGuestChain(tag);
+        }
+        std::lock_guard guard(trace.lock);
+        ++trace.counts[{op, thread ? thread->id : 0, lr, object}];
+        const uint64_t now = GetTickCount64();
+        if (!trace.lastDump) trace.lastDump = now;
+        if (now - trace.lastDump < 10000) return;
+        std::vector<std::pair<uint32_t, std::tuple<char, uint32_t, uint32_t, const void*>>> sorted;
+        for (const auto& [key, count] : trace.counts) sorted.push_back({count, key});
+        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        Log("=== sync trace (%.1f s) ===", (now - trace.lastDump) / 1000.0);
+        for (size_t i = 0; i < sorted.size() && i < 40; i++)
+        {
+            const auto& [op, id, caller, object] = sorted[i].second;
+            Log("  %c thread %2u lr %08X object %p: %u (%.1f/s)", op, id, caller, object, sorted[i].first,
+                sorted[i].first * 1000.0 / double(now - trace.lastDump));
+        }
+        trace.counts.clear();
+        trace.lastDump = now;
+    }
+}
+
 KFUNC(NtCreateEvent)
 {
     // (handle_ptr, object_attributes, event_type, initial_state)
@@ -211,6 +262,7 @@ KFUNC(NtSetEvent)
     KernelObject* object = LookupHandle(ARG0);
     if (!object)
         RETURN(STATUS_INVALID_HANDLE);
+    TraceSync('S', ctx.lr, object);
     const uint32_t previous = SetEvent(object);
     if (ARG1)
         mem::Write32(ARG1, previous);
@@ -240,7 +292,7 @@ KFUNC(NtPulseEvent)
     RETURN(STATUS_SUCCESS);
 }
 
-KFUNC(KeSetEvent) { RETURN(SetEvent(ObjectFromGuest(ARG0))); }
+KFUNC(KeSetEvent) { KernelObject* object = ObjectFromGuest(ARG0); TraceSync('S', ctx.lr, object); RETURN(SetEvent(object)); }
 KFUNC(KeResetEvent) { RETURN(ResetEvent(ObjectFromGuest(ARG0))); }
 
 KFUNC(NtCreateSemaphore)
@@ -256,6 +308,7 @@ KFUNC(NtReleaseSemaphore)
     auto* semaphore = LookupHandle<Semaphore>(ARG0, kSemaphore);
     if (!semaphore)
         RETURN(STATUS_INVALID_HANDLE);
+    TraceSync('R', ctx.lr, semaphore);
     int32_t previous;
     {
         std::lock_guard lock(g_dispatcherLock);
@@ -319,6 +372,7 @@ KFUNC(NtWaitForSingleObjectEx)
 {
     // (handle, wait_mode, alertable, timeout_ptr)
     const uint32_t handle = ARG0;
+    TraceSync('W', ctx.lr, LookupHandle(handle));
     RETURN(WaitHandles(&handle, 1, true, ARG3));
 }
 
@@ -365,6 +419,7 @@ KFUNC(KeWaitForSingleObject)
     KernelObject* object = ObjectFromGuest(ARG0);
     if (!object)
         RETURN(STATUS_INVALID_HANDLE);
+    TraceSync('W', ctx.lr, object);
     Deadline deadline;
     const bool timed = TimeoutToDeadline(ARG4, deadline);
     RETURN(WaitForObjects(&object, 1, true, timed ? &deadline : nullptr));

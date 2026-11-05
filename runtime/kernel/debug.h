@@ -22,4 +22,7 @@ namespace kernel::debug
     // Diagnostic: logs the guest call chain of a write fault (host CONTEXT*),
     // once per distinct chain. Used by FD_TRACE_WRITE_PHYS.
     void TraceGuestWriter(void* hostContext, uint32_t physicalAddress);
+    // Diagnostic: logs the current thread's guest call chain (12 frames), once
+    // per distinct chain.
+    void TraceGuestChain(const char* tag);
 }

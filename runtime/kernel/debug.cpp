@@ -1,3 +1,5 @@
+#include <array>
+#include <string>
 // Hang diagnostics: dumps the guest call stack of every guest thread by
 // unwinding the host stack and mapping recompiled functions back to their
 // original guest addresses.
@@ -227,6 +229,35 @@ namespace kernel::debug
         const GuestThread* thread = CurrentThread();
         Log("write-trace phys %08X thread %u: sub_%08X <- sub_%08X <- sub_%08X <- sub_%08X", physicalAddress,
             thread ? thread->id : 0, chain[0], chain[1], chain[2], chain[3]);
+    }
+
+    void TraceGuestChain(const char* tag)
+    {
+        static std::mutex traceLock;
+        static std::vector<std::array<uint32_t, 12>> seen;
+        std::lock_guard trace(traceLock);
+        {
+            std::lock_guard lock(g_lock);
+            BuildRanges();
+        }
+        CONTEXT context{};
+        RtlCaptureContext(&context);
+        std::array<uint32_t, 12> chain{};
+        for (int depth = 0, found = 0; depth < 96 && context.Rip && found < 12; depth++)
+        {
+            if (const uint32_t guest = GuestFromHost(context.Rip)) chain[found++] = guest;
+            DWORD64 imageBase;
+            PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+            if (!fn) { context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp); context.Rsp += 8; continue; }
+            void* handlerData; DWORD64 establisher;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, fn, &context, &handlerData, &establisher, nullptr);
+        }
+        if (std::find(seen.begin(), seen.end(), chain) != seen.end() || seen.size() > 64) return;
+        seen.push_back(chain);
+        const GuestThread* thread = CurrentThread();
+        std::string text;
+        for (uint32_t f : chain) if (f) { char item[16]; snprintf(item, sizeof(item), " <- %08X", f); text += item; }
+        Log("chain %s thread %u:%s", tag, thread ? thread->id : 0, text.c_str());
     }
 
     // Sampling profiler for the main guest thread: counts, per function, how
