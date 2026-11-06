@@ -1617,3 +1617,38 @@ Checks: with all three at their defaults the native output is identical to
 the previous renderer (the four replay frames compared pixel for pixel, then
 `fd_native_frame_tests` exact, `fd_native_geometry_tests` 3160 draws match,
 runtime ctest).
+
+## Mouse: camera moves only at the screen edges — 2026-11-06
+
+In the direct mouse mode the Breath moved with the mouse, but the game's
+camera follows the cursor, so every movement also moved the camera. Now
+(F1 > Controls > "Move the camera only at the screen edges", `EdgeScroll` /
+`EdgeScrollSpeed` in [Controls], on by default) the camera stays still while
+the Breath moves over the screen, and scrolls RTS-style when the Breath is in
+the band along the screen edges (8% of the screen), faster the deeper it is
+(quadratic, up to half a view width per second at 100%), carrying the Breath
+with it. The Breath is kept on screen.
+
+- The camera's follow node is dustai `sub_8A1FF3B0`: it copies the cursor
+  vector (+1744 of the global cursor object) into its target (this +16, the
+  previous target at +28). Found with a read watchpoint on the vector
+  (`FD_PROBE_CURSOR`: 11 reader functions) and a timed test that gave each
+  candidate a frozen copy for 6 s while scripted mouse movement
+  (`FD_MOUSE_MOVES`) moved the Breath: only with this one the Breath left the
+  screen centre (0.27 -> 0.83 of the width; the others 0.24-0.52).
+- `pointer::EdgeScroll` (called by the cursor update hook, `cursor_probe.cpp`)
+  keeps a focus point: it starts at the cursor, moves only while scrolling,
+  takes the game's small corrections of the Breath (the map limits stop the
+  carried Breath, so the camera stops too) and starts over after a gap of
+  0.5 s or when the game moves the cursor itself by more than 0.2 view widths
+  (tutorials, looking at a villager). Its height follows the Breath slowly.
+  The `sub_8A1FF3B0` override swaps the focus into the cursor vector around
+  the call and restores the Breath right after. The global view assist
+  measures the camera distance to the focus.
+- Off with the controller, the classic mouse mode or the option off (the
+  camera then follows the Breath as in the original).
+- Checked with the first level's save and scripted movement
+  (`FD_TRACE_POINTER=1` logs the Breath's screen position and the focus): the
+  Breath went from 0.60 to 0.93 of the screen width with the camera still,
+  scrolled at the edge, came back to the centre and up the screen with the
+  camera still; at the map limit the focus stops.

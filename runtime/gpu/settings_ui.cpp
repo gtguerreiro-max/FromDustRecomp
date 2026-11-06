@@ -455,6 +455,15 @@ private:
                      "(no snapping to villagers). It needs the native renderer; otherwise, or with the controller, the classic "
                      "mode is used. Classic turns mouse speed into the left stick, as the original PC port did.");
                 ImGui::SliderInt(d.mouseMode == 0 ? "Breath sensitivity" : "Breath speed", &d.mouseSpeed, 25, 300, "%d %%");
+                ImGui::BeginDisabled(d.mouseMode != 0);
+                ImGui::Checkbox("Move the camera only at the screen edges", &d.edgeScroll);
+                Help("Direct mode: the camera stays still while the Breath moves over the screen, and scrolls when the Breath "
+                     "reaches an edge (faster the closer it gets). The Breath stays on screen. Off: the camera follows the "
+                     "Breath, as in the original game.");
+                ImGui::BeginDisabled(!d.edgeScroll);
+                ImGui::SliderInt("Edge scroll speed", &d.edgeScrollSpeed, 25, 300, "%d %%");
+                ImGui::EndDisabled();
+                ImGui::EndDisabled();
                 ImGui::EndDisabled();
                 ImGui::Checkbox("Left button absorbs, right button releases", &d.mouseButtons);
                 Help("Left = LT (absorb matter), right = RT (release). Hold them like the triggers.");

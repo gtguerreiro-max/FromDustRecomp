@@ -91,7 +91,11 @@ PPC_FUNC(sub_8A1F4298)
     const float height = ReadFloat(cursor + 1752);
     float x, y;
     if (!std::isfinite(height)) return;
-    if (float distance; pointer::CameraDistance(ReadFloat(cursor + 1744), ReadFloat(cursor + 1748), height, distance))
+    // The global view check measures the camera's distance to what it
+    // follows: the edge scrolling focus when that holds the camera.
+    float focusX = ReadFloat(cursor + 1744), focusY = ReadFloat(cursor + 1748), focusZ = height;
+    pointer::Focus(focusX, focusY, focusZ);
+    if (float distance; pointer::CameraDistance(focusX, focusY, focusZ, distance))
         camera::Update(distance);
     static const bool traceCamera = getenv("FD_TRACE_CAMERA_DISTANCE") != nullptr;
     if (traceCamera)
@@ -104,13 +108,14 @@ PPC_FUNC(sub_8A1F4298)
             kernel::Log("camera distance: t %.1f %.1f", (GetTickCount64() - g_processStart) / 1000.0, distance);
         }
     }
-    if (pcinput::MouseAbsolute()) { if (!pointer::Target(height, x, y)) return; }
-    else if (!pointer::Grab(ReadFloat(cursor + 1744), ReadFloat(cursor + 1748), height, x, y))
+    const float liveX = ReadFloat(cursor + 1744), liveY = ReadFloat(cursor + 1748);
+    bool moved = pcinput::MouseAbsolute() ? pointer::Target(height, x, y) : pointer::Grab(liveX, liveY, height, x, y);
+    if (!moved)
     {
-        // Grabbed but idle: keep the position (no snapping to villagers).
-        if (pointer::Active() && ReadFloat(self + 280) == 0.0f && ReadFloat(self + 284) == 0.0f && ReadFloat(self + 288) == 0.0f)
-            WriteFloat(self + 280, 1e-6f);
-        return;
+        if (!pointer::Active()) { pointer::EdgeScroll(liveX, liveY, x, y, height); return; }
+        // Grabbed but idle: keep the position (no snapping to villagers);
+        // edge scrolling may still carry it while it rests at an edge.
+        x = liveX; y = liveY;
     }
     // The game's own limit (flag 0x80 of +380): within radius +340 of +304.
     if (mem::Read32(self + 380) & 0x80)
@@ -118,6 +123,14 @@ PPC_FUNC(sub_8A1F4298)
         const float cx = ReadFloat(self + 304), cy = ReadFloat(self + 308), radius = ReadFloat(self + 340);
         const float ox = x - cx, oy = y - cy, distance = std::sqrt(ox * ox + oy * oy);
         if (std::isfinite(radius) && radius > 0 && distance > radius) { x = cx + ox * radius / distance; y = cy + oy * radius / distance; }
+    }
+    // Edge scrolling: on screen, carried by the camera at the edges.
+    if (pointer::EdgeScroll(liveX, liveY, x, y, height) && !moved && (x != liveX || y != liveY)) moved = true;
+    if (!moved)
+    {
+        if (ReadFloat(self + 280) == 0.0f && ReadFloat(self + 284) == 0.0f && ReadFloat(self + 288) == 0.0f)
+            WriteFloat(self + 280, 1e-6f);
+        return;
     }
     static const bool trace = getenv("FD_TRACE_POINTER") != nullptr;
     if (trace)
@@ -128,8 +141,10 @@ PPC_FUNC(sub_8A1F4298)
             float sx = -1, sy = -1, mx = -1, my = -1;
             pointer::Project(ReadFloat(cursor + 1744), ReadFloat(cursor + 1748), height, sx, sy);
             pcinput::MousePosition(mx, my);
-            kernel::Log("pointer: t %.1f cursor %08X (%.2f %.2f %.2f) on screen (%.3f %.3f), mouse (%.3f %.3f) -> (%.2f %.2f)", (GetTickCount64() - g_processStart) / 1000.0, cursor,
-                ReadFloat(cursor + 1744), ReadFloat(cursor + 1748), height, sx, sy, mx, my, x, y);
+            float fx = 0, fy = 0, fz = 0;
+            const bool focus = pointer::Focus(fx, fy, fz);
+            kernel::Log("pointer: t %.1f cursor %08X (%.2f %.2f %.2f) on screen (%.3f %.3f), mouse (%.3f %.3f) -> (%.2f %.2f), focus %s(%.2f %.2f)", (GetTickCount64() - g_processStart) / 1000.0, cursor,
+                ReadFloat(cursor + 1744), ReadFloat(cursor + 1748), height, sx, sy, mx, my, x, y, focus ? "" : "off ", fx, fy);
         }
     }
     static const bool dry = getenv("FD_POINTER_DRY") != nullptr;
@@ -199,4 +214,30 @@ PPC_FUNC(sub_8A043680)
         }
     }
     __imp__sub_8A043680(ctx, base);
+}
+
+// Edge scrolling: dustai sub_8A1FF3B0 is the camera's follow node. It copies
+// the cursor vector (+1744 of the global cursor object) into its target
+// (this +16, the previous one at +28). Found by giving each reader of the
+// vector (a read watchpoint, FD_PROBE_CURSOR) a frozen copy for a few seconds
+// while the Breath moved: only with this one the Breath left the screen
+// centre. While edge scrolling holds the camera, the node sees the focus
+// point instead (swapped in around the call, the Breath's own position is
+// restored right after).
+PPC_FUNC_IMPL(__imp__sub_8A1FF3B0);
+PPC_FUNC(sub_8A1FF3B0)
+{
+    const uint32_t cursor = mem::Read32(0x8A295318);
+    float fx, fy, fz;
+    if (!cursor || cursor < 0x40000000u || cursor >= 0xC0000000u || !pointer::Focus(fx, fy, fz))
+    {
+        __imp__sub_8A1FF3B0(ctx, base);
+        return;
+    }
+    const uint32_t live[3] = {mem::Read32(cursor + 1744), mem::Read32(cursor + 1748), mem::Read32(cursor + 1752)};
+    WriteFloat(cursor + 1744, fx);
+    WriteFloat(cursor + 1748, fy);
+    WriteFloat(cursor + 1752, fz);
+    __imp__sub_8A1FF3B0(ctx, base);
+    for (int k = 0; k < 3; ++k) mem::Write32(cursor + 1744 + 4 * k, live[k]);
 }

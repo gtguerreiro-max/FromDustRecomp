@@ -55,6 +55,8 @@ struct Data {
     // camera (right stick) and the wheel zooms.
     bool mouseBreath = true;
     bool globalView = true; // keep the far (RB) camera unless the player leaves it
+    bool edgeScroll = true; // direct mouse: the camera moves only while the Breath is at the screen edges
+    int edgeScrollSpeed = 100;
     int mouseMode = 0; // 0 direct (the Breath moves with the mouse on screen), 1 classic (mouse as stick)
     int mouseSpeed = 100;
     bool mouseButtons = true;

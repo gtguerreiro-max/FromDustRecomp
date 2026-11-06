@@ -3,6 +3,7 @@
 #include "settings.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -144,6 +145,97 @@ bool Grab(float x, float y, float z, float& outX, float& outY)
     outX = x + ux * sideways + fx * forward;
     outY = y + uy * sideways + fy * forward;
     return std::isfinite(outX) && std::isfinite(outY);
+}
+namespace
+{
+struct FocusState
+{
+    bool valid = false;
+    float x = 0, y = 0, z = 0;
+    float lastX = 0, lastY = 0; // the Breath as edge scrolling left it
+    unsigned long long tick = 0;
+};
+std::mutex g_focusMutex;
+FocusState g_focus;
+unsigned long long Now()
+{
+    using namespace std::chrono;
+    return (unsigned long long)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+}
+bool EdgeScroll(float liveX, float liveY, float& x, float& y, float z)
+{
+    const auto d = settings::Get();
+    std::lock_guard lock(g_focusMutex);
+    const unsigned long long now = Now();
+    if (!d.edgeScroll || !Active()) { g_focus.valid = false; return false; }
+    // Starts over after a gap (menus, cut scenes, loading) or when the game
+    // moved the cursor itself (tutorials, looking at a villager): the camera
+    // then goes where the game put the cursor.
+    const float jumpX = liveX - g_focus.lastX, jumpY = liveY - g_focus.lastY;
+    float sx, sy;
+    if (!Project(x, y, z, sx, sy)) { g_focus.valid = false; return false; }
+    float rx, ry;
+    constexpr float step = 0.01f;
+    // World units per window width at the screen centre (scroll speed and
+    // jump size do not depend on where the Breath is in the perspective).
+    float perWidth = 0, ox, oy;
+    if (Unproject(0.5f, 0.5f, z, ox, oy) && Unproject(0.5f + step, 0.5f, z, rx, ry))
+        perWidth = std::sqrt((rx - ox) * (rx - ox) + (ry - oy) * (ry - oy)) / step;
+    if (!g_focus.valid || now - g_focus.tick > 500 ||
+        (perWidth > 0 && std::sqrt(jumpX * jumpX + jumpY * jumpY) > 0.2f * perWidth))
+    {
+        g_focus.valid = true;
+        g_focus.x = liveX; g_focus.y = liveY; g_focus.z = z;
+        g_focus.tick = now;
+    }
+    else
+    {
+        // Small corrections by the game (the map's limits stop the Breath
+        // that the scroll carried): the focus takes them too, so the camera
+        // never runs on past the Breath.
+        g_focus.x += jumpX; g_focus.y += jumpY;
+    }
+    const float dt = (std::min)(0.1f, (now - g_focus.tick) / 1000.0f);
+    g_focus.tick = now;
+    // Keep the Breath on screen (a little inside the edges).
+    constexpr float inside = 0.01f;
+    const float cx = std::clamp(sx, inside, 1 - inside), cy = std::clamp(sy, inside, 1 - inside);
+    if ((cx != sx || cy != sy) && Unproject(cx, cy, z, rx, ry)) { x = rx; y = ry; sx = cx; sy = cy; }
+    // Inside the edge band, scroll towards it: up to half a view width per
+    // second at the edge (x Edge scroll speed), carrying the Breath.
+    constexpr float band = 0.08f;
+    auto push = [](float s) { return s < band ? -(band - s) / band : s > 1 - band ? (s - (1 - band)) / band : 0.0f; };
+    const float px = push(sx), py = push(sy);
+    if ((px != 0 || py != 0) && perWidth > 0 && dt > 0)
+    {
+        float ux = 1, uy = 0, fx = 0, fy = 1, upX, upY;
+        if (Unproject(sx + step, sy, z, rx, ry))
+        {
+            const float length = std::sqrt((rx - x) * (rx - x) + (ry - y) * (ry - y));
+            if (length > 1e-5f) { ux = (rx - x) / length; uy = (ry - y) / length; }
+        }
+        fx = -uy; fy = ux;
+        if (Unproject(sx, sy - step, z, upX, upY) && (upX - x) * fx + (upY - y) * fy < 0) { fx = -fx; fy = -fy; }
+        const float speed = 0.5f * perWidth * (d.edgeScrollSpeed / 100.0f) * dt;
+        // Smooth start inside the band: quadratic in the depth.
+        const float ex = px * std::fabs(px), ey = py * std::fabs(py);
+        const float mx = (ux * ex - fx * ey) * speed, my = (uy * ex - fy * ey) * speed;
+        g_focus.x += mx; g_focus.y += my;
+        x += mx; y += my;
+    }
+    // The focus height follows the Breath slowly (no bobbing over terrain
+    // while the Breath alone moves, no lag across a long scroll).
+    g_focus.z += (z - g_focus.z) * (std::min)(1.0f, dt * 1.5f);
+    g_focus.lastX = x; g_focus.lastY = y;
+    return true;
+}
+bool Focus(float& x, float& y, float& z)
+{
+    std::lock_guard lock(g_focusMutex);
+    if (!g_focus.valid || Now() - g_focus.tick > 250) return false;
+    x = g_focus.x; y = g_focus.y; z = g_focus.z;
+    return true;
 }
 bool Project(float x, float y, float z, float& sx, float& sy)
 {
