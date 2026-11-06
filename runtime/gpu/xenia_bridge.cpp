@@ -39,6 +39,12 @@
 #include "xenia/ui/d3d12/d3d12_presenter.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "third_party/stb/stb_image_write.h"
+#ifdef FD_NATIVE_RENDERER
+#include "native/upscaler.h"
+#include "xenia/ui/window_win.h"
+#include <dxgi1_6.h>
+#include <wrl/client.h>
+#endif
 
 namespace {
 std::unique_ptr<xe::Memory> g_memory;
@@ -318,6 +324,40 @@ bool Initialize() {
       if(gpu::native::fg::Loaded())gpu::native::fg::AfterPresent();
       latency::Presented();
     };
+    // HDR output: the presenter creates an FP16 scRGB swap chain. Only when
+    // Windows HDR is on for the window's display (scRGB on an SDR desktop
+    // would be clipped to SDR white by the compositor).
+    if(g_window){
+      int state=-1;float maxNits=0;
+      if(HMODULE dxgi=LoadLibraryW(L"dxgi.dll")){
+        using Create=HRESULT(WINAPI*)(REFIID,void**);
+        if(auto create=reinterpret_cast<Create>(GetProcAddress(dxgi,"CreateDXGIFactory1"))){
+          Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+          const HMONITOR monitor=MonitorFromWindow(static_cast<xe::ui::Win32Window*>(g_window.get())->hwnd(),MONITOR_DEFAULTTONEAREST);
+          if(SUCCEEDED(create(IID_PPV_ARGS(&factory)))){
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+            for(UINT a=0;state<0&&factory->EnumAdapters1(a,&adapter)!=DXGI_ERROR_NOT_FOUND;++a){
+              Microsoft::WRL::ComPtr<IDXGIOutput> output;
+              for(UINT o=0;state<0&&adapter->EnumOutputs(o,&output)!=DXGI_ERROR_NOT_FOUND;++o){
+                Microsoft::WRL::ComPtr<IDXGIOutput6> output6;
+                DXGI_OUTPUT_DESC1 desc{};
+                if(SUCCEEDED(output.As(&output6))&&SUCCEEDED(output6->GetDesc1(&desc))&&desc.Monitor==monitor){
+                  state=desc.ColorSpace==DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020?1:0;
+                  maxNits=desc.MaxLuminance;
+                }
+              }
+            }
+          }
+        }
+        FreeLibrary(dxgi);
+      }
+      gpu::native::SetHdrDisplay(state,maxNits);
+      const bool hdr=settings::Get().hdr&&(state==1||getenv("FD_FORCE_HDR"));
+      xe::ui::d3d12::fd_present_hooks.hdr_output=hdr;
+      gpu::native::SetHdrActive(hdr);
+      kernel::Log("gpu: display %s (peak %.0f nits); HDR output %s",state==1?"in HDR mode":state==0?"in SDR mode":"not identified",
+                  double(maxNits),hdr?"on (scRGB)":"off");
+    }
     g_nativeProvider=xe::ui::d3d12::D3D12Provider::Create();
     if(!g_nativeProvider)return false;
     g_nativePresenter=g_nativeProvider->CreatePresenter();
@@ -366,7 +406,7 @@ bool PresentNative(gpu::native::Renderer& renderer) {
 #ifdef FD_NATIVE_RENDERER
   if(!g_nativePresenter||!renderer.OutputWidth()||!renderer.OutputHeight())return false;
   const bool presented=g_nativePresenter->RefreshGuestOutput(renderer.OutputWidth(),renderer.OutputHeight(),16,9,[&](xe::ui::Presenter::GuestOutputRefreshContext& context){
-    context.SetIs8bpc(true);
+    context.SetIs8bpc(!gpu::native::HdrActive());
     auto& d3d=static_cast<xe::ui::d3d12::D3D12Presenter::D3D12GuestOutputRefreshContext&>(context);
     const bool copied=renderer.PresentTo(d3d.resource_uav_capable(),g_nativeProvider->GetDirectQueue());
     if(copied)gpu::native::fg::Delivered();

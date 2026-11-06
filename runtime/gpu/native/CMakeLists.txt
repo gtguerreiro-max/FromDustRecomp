@@ -33,6 +33,13 @@ add_custom_command(OUTPUT "${present_header}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/present.hlsl" "${FD_NATIVE_DXC}"
     BYPRODUCTS "${FD_NATIVE_BUILTINS}/present.dxil" VERBATIM)
 list(APPEND FD_NATIVE_BUILTIN_HEADERS "${present_header}")
+set(present_hdr_header "${FD_NATIVE_BUILTINS}/present_hdr.h")
+add_custom_command(OUTPUT "${present_hdr_header}"
+    COMMAND "${FD_NATIVE_DXC}" -T cs_6_0 -E main "${CMAKE_CURRENT_SOURCE_DIR}/present_hdr.hlsl"
+        -Fh "${present_hdr_header}" -Vn fd_native_present_hdr -Fo "${FD_NATIVE_BUILTINS}/present_hdr.dxil"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/present_hdr.hlsl" "${FD_NATIVE_DXC}"
+    BYPRODUCTS "${FD_NATIVE_BUILTINS}/present_hdr.dxil" VERBATIM)
+list(APPEND FD_NATIVE_BUILTIN_HEADERS "${present_hdr_header}")
 foreach(kind IN ITEMS vs ps)
     set(header "${FD_NATIVE_BUILTINS}/motion_${kind}.h")
     add_custom_command(OUTPUT "${header}"

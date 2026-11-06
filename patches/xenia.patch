@@ -129,11 +129,35 @@ index 2be7329..0d6855d 100644
        static_cast<unsigned long long>(pa_sc_window_offset_window_x_offset) |
        (static_cast<unsigned long long>(pa_sc_window_offset_window_y_offset)
         << 32));
+diff --git a/src/xenia/ui/d3d12/d3d12_immediate_drawer.cc b/src/xenia/ui/d3d12/d3d12_immediate_drawer.cc
+index 70ea189..6e5216f 100644
+--- a/src/xenia/ui/d3d12/d3d12_immediate_drawer.cc
++++ b/src/xenia/ui/d3d12/d3d12_immediate_drawer.cc
+@@ -160,7 +160,7 @@ bool D3D12ImmediateDrawer::Initialize() {
+       UINT(xe::countof(pipeline_input_elements));
+   pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+   pipeline_desc.NumRenderTargets = 1;
+-  pipeline_desc.RTVFormats[0] = D3D12Presenter::kSwapChainFormat;
++  pipeline_desc.RTVFormats[0] = D3D12Presenter::SwapChainFormat();
+   pipeline_desc.SampleDesc.Count = 1;
+   if (FAILED(device->CreateGraphicsPipelineState(
+           &pipeline_desc, IID_PPV_ARGS(&pipeline_triangle_)))) {
 diff --git a/src/xenia/ui/d3d12/d3d12_presenter.cc b/src/xenia/ui/d3d12/d3d12_presenter.cc
-index 554e901..8253c6c 100644
+index 554e901..98f91ae 100644
 --- a/src/xenia/ui/d3d12/d3d12_presenter.cc
 +++ b/src/xenia/ui/d3d12/d3d12_presenter.cc
-@@ -22,6 +22,10 @@
+@@ -9,7 +9,10 @@
+ 
+ #include "xenia/ui/d3d12/d3d12_presenter.h"
+ 
++#include <algorithm>
+ #include <climits>
++#include <cmath>
++#include <cstring>
+ #include <cstdint>
+ #include <memory>
+ #include <utility>
+@@ -22,6 +25,10 @@
  #include "xenia/ui/d3d12/d3d12_util.h"
  #include "xenia/ui/surface_win.h"
  
@@ -144,7 +168,118 @@ index 554e901..8253c6c 100644
  DEFINE_bool(
      d3d12_allow_variable_refresh_rate_and_tearing, true,
      "In fullscreen, allow using variable refresh rate on displays supporting "
-@@ -516,6 +520,10 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+@@ -33,6 +40,45 @@ namespace xe {
+ namespace ui {
+ namespace d3d12 {
+ 
++#if defined(FD_XENIA_GPU)
++DXGI_FORMAT D3D12Presenter::SwapChainFormat() {
++  return fd_present_hooks.hdr_output ? DXGI_FORMAT_R16G16B16A16_FLOAT
++                                     : kSwapChainFormat;
++}
++DXGI_FORMAT D3D12Presenter::GuestOutputFormat() {
++  return fd_present_hooks.hdr_output ? DXGI_FORMAT_R16G16B16A16_FLOAT
++                                     : kGuestOutputFormat;
++}
++DXGI_FORMAT D3D12Presenter::GuestOutputIntermediateFormat() {
++  return fd_present_hooks.hdr_output ? DXGI_FORMAT_R16G16B16A16_FLOAT
++                                     : kGuestOutputIntermediateFormat;
++}
++namespace {
++// scRGB (linear, extended) to an 8-bit sRGB byte for captures.
++uint32_t ScRgbToSrgbByte(uint16_t half, float scale) {
++  uint32_t bits = uint32_t(half & 0x7FFF) << 13;
++  float value;
++  if ((half & 0x7C00) == 0) {
++    value = float(half & 0x3FF) * (1.0f / 16777216.0f);
++  } else {
++    bits += (127 - 15) << 23;
++    std::memcpy(&value, &bits, sizeof(value));
++  }
++  if (half & 0x8000) value = 0.0f;
++  value = std::min(value * scale, 1.0f);
++  value = value <= 0.0031308f ? value * 12.92f
++                              : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
++  return uint32_t(value * 255.0f + 0.5f);
++}
++}  // namespace
++#else
++DXGI_FORMAT D3D12Presenter::SwapChainFormat() { return kSwapChainFormat; }
++DXGI_FORMAT D3D12Presenter::GuestOutputFormat() { return kGuestOutputFormat; }
++DXGI_FORMAT D3D12Presenter::GuestOutputIntermediateFormat() {
++  return kGuestOutputIntermediateFormat;
++}
++#endif
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_bilinear_dither_ps.h"
+@@ -208,6 +254,19 @@ bool D3D12Presenter::CaptureGuestOutput(RawImage& image_out) {
+         reinterpret_cast<const uint8_t*>(mapping) +
+         copy_dest.PlacedFootprint.Offset +
+         size_t(copy_dest.PlacedFootprint.Footprint.RowPitch) * y);
++#if defined(FD_XENIA_GPU)
++    if (GuestOutputFormat() == DXGI_FORMAT_R16G16B16A16_FLOAT) {
++      const uint16_t* half_row = reinterpret_cast<const uint16_t*>(source_row);
++      const float scale = fd_present_hooks.hdr_capture_scale;
++      for (uint32_t x = 0; x < image_out.width; ++x) {
++        const uint16_t* pixel = half_row + size_t(x) * 4;
++        dest_row[x] = ScRgbToSrgbByte(pixel[0], scale) |
++                      (ScRgbToSrgbByte(pixel[1], scale) << 8) |
++                      (ScRgbToSrgbByte(pixel[2], scale) << 16) | 0xFF000000u;
++      }
++      continue;
++    }
++#endif
+     for (uint32_t x = 0; x < image_out.width; ++x) {
+       dest_row[x] = Packed10bpcRGBTo8bpcBytes(source_row[x]);
+     }
+@@ -278,7 +337,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+     DXGI_SWAP_CHAIN_DESC1 swap_chain_desc;
+     swap_chain_desc.Width = UINT(new_swap_chain_width);
+     swap_chain_desc.Height = UINT(new_swap_chain_height);
+-    swap_chain_desc.Format = kSwapChainFormat;
++    swap_chain_desc.Format = SwapChainFormat();
+     swap_chain_desc.Stereo = false;
+     swap_chain_desc.SampleDesc.Count = 1;
+     swap_chain_desc.SampleDesc.Quality = 0;
+@@ -340,6 +399,17 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+     }
+     // From now on, in case of any failure, DestroySwapChain must be called
+     // before returning.
++#if defined(FD_XENIA_GPU)
++    if (fd_present_hooks.hdr_output) {
++      // scRGB: linear BT.709 primaries, 1.0 = 80 nits, values above 1 for HDR.
++      const HRESULT color_space_result = paint_context_.swap_chain->SetColorSpace1(
++          DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
++      if (FAILED(color_space_result)) {
++        XELOGE("D3D12Presenter: Failed to set the scRGB colour space, result 0x{:08X}",
++               uint32_t(color_space_result));
++      }
++    }
++#endif
+     paint_context_.swap_chain_width = new_swap_chain_width;
+     paint_context_.swap_chain_height = new_swap_chain_height;
+     paint_context_.swap_chain_allows_tearing =
+@@ -368,7 +438,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+   for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+     ID3D12Resource* swap_chain_buffer =
+         paint_context_.swap_chain_buffers[i].Get();
+-    rtv_desc.Format = kSwapChainFormat;
++    rtv_desc.Format = SwapChainFormat();
+     device->CreateRenderTargetView(
+         swap_chain_buffer, &rtv_desc,
+         provider_.OffsetRTVDescriptor(
+@@ -414,7 +484,7 @@ bool D3D12Presenter::RefreshGuestOutputImpl(
+     guest_output_resource_new_desc.Height = frontbuffer_height;
+     guest_output_resource_new_desc.DepthOrArraySize = 1;
+     guest_output_resource_new_desc.MipLevels = 1;
+-    guest_output_resource_new_desc.Format = kGuestOutputFormat;
++    guest_output_resource_new_desc.Format = GuestOutputFormat();
+     guest_output_resource_new_desc.SampleDesc.Count = 1;
+     guest_output_resource_new_desc.SampleDesc.Quality = 0;
+     guest_output_resource_new_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+@@ -516,6 +586,10 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
      // (and multiple threads can't paint the main target at the same time).
    }
  
@@ -155,7 +290,43 @@ index 554e901..8253c6c 100644
    if (guest_output_resource) {
      GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
          guest_output_properties, paint_context_.swap_chain_width,
-@@ -758,6 +766,12 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+@@ -599,7 +673,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+             std::make_pair(uint64_t(0), guest_output_resource);
+         // Create the SRV descriptor of the new texture.
+         D3D12_SHADER_RESOURCE_VIEW_DESC guest_output_resource_srv_desc;
+-        guest_output_resource_srv_desc.Format = kGuestOutputFormat;
++        guest_output_resource_srv_desc.Format = GuestOutputFormat();
+         guest_output_resource_srv_desc.ViewDimension =
+             D3D12_SRV_DIMENSION_TEXTURE2D;
+         guest_output_resource_srv_desc.Shader4ComponentMapping =
+@@ -653,7 +727,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+             intermediate_desc.Height = intermediate_needed_size.second;
+             intermediate_desc.DepthOrArraySize = 1;
+             intermediate_desc.MipLevels = 1;
+-            intermediate_desc.Format = kGuestOutputIntermediateFormat;
++            intermediate_desc.Format = GuestOutputIntermediateFormat();
+             intermediate_desc.SampleDesc.Count = 1;
+             intermediate_desc.SampleDesc.Quality = 0;
+             intermediate_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+@@ -675,7 +749,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+                 intermediate_texture_ptr_ref.Get();
+             // SRV.
+             D3D12_SHADER_RESOURCE_VIEW_DESC intermediate_srv_desc;
+-            intermediate_srv_desc.Format = kGuestOutputIntermediateFormat;
++            intermediate_srv_desc.Format = GuestOutputIntermediateFormat();
+             intermediate_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+             intermediate_srv_desc.Shader4ComponentMapping =
+                 D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+@@ -692,7 +766,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+                         i)));
+             // RTV.
+             D3D12_RENDER_TARGET_VIEW_DESC intermediate_rtv_desc;
+-            intermediate_rtv_desc.Format = kGuestOutputIntermediateFormat;
++            intermediate_rtv_desc.Format = GuestOutputIntermediateFormat();
+             intermediate_rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+             intermediate_rtv_desc.Texture2D.MipSlice = 0;
+             intermediate_rtv_desc.Texture2D.PlaneSlice = 0;
+@@ -758,6 +832,12 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
            }
            effect_rect_x = guest_output_flow.output_x;
            effect_rect_y = guest_output_flow.output_y;
@@ -168,7 +339,7 @@ index 554e901..8253c6c 100644
          } else {
            effect_dest_resource =
                paint_context_.guest_output_intermediate_textures[i].Get();
-@@ -1039,6 +1053,15 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+@@ -1039,6 +1119,15 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
      back_buffer_clear_needed = false;
    }
  
@@ -184,7 +355,7 @@ index 554e901..8253c6c 100644
    if (execute_ui_drawers) {
      // Draw the UI.
      if (!back_buffer_bound) {
-@@ -1083,10 +1106,25 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
+@@ -1083,10 +1172,25 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
    // fullscreen is ever used in, the allow tearing flag must not be passed in
    // fullscreen, but DXGI fullscreen is largely unneeded with the flip
    // presentation model used in Direct3D 12).
@@ -210,6 +381,40 @@ index 554e901..8253c6c 100644
    // Even if presentation has failed, work might have been enqueued anyway
    // internally before the failure according to Jesse Natalie from the DirectX
    // Discord server.
+@@ -1374,7 +1478,7 @@ bool D3D12Presenter::InitializeSurfaceIndependent() {
+                 .Get();
+     if (CanGuestOutputPaintEffectBeIntermediate(guest_output_paint_effect)) {
+       guest_output_paint_pipeline_desc.RTVFormats[0] =
+-          kGuestOutputIntermediateFormat;
++          GuestOutputIntermediateFormat();
+       if (FAILED(device->CreateGraphicsPipelineState(
+               &guest_output_paint_pipeline_desc,
+               IID_PPV_ARGS(&guest_output_paint_intermediate_pipelines_[i])))) {
+@@ -1386,7 +1490,7 @@ bool D3D12Presenter::InitializeSurfaceIndependent() {
+       }
+     }
+     if (CanGuestOutputPaintEffectBeFinal(guest_output_paint_effect)) {
+-      guest_output_paint_pipeline_desc.RTVFormats[0] = kSwapChainFormat;
++      guest_output_paint_pipeline_desc.RTVFormats[0] = SwapChainFormat();
+       if (FAILED(device->CreateGraphicsPipelineState(
+               &guest_output_paint_pipeline_desc,
+               IID_PPV_ARGS(&guest_output_paint_final_pipelines_[i])))) {
+diff --git a/src/xenia/ui/d3d12/d3d12_presenter.h b/src/xenia/ui/d3d12/d3d12_presenter.h
+index a02a7e5..62fdb39 100644
+--- a/src/xenia/ui/d3d12/d3d12_presenter.h
++++ b/src/xenia/ui/d3d12/d3d12_presenter.h
+@@ -66,6 +66,11 @@ class D3D12Presenter final : public Presenter {
+   // The format used internally by Windows composition.
+   static constexpr DXGI_FORMAT kSwapChainFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+ 
++  // From Dust: the formats in use (FP16 scRGB with fd_present_hooks.hdr_output).
++  static DXGI_FORMAT SwapChainFormat();
++  static DXGI_FORMAT GuestOutputFormat();
++  static DXGI_FORMAT GuestOutputIntermediateFormat();
++
+   // The callback must use the main direct queue of the provider.
+   class D3D12GuestOutputRefreshContext final
+       : public GuestOutputRefreshContext {
 diff --git a/src/xenia/ui/d3d12/d3d12_provider.cc b/src/xenia/ui/d3d12/d3d12_provider.cc
 index 52954dd..e9b3328 100644
 --- a/src/xenia/ui/d3d12/d3d12_provider.cc
@@ -241,10 +446,10 @@ index 52954dd..e9b3328 100644
    device_ = device;
    direct_queue_ = direct_queue;
 diff --git a/src/xenia/ui/d3d12/d3d12_provider.h b/src/xenia/ui/d3d12/d3d12_provider.h
-index 6542341..a67900b 100644
+index 6542341..70a4366 100644
 --- a/src/xenia/ui/d3d12/d3d12_provider.h
 +++ b/src/xenia/ui/d3d12/d3d12_provider.h
-@@ -25,6 +25,27 @@ enum {
+@@ -25,6 +25,34 @@ enum {
    UPLOAD_RESULT_CREATE_CPUVISIBLE = 2
  };
  
@@ -265,6 +470,13 @@ index 6542341..a67900b 100644
 +  // frame while frame generation is on).
 +  bool (*before_present)() = nullptr;
 +  void (*after_present)() = nullptr;
++  // HDR output, set before the presenter is created: the guest output, the
++  // paint intermediates and the swap chain are R16G16B16A16_FLOAT in scRGB
++  // (linear, 1.0 = 80 nits); the guest output already holds linear scRGB.
++  bool hdr_output = false;
++  // Guest output captures (FD_CAPTURE) map scRGB to 8-bit sRGB with this
++  // scale (1 / paper white in scRGB units).
++  float hdr_capture_scale = 1.0f;
 +};
 +extern FdPresentHooks fd_present_hooks;
 +#endif

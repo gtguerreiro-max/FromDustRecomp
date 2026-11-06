@@ -72,12 +72,20 @@ void ApplyLive() {
     auto config = g_presenter->GetGuestOutputPaintConfigFromUIThread();
     using Effect = xe::ui::Presenter::GuestOutputPaintConfig::Effect;
     config.SetEffect(d.presentation == 1 ? Effect::kFsr : d.presentation == 2 ? Effect::kCas : Effect::kBilinear);
+#ifdef FD_NATIVE_RENDERER
+    // FSR and CAS work on SDR values; the HDR guest output is linear scRGB.
+    if (gpu::native::HdrActive()) config.SetEffect(Effect::kBilinear);
+#endif
     config.SetCasAdditionalSharpness(d.sharpness / 100.0f);
     config.SetFsrSharpnessReduction(2.0f * (1.0f - d.sharpness / 100.0f));
     g_presenter->SetGuestOutputPaintConfigFromUIThread(config);
 #ifdef FD_NATIVE_RENDERER
     gpu::native::SetUpscalerSetting(gpu::native::UpscalerMode(d.upscaler));
     gpu::native::SetRenderScaleSetting(d.renderScale / 100.0);
+    gpu::native::SetAnisotropySetting(d.anisotropy > 0 ? 1u << (d.anisotropy - 1) : 1u);
+    gpu::native::SetShadowScaleSetting(uint32_t(d.shadowScale));
+    gpu::native::SetHdrLevels(float(d.hdrPaperWhite), float(d.hdrPeak));
+    xe::ui::d3d12::fd_present_hooks.hdr_capture_scale = 80.0f / float(d.hdrPaperWhite);
     if (gpu::native::fg::Loaded()) gpu::native::fg::SetFrames(gpu::native::fg::ConfiguredFrames(d.frameGeneration));
     gameloop::SetFrameGenerationActive(gpu::native::fg::Loaded() && gpu::native::fg::ConfiguredFrames(d.frameGeneration) > 0);
     // Fixed-rate world: 30 world steps per second, the game loop up to 120 FPS.
@@ -318,6 +326,49 @@ private:
                                             status.cameraFound ? "found" : "not found (no motion vectors)");
 #endif
                 }
+                Section("IMAGE QUALITY");
+                if (nativeBackend_) {
+                    constexpr int filters[] = {-1, 2, 3, 4, 5};
+                    int filter = int(std::find(std::begin(filters), std::end(filters), d.anisotropy) - std::begin(filters));
+                    if (filter >= 5) filter = 0;
+                    if (ImGui::Combo("Texture filtering", &filter, "Game default\0Anisotropic 2×\0Anisotropic 4×\0Anisotropic 8×\0Anisotropic 16×\0"))
+                        d.anisotropy = filters[filter];
+                    Help("Anisotropic filtering keeps the ground sharp where it is seen at a low angle (the far camera looks "
+                         "across the terrain). Applies to the game's mipmapped textures; very little GPU cost. Applies immediately.");
+                    constexpr int shadows[] = {1, 2, 4};
+                    int shadow = int(std::find(std::begin(shadows), std::end(shadows), d.shadowScale) - std::begin(shadows));
+                    if (shadow >= 3) shadow = 0;
+                    if (ImGui::Combo("Shadow resolution", &shadow, "Original (512×512)\0" "2× (1024×1024)\0" "4× (2048×2048)\0"))
+                        d.shadowScale = shadows[shadow];
+                    Help("The sun's shadows use four 512×512 shadow maps, blocky next to a high internal resolution. "
+                         "2× and 4× render them at 1024 or 2048 pixels: sharper shadow edges and fewer jagged steps. "
+                         "Applies immediately.");
+                } else ImGui::TextDisabled("Available with the native renderer.");
+                Section("HDR");
+                if (nativeBackend_) {
+#ifdef FD_NATIVE_RENDERER
+                    int display = -1; float displayNits = 0;
+                    gpu::native::HdrDisplay(display, displayNits);
+                    ImGui::Checkbox("HDR output", &d.hdr);
+                    Help("Shows the game in HDR on an HDR display (Windows HDR on). The image keeps its look at the "
+                         "'Paper white' brightness; the bright parts of the scene (sky, sun on the water, lava) rise towards "
+                         "'Peak brightness'. The HUD, subtitles and menus stay at paper white. Applies on restart.");
+                    if (gpu::native::HdrActive())
+                        ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "HDR active (scRGB)  |  display peak %s",
+                                           displayNits > 0 ? (std::to_string(int(displayNits)) + " nits").c_str() : "unknown");
+                    else if (d.hdr && display == 0)
+                        ImGui::TextColored(ImVec4(1, .8f, .4f, 1), "Windows HDR is off for this display: turn on 'Use HDR' in Windows Settings > Display, then restart.");
+                    else if (d.hdr) ImGui::TextColored(ImVec4(1, .8f, .4f, 1), "Restart the game to turn HDR on.");
+                    ImGui::BeginDisabled(!d.hdr);
+                    ImGui::SliderInt("Paper white", &d.hdrPaperWhite, 80, 400, "%d nits");
+                    Help("Brightness of white in the game's normal image (mid tones, HUD, menus). About 200 nits suits a lit "
+                         "room; lower it in a dark room. Applies immediately.");
+                    ImGui::SliderInt("Peak brightness", &d.hdrPeak, 400, 2000, "%d nits");
+                    Help("Brightness of the strongest highlights. Set it to your display's peak brightness (Windows reports it "
+                         "next to 'HDR active'). Applies immediately.");
+                    ImGui::EndDisabled();
+#endif
+                } else ImGui::TextDisabled("Available with the native renderer.");
                 Section("SMOOTHNESS");
                 {
                     ImGui::BeginDisabled(!nativeBackend_);
@@ -381,12 +432,12 @@ private:
                 int limit = int(std::find(std::begin(limits), std::end(limits), d.frameLimit) - std::begin(limits));
                 if (ImGui::Combo("Frame limit", &limit, "30\0 60\0 120\0None\0")) d.frameLimit = limits[limit];
                 ImGui::TextDisabled("With VSync, 'None' follows the monitor's refresh rate.");
-                constexpr int filters[] = {-1, 2, 3, 4, 5};
-                int filter = nativeBackend_ ? 0 : int(std::find(std::begin(filters), std::end(filters), d.anisotropy) - std::begin(filters));
-                ImGui::BeginDisabled(nativeBackend_);
-                if (ImGui::Combo("Texture filtering", &filter, "Game default\0Anisotropic 2×\0Anisotropic 4×\0Anisotropic 8×\0Anisotropic 16×\0")) d.anisotropy = filters[filter];
-                ImGui::EndDisabled();
-                if(nativeBackend_)ImGui::TextDisabled("The native renderer uses the game's own filtering.");
+                if (!nativeBackend_) {
+                    constexpr int filters[] = {-1, 2, 3, 4, 5};
+                    int filter = int(std::find(std::begin(filters), std::end(filters), d.anisotropy) - std::begin(filters));
+                    if (filter >= 5) filter = 0;
+                    if (ImGui::Combo("Texture filtering", &filter, "Game default\0Anisotropic 2×\0Anisotropic 4×\0Anisotropic 8×\0Anisotropic 16×\0")) d.anisotropy = filters[filter];
+                }
                 ImGui::EndChild(); ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Controls",nullptr,selectTab_=="controls"?ImGuiTabItemFlags_SetSelected:0)) {
@@ -485,7 +536,10 @@ private:
         }
         if (d != before) Changed(d);
         ImGui::Separator(); ImGui::Spacing();
-        const bool restart = settings::GraphicsChanged(startup_, d);
+        // The native renderer applies texture filtering immediately.
+        settings::Data compared = d;
+        if (nativeBackend_) compared.anisotropy = startup_.anisotropy;
+        const bool restart = settings::GraphicsChanged(startup_, compared);
         if (saveFailed_) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Could not save the settings.");
         else if (restartFailed_) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Could not restart. Close and reopen the game.");
         else if (restart) ImGui::TextColored(ImVec4(.88f, .76f, .47f, 1), "Graphics saved; restart to apply.");

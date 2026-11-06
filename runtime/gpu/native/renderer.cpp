@@ -399,6 +399,11 @@ struct FrameCache
     std::multimap<std::tuple<uint32_t,uint32_t,uint32_t,RenderFormat>,std::shared_ptr<RenderTexture>> freeTextures;
     std::unique_ptr<RenderBuffer> textureStaging;
     size_t textureStagingCapacity=0;
+    // HDR: the final composite's target right after the colour grading pass,
+    // before the HUD (present_hdr.hlsl compares the final image with it).
+    std::unique_ptr<RenderTexture> hudless;
+    uint32_t hudlessWidth=0,hudlessHeight=0;
+    RenderFormat hudlessFormat=RenderFormat::UNKNOWN;
 };
 
 // Row-major 4x4 inverse (cofactor expansion); false when singular.
@@ -477,6 +482,7 @@ RenderMultisampling Multisampling(uint32_t surface,bool noMsaa,bool xenosPattern
 #include "depth_ps.h"
 #include "depth_float.h"
 #include "present.h"
+#include "present_hdr.h"
 #include "motion_vs.h"
 #include "motion_ps.h"
 #include "frame_generation.h"
@@ -502,6 +508,9 @@ struct gpu::native::Renderer::Impl
     Microsoft::WRL::ComPtr<ID3D12Device> externalDevice;
     D3D12Texture* outputTexture=nullptr;
     uint32_t outputWidth=0,outputHeight=0;
+    D3D12Texture* outputHudless=nullptr; // this frame's scene before the HUD (HDR), or null
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> presentHdrRoot;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> presentHdrPipeline;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> presentRoot;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> presentPipeline;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> presentHeap;
@@ -525,6 +534,9 @@ struct gpu::native::Renderer::Impl
         Surface upscaled;                 // DLSS Super Resolution output (replaces the scene copy)
         uint32_t outWidth = 0, outHeight = 0;
         double lastRenderScale = 1, lastOutputScale = 1;
+        uint32_t lastShadowScale = 1;
+        std::map<std::string, int> shadowRoles; // shader -> 1 shadow caster, 2 VSM pass, 0 other
+        std::map<std::string, bool> gradingShaders; // PS -> the game's final colour grading (samp_ColoremapR)
         std::unique_ptr<RenderFramebuffer> framebuffer;
         std::unique_ptr<RenderShader> vs, ps;
         std::unique_ptr<RenderPipeline> pipeline;
@@ -605,7 +617,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     debugErrors = 0;
     debugWarnings = 0;
     if (output) *output = {};
-    outputTexture=nullptr;outputWidth=outputHeight=0;
+    outputTexture=nullptr;outputWidth=outputHeight=0;outputHudless=nullptr;
     const auto draws = frame.draws;
     if (dir.empty() && getenv("FD_REPLAY_TEST")) throw std::runtime_error("Shader-file diagnostic requires an asset directory");
     if (!shaderCatalog && dir.empty()) throw std::runtime_error("In-memory rendering requires a shader catalog");
@@ -682,6 +694,11 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     auto sampler = device->createSampler(RenderSamplerDesc());
     sets[3]->setSampler(0, sampler.get());
     std::map<uint64_t, std::pair<uint32_t, std::unique_ptr<RenderSampler>>> samplers;
+    // Anisotropic filtering override (F1 > Texture filtering): only for pixel
+    // textures with a mip chain and linear minification. Look-up tables,
+    // shadow maps and render target copies have one level and keep the
+    // game's filter (anisotropy would average a LUT across the footprint).
+    const uint32_t anisotropyOverride=frame.continuous||getenv("FD_NATIVE_ANISOTROPY")?ConfiguredAnisotropy():1;
     auto samplerFor = [&](const Draw& d, uint32_t slot) -> uint32_t {
         if (!d.hasSamplerStates || d.samplerStates[slot] == UINT32_MAX) return 0;
         const uint32_t state = d.samplerStates[slot];
@@ -717,6 +734,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             desc.mipLODBias = float(int32_t(lod << 10) >> 22) / 32.0f;
             desc.borderColor = border == 1 ? RenderBorderColor::OPAQUE_WHITE :
                 border == 0 ? RenderBorderColor::TRANSPARENT_BLACK : RenderBorderColor::OPAQUE_BLACK;
+            if (anisotropyOverride > desc.maxAnisotropy && slot < 16 && desc.maxLOD > desc.minLOD &&
+                desc.minFilter == RenderFilter::LINEAR)
+            {
+                desc.anisotropyEnabled = true;
+                desc.maxAnisotropy = anisotropyOverride;
+            }
         }
         const uint32_t index = uint32_t(samplers.size()) + 1;
         auto object = device->createSampler(desc);
@@ -1272,7 +1295,103 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         }
     }
     const double renderScale=superResolution&&sceneResolve!=SIZE_MAX?outputScale*UpscalerRenderScale(upscaleMode):outputScale;
+    // Shadow maps above the game's resolution. The sun's shadows are variance
+    // shadow maps in four 512x512 cascades: casters (vertex shaders with the
+    // VS_Shadow_* constants, plus the terrain drawn into the same depth),
+    // a pass turning the depth copy into moments and a blur (VS_VSM_Const /
+    // samp_ShadowVSM), copied into a 512x2048 atlas the scene samples with
+    // normalized coordinates (samp_ShadowZ). All of them render at
+    // shadowScale, so the atlas copy is shadowScale times larger. The moments
+    // and blur passes step by VS_VSM_Const (c21, one texel in UV): it is
+    // divided by shadowScale, so they filter the same number of texels and
+    // the edges get sharper (the game's UV steps would blur 4x4 texels).
+    static const bool forcedShadowScale=getenv("FD_NATIVE_SHADOW_SCALE")!=nullptr;
+    const uint32_t shadowScale=(frame.continuous||forcedShadowScale)&&shaderCatalog?ConfiguredShadowScale():1;
+    std::vector<uint8_t> shadowDraw;
+    if(shadowScale>1)
+    {
+        auto role=[&](const std::string& name,ShaderStage stage)->int{
+            if(name.empty())return 0;
+            auto found=upscale.shadowRoles.find(name+(stage==ShaderStage::Vertex?".vs":".ps"));
+            if(found!=upscale.shadowRoles.end())return found->second;
+            const auto* shader=shaderCatalog->Find(name,stage);
+            const std::string text=shader?std::string(shader->source.begin(),shader->source.end()):std::string();
+            const int value=stage==ShaderStage::Vertex&&text.find("VS_Shadow_")!=std::string::npos?1:
+                text.find("VS_VSM_Const")!=std::string::npos||text.find("samp_ShadowVSM")!=std::string::npos?2:0;
+            upscale.shadowRoles.emplace(name+(stage==ShaderStage::Vertex?".vs":".ps"),value);
+            return value;
+        };
+        std::set<std::pair<uint32_t,uint32_t>> casterDepths;
+        std::set<SurfaceKey> vsmPasses;
+        for(const Draw& d:draws)
+        {
+            if(d.clear||d.resolve)continue;
+            const int vs=role(d.vs,ShaderStage::Vertex),ps=role(d.ps,ShaderStage::Pixel);
+            if(vs==1)casterDepths.insert({d.regs[RB_SURFACE_INFO],d.regs[RB_DEPTH_INFO]});
+            if(vs==2||ps==2)vsmPasses.insert(keyOf(d));
+        }
+        if(!casterDepths.empty()||!vsmPasses.empty())
+        {
+            shadowDraw.assign(draws.size(),0);
+            for(size_t i=0;i<draws.size();++i)
+            {
+                const Draw& d=draws[i];
+                if(d.resolve)continue;
+                // 1: rendered at shadowScale; 2: also a VSM filter pass (c21 scaled).
+                shadowDraw[i]=vsmPasses.count(keyOf(d))||casterDepths.count({d.regs[RB_SURFACE_INFO],d.regs[RB_DEPTH_INFO]});
+                if(shadowDraw[i]&&!d.clear&&role(d.vs,ShaderStage::Vertex)==2)shadowDraw[i]=2;
+            }
+        }
+        if(CachedEnv("FD_TRACE_SHADOWS"))
+        {
+            static uint64_t shadowLog=0;
+            if(!frame.continuous||++shadowLog%300==1)
+            {
+                fprintf(stderr,"native shadows: %ux, %zu caster depth(s), %zu VSM pass target(s), %zu of %zu draws scaled, %zu filter passes\n",shadowScale,
+                    casterDepths.size(),vsmPasses.size(),draws.size()-size_t(std::count(shadowDraw.begin(),shadowDraw.end(),uint8_t(0))),draws.size(),
+                    size_t(std::count(shadowDraw.begin(),shadowDraw.end(),uint8_t(2))));
+                if(CachedEnv("FD_TRACE_SHADOWS")[0]=='2')
+                {
+                    std::set<std::string> seen;
+                    for(size_t i=0;i<draws.size();++i)
+                    {
+                        const Draw& d=draws[i];
+                        char line[256];
+                        if(d.resolve)snprintf(line,sizeof(line),"  resolve src %u surface %08X color %08X depth %08X -> %08X (%u,%u %ux%u)",d.copyControl&7,d.copySurface,d.copyColor,d.copyDepth,d.copyDest,d.copyX,d.copyY,d.copyWidth,d.copyHeight);
+                        else snprintf(line,sizeof(line),"  %s vs %s ps %s surface %08X color %08X depth %08X scaled %u",d.clear?"clear":"draw",d.vs.c_str(),d.ps.c_str(),
+                            d.regs[RB_SURFACE_INFO],d.regs[RB_COLOR_INFO],d.regs[RB_DEPTH_INFO],shadowDraw.empty()?0u:shadowDraw[i]);
+                        if(seen.insert(line).second)fprintf(stderr,"%5zu%s\n",i,line);
+                        if(!shadowDraw.empty()&&shadowDraw[i]==2)
+                        {
+                            const float* c=reinterpret_cast<const float*>(d.constants)+21*4;
+                            fprintf(stderr,"        c21 %g %g %g %g  c22 %g %g %g %g\n",c[0],c[1],c[2],c[3],c[4],c[5],c[6],c[7]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // HDR: the frame's last colour grading draw (the game's final composite:
+    // scene, bloom and depth of field through the samp_ColoremapR / GB tables).
+    // Its target is copied right after it, before the HUD is drawn over it.
+    size_t gradingDraw=SIZE_MAX;
+    if(frame.continuous&&HdrActive()&&shaderCatalog)
+        for(size_t i=0;i<draws.size();++i)
+        {
+            const Draw& d=draws[i];
+            if(d.clear||d.resolve||d.ps.empty())continue;
+            auto found=upscale.gradingShaders.find(d.ps);
+            if(found==upscale.gradingShaders.end())
+            {
+                const auto* shader=shaderCatalog->Find(d.ps,ShaderStage::Pixel);
+                const std::string text=shader?std::string(shader->source.begin(),shader->source.end()):std::string();
+                found=upscale.gradingShaders.emplace(d.ps,text.find("samp_ColoremapR")!=std::string::npos).first;
+            }
+            if(found->second)gradingDraw=i;
+        }
+    bool hudlessCopied=false;
     auto drawScale=[&](size_t index,uint32_t width,uint32_t height){
+        if(!shadowDraw.empty()&&shadowDraw[index])return double(shadowScale);
         // Screen targets: the front buffer's size, or its width with a slightly
         // shorter letterbox (videos draw 1024x588 and copy 1024x600).
         if(!fbW||width!=fbW||height>fbH||height*10<fbH*9)return 1.0;
@@ -1287,12 +1406,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     };
     // A changed internal resolution leaves targets of the old scale behind;
     // drop them (and what only they referenced) instead of growing forever.
-    if(frame.continuous&&(renderScale!=upscale.lastRenderScale||outputScale!=upscale.lastOutputScale))
+    if(frame.continuous&&(renderScale!=upscale.lastRenderScale||outputScale!=upscale.lastOutputScale||shadowScale!=upscale.lastShadowScale))
     {
         for(auto it=targets.begin();it!=targets.end();)
         {
             const double s=it->second.scale;
-            if(s!=1.0&&s!=renderScale&&s!=outputScale)it=targets.erase(it);else ++it;
+            if(s!=1.0&&s!=renderScale&&s!=outputScale&&s!=double(shadowScale))it=targets.erase(it);else ++it;
         }
         for(auto it=storage.colorSurfaces.begin();it!=storage.colorSurfaces.end();)
             if(it->second.use_count()==1)it=storage.colorSurfaces.erase(it);else ++it;
@@ -1302,6 +1421,8 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             if(!usedDepth.count(&it->second))it=depthSurfaces.erase(it);else ++it;
         resolved.clear();resolvedDepth.clear();
         upscale.lastRenderScale=renderScale;upscale.lastOutputScale=outputScale;
+        if(shadowScale!=upscale.lastShadowScale)fprintf(stderr,"native renderer: shadow maps %ux\n",shadowScale);
+        upscale.lastShadowScale=shadowScale;
         upscale.reset=true;
         if(outputScale!=1.0||renderScale!=1.0)fprintf(stderr,"native renderer: internal resolution %.3gx (scene %.3gx)\n",outputScale,renderScale);
     }
@@ -2202,6 +2323,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         if (poisonConstants) std::fill_n(reinterpret_cast<uint32_t*>(drawConstants), 2048, 0x7FC00000u);
         if (d.vsConstEnd > d.vsConstFirst)
             memcpy(drawConstants + d.vsConstFirst * 16, d.constants + d.vsConstFirst * 16, size_t(d.vsConstEnd - d.vsConstFirst) * 16);
+        // Shadow filter passes at shadowScale: their texel step (VS_VSM_Const, c21).
+        if (!shadowDraw.empty() && shadowDraw[i] == 2 && d.vsConstFirst <= 21 && d.vsConstEnd > 21 && !CachedEnv("FD_SHADOW_KEEP_FILTER"))
+        {
+            float* step = reinterpret_cast<float*>(drawConstants + 21 * 16);
+            for (int k = 0; k < 4; ++k) step[k] /= float(shadowScale);
+        }
         if (d.psConstEnd > d.psConstFirst && d.psConstants)
             memcpy(drawConstants + 4096 + d.psConstFirst * 16, d.psConstants + d.psConstFirst * 16, size_t(d.psConstEnd - d.psConstFirst) * 16);
         uint8_t* shared = drawConstants + 8192;
@@ -2490,6 +2617,27 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             list->drawIndexedInstanced(count, 1, 0, int32_t(d.regs[VGT_INDX_OFFSET]), 0);
             ++target.draws;
             target.lastWrite=++storage.writeSerial;
+            if(i==gradingDraw&&target.rt[0]&&target.rt[0]->texture)
+            {
+                Surface& rt=*target.rt[0];
+                resolveColor(rt);
+                if(!storage.hudless||storage.hudlessWidth!=target.width||storage.hudlessHeight!=target.height||storage.hudlessFormat!=rt.format)
+                {
+                    storage.hudless=CreateTexture(device.get(),RenderTextureDesc::Texture2D(target.width,target.height,1,rt.format));
+                    storage.hudlessWidth=target.width;storage.hudlessHeight=target.height;storage.hudlessFormat=rt.format;
+                }
+                list->barriers(RenderBarrierStage::COPY,{
+                    RenderTextureBarrier(rt.texture.get(),RenderTextureLayout::COPY_SOURCE),
+                    RenderTextureBarrier(storage.hudless.get(),RenderTextureLayout::COPY_DEST)});
+                list->copyTextureRegion(RenderTextureCopyLocation::Subresource(storage.hudless.get()),
+                    RenderTextureCopyLocation::Subresource(rt.texture.get()));
+                list->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(rt.texture.get(),RenderTextureLayout::COLOR_WRITE));
+                // Read by the present compute shader on the presenter's queue.
+                list->barriers(RenderBarrierStage::COMPUTE,RenderTextureBarrier(storage.hudless.get(),RenderTextureLayout::SHADER_READ));
+                rt.shaderRead=false;
+                current=nullptr;
+                hudlessCopied=true;
+            }
         }
         vertexAt += d.vertexBytes;
         indexAt += (size_t(d.indexBytes) + 3) & ~size_t(3);
@@ -2676,6 +2824,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         PublishUpscalerStatus(status);
     }
     if(frame.continuous&&nativeOutput){outputTexture=static_cast<D3D12Texture*>(nativeOutput->texture.get());outputWidth=nativeWidth;outputHeight=nativeHeight;}
+    if(frame.continuous)outputHudless=hudlessCopied&&storage.hudless?static_cast<D3D12Texture*>(storage.hudless.get()):nullptr;
     return 0;
 }
 
@@ -2714,7 +2863,7 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
         if(FAILED(D3D12SerializeRootSignature(&root,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors))||
             FAILED(d3d->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&presentRoot))))return false;
         D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline={};pipeline.pRootSignature=presentRoot.Get();pipeline.CS={fd_native_present,sizeof(fd_native_present)};
-        D3D12_DESCRIPTOR_HEAP_DESC heap={};heap.NumDescriptors=2*kPresentSlots;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        D3D12_DESCRIPTOR_HEAP_DESC heap={};heap.NumDescriptors=3*kPresentSlots;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if(FAILED(d3d->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&presentPipeline)))||
             FAILED(d3d->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&presentHeap)))||
             FAILED(d3d->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&presentFence))))return false;
@@ -2724,6 +2873,28 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
                 FAILED(d3d->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,presentAllocators[slot].Get(),nullptr,IID_PPV_ARGS(&presentLists[slot])))||
                 FAILED(presentLists[slot]->Close()))return false;
         }
+    }
+    // HDR (FP16 scRGB guest output): present_hdr.hlsl, with the scene before
+    // the HUD as its second source.
+    const bool hdr=HdrActive()&&destination->GetDesc().Format==DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if(hdr&&!presentHdrPipeline)
+    {
+        D3D12_DESCRIPTOR_RANGE ranges[2]={};
+        ranges[0].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ranges[0].NumDescriptors=2;
+        ranges[1].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_UAV;ranges[1].NumDescriptors=1;
+        ranges[1].OffsetInDescriptorsFromTableStart=2;
+        D3D12_ROOT_PARAMETER parameters[2]={};
+        parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[0].DescriptorTable.NumDescriptorRanges=2;parameters[0].DescriptorTable.pDescriptorRanges=ranges;
+        parameters[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[1].Constants.Num32BitValues=8;
+        D3D12_ROOT_SIGNATURE_DESC root={};root.NumParameters=2;root.pParameters=parameters;
+        Microsoft::WRL::ComPtr<ID3DBlob> blob,errors;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline={};pipeline.CS={fd_native_present_hdr,sizeof(fd_native_present_hdr)};
+        if(FAILED(D3D12SerializeRootSignature(&root,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors))||
+            FAILED(d3d->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&presentHdrRoot))))return false;
+        pipeline.pRootSignature=presentHdrRoot.Get();
+        if(FAILED(d3d->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&presentHdrPipeline))))return false;
     }
     const auto targetDesc=destination->GetDesc();
     const uint32_t slot=uint32_t(presentSerial%kPresentSlots);
@@ -2739,12 +2910,23 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
         if(!done)return false;
     }
     const uint32_t increment=d3d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    auto srv=presentHeap->GetCPUDescriptorHandleForHeapStart();srv.ptr+=size_t(increment)*2*slot;
-    auto uav=srv;uav.ptr+=increment;
-    auto table=presentHeap->GetGPUDescriptorHandleForHeapStart();table.ptr+=uint64_t(increment)*2*slot;
+    auto srv=presentHeap->GetCPUDescriptorHandleForHeapStart();srv.ptr+=size_t(increment)*3*slot;
+    auto uav=srv;uav.ptr+=increment*(hdr?2:1);
+    auto table=presentHeap->GetGPUDescriptorHandleForHeapStart();table.ptr+=uint64_t(increment)*3*slot;
     D3D12_SHADER_RESOURCE_VIEW_DESC source={};source.Format=outputTexture->d3d->GetDesc().Format;
     source.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;source.Texture2D.MipLevels=1;source.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     d3d->CreateShaderResourceView(outputTexture->d3d,&source,srv);
+    // The HDR shader's second source: the scene before the HUD, or the output
+    // itself when this frame has none (menus, videos: no expansion).
+    D3D12Texture* hudless=hdr&&outputHudless?outputHudless:nullptr;
+    if(hdr)
+    {
+        auto second=srv;second.ptr+=increment;
+        D3D12_SHADER_RESOURCE_VIEW_DESC hudlessView=source;
+        ID3D12Resource* hudlessResource=hudless?hudless->d3d:outputTexture->d3d;
+        hudlessView.Format=hudlessResource->GetDesc().Format;
+        d3d->CreateShaderResourceView(hudlessResource,&hudlessView,second);
+    }
     D3D12_UNORDERED_ACCESS_VIEW_DESC target={};target.Format=targetDesc.Format;target.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
     d3d->CreateUnorderedAccessView(destination,nullptr,&target,uav);
     if(FAILED(presentAllocator->Reset())||FAILED(presentList->Reset(presentAllocator.Get(),presentPipeline.Get())))return false;
@@ -2754,9 +2936,23 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
     barriers[1].Transition.pResource=destination;barriers[1].Transition.StateBefore=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     presentList->ResourceBarrier(2,barriers);
     ID3D12DescriptorHeap* heaps[]={presentHeap.Get()};presentList->SetDescriptorHeaps(1,heaps);
-    presentList->SetComputeRootSignature(presentRoot.Get());presentList->SetComputeRootDescriptorTable(0,table);
-    const uint32_t extents[]={outputWidth,outputHeight,uint32_t(targetDesc.Width),targetDesc.Height};
-    presentList->SetComputeRoot32BitConstants(1,4,extents,0);
+    if(hdr)
+    {
+        float paper=200,peak=800;
+        HdrLevels(paper,peak);
+        struct { uint32_t sourceSize[2],destinationSize[2]; float paperWhite,peakRatio,knee; uint32_t flags; } params{
+            {outputWidth,outputHeight},{uint32_t(targetDesc.Width),targetDesc.Height},paper/80.0f,peak/paper,
+            CachedEnv("FD_HDR_KNEE")?float(atof(CachedEnv("FD_HDR_KNEE"))):0.35f,(hudless?1u:0u)|(CachedEnv("FD_HDR_SHOW")?2u:0u)};
+        presentList->SetPipelineState(presentHdrPipeline.Get());
+        presentList->SetComputeRootSignature(presentHdrRoot.Get());presentList->SetComputeRootDescriptorTable(0,table);
+        presentList->SetComputeRoot32BitConstants(1,8,&params,0);
+    }
+    else
+    {
+        presentList->SetComputeRootSignature(presentRoot.Get());presentList->SetComputeRootDescriptorTable(0,table);
+        const uint32_t extents[]={outputWidth,outputHeight,uint32_t(targetDesc.Width),targetDesc.Height};
+        presentList->SetComputeRoot32BitConstants(1,4,extents,0);
+    }
     presentList->Dispatch((uint32_t(targetDesc.Width)+7)/8,(targetDesc.Height+7)/8,1);
     for(auto& barrier:barriers)std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
     presentList->ResourceBarrier(2,barriers);

@@ -49,6 +49,26 @@ double UpscalerRenderScale(UpscalerMode mode);
 void SetRenderScaleSetting(double scale);
 double RenderScaleSetting();
 double ConfiguredRenderScale(double configured);
+// Image quality overrides of the native renderer, applied from the next frame.
+// Anisotropic filtering: maximum anisotropy for mipmapped textures (1 = the
+// game's own filtering; FD_NATIVE_ANISOTROPY=<n> overrides).
+void SetAnisotropySetting(uint32_t maxAnisotropy);
+uint32_t ConfiguredAnisotropy();
+// Shadow map resolution, a multiple of the game's 512x512 cascades (1, 2, 4;
+// FD_NATIVE_SHADOW_SCALE=<n> overrides, also for replays).
+void SetShadowScaleSetting(uint32_t scale);
+uint32_t ConfiguredShadowScale();
+// HDR output: scRGB through the presenter's FP16 swap chain. Active is decided
+// once, before the presenter exists (the swap chain format); paper white and
+// peak brightness (nits) apply live.
+void SetHdrActive(bool active);
+bool HdrActive();
+void SetHdrLevels(float paperWhiteNits, float peakNits);
+void HdrLevels(float& paperWhiteNits, float& peakNits);
+// The window's display at start-up: 1 Windows HDR on, 0 off, -1 not checked;
+// its reported peak luminance (nits, 0 when unknown).
+void SetHdrDisplay(int state, float maxNits);
+void HdrDisplay(int& state, float& maxNits);
 const char* UpscalerModeName(UpscalerMode mode);
 
 struct UpscalerSetup

@@ -52,6 +52,47 @@ double ConfiguredRenderScale(double configured)
     }();
     return forced > 0 ? (std::clamp)(forced, 0.25, 4.0) : configured;
 }
+namespace
+{
+std::atomic<uint32_t> g_anisotropy{1}, g_shadowScale{1};
+uint32_t Forced(const char* name)
+{
+    const char* value = getenv(name);
+    return value && *value ? uint32_t(atoi(value)) : 0;
+}
+}
+void SetAnisotropySetting(uint32_t maxAnisotropy) { g_anisotropy = (std::clamp)(maxAnisotropy, 1u, 16u); }
+uint32_t ConfiguredAnisotropy()
+{
+    static const uint32_t forced = Forced("FD_NATIVE_ANISOTROPY");
+    return forced ? (std::clamp)(forced, 1u, 16u) : g_anisotropy.load();
+}
+void SetShadowScaleSetting(uint32_t scale) { g_shadowScale = (std::clamp)(scale, 1u, 4u); }
+uint32_t ConfiguredShadowScale()
+{
+    static const uint32_t forced = Forced("FD_NATIVE_SHADOW_SCALE");
+    return forced ? (std::clamp)(forced, 1u, 4u) : g_shadowScale.load();
+}
+namespace
+{
+std::atomic<bool> g_hdrActive{false};
+std::atomic<float> g_hdrPaperWhite{200.0f}, g_hdrPeak{800.0f};
+}
+void SetHdrActive(bool active) { g_hdrActive = active; }
+bool HdrActive() { return g_hdrActive.load(); }
+void SetHdrLevels(float paperWhiteNits, float peakNits)
+{
+    g_hdrPaperWhite = (std::clamp)(paperWhiteNits, 80.0f, 500.0f);
+    g_hdrPeak = (std::clamp)(peakNits, g_hdrPaperWhite.load(), 10000.0f);
+}
+void HdrLevels(float& paperWhiteNits, float& peakNits) { paperWhiteNits = g_hdrPaperWhite.load(); peakNits = g_hdrPeak.load(); }
+namespace
+{
+std::atomic<int> g_hdrDisplay{-1};
+std::atomic<float> g_hdrDisplayNits{0.0f};
+}
+void SetHdrDisplay(int state, float maxNits) { g_hdrDisplay = state; g_hdrDisplayNits = maxNits; }
+void HdrDisplay(int& state, float& maxNits) { state = g_hdrDisplay.load(); maxNits = g_hdrDisplayNits.load(); }
 void SetUpscalerSetting(UpscalerMode mode) { g_setting = uint32_t(mode); }
 UpscalerMode UpscalerSetting() { return UpscalerMode(g_setting.load()); }
 UpscalerStatus GetUpscalerStatus() { std::lock_guard lock(g_statusLock); return g_status; }

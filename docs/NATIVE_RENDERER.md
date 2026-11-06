@@ -1555,3 +1555,65 @@ Checks: `fd_native_frame_tests` (4 frames / 3160 draws, exact RGB),
 streams), the native unit tests, and sessions in the default mode and with
 DLAA + FG. `DrawView`'s iterator gained the traits the tests need (they no
 longer compiled after round 2).
+
+## Image quality: filtering, shadows, HDR — 2026-11-06
+
+F1 > Graphics > Image quality / HDR (native renderer).
+
+- **Anisotropic filtering** (`[Graphics] Anisotropy`, 2x-16x, live;
+  `FD_NATIVE_ANISOTROPY=<n>` forces it, also in replays). `samplerFor` in
+  `renderer.cpp` raises the anisotropy of pixel samplers whose fetch has a mip
+  range (max level > min level) and linear minification. Look-up tables (the
+  colour grading maps), shadow maps and render target copies have one level
+  and keep the game's filter. Cost: none measurable (first level, ~77-78 FPS
+  either way). Rock and ground detail at grazing angles is visibly sharper in
+  the breath replay with 16x.
+- **Shadow resolution** (`[Graphics] ShadowScale` 1 / 2 / 4, live;
+  `FD_NATIVE_SHADOW_SCALE=<n>` forces it, also in replays). The sun's shadows
+  are variance shadow maps in four 512x512 cascades: casters (vertex shaders
+  with `VS_Shadow_*` constants, plus the terrain drawn into the same depth
+  surface), a depth to moments pass with a horizontal filter (VS 108 / PS 109)
+  and a vertical blur (VS 053 / PS 054, `samp_ShadowVSM`), both in a 16_16
+  target, copied into the 512x2048 atlas `0D692000` (`samp_ShadowZ` in the
+  scene). Draws whose shaders have those names mark their targets (caster
+  depth surface, VSM pass target); every draw into them renders at the shadow
+  scale, so the depth copy, the moments and the atlas snapshot are scale times
+  larger (the existing scaled-target machinery: viewports, clears, partial
+  resolves at `copyY * scale`). The filter passes step by `VS_VSM_Const`
+  (c21 = 1/512, one texel in UV); it is divided by the scale so they filter
+  the same number of texels (keeping the UV steps only removed aliasing; the
+  edges stayed as soft). Result at 4x: the totem's shadow shows its spikes
+  instead of a blob, mountain shadow edges are sharp. Cost (first level, DLAA,
+  free frame rate): 77 -> 71 FPS at 2x, -> 65 FPS at 4x. Default 1 (the even
+  60 FPS pacing needs the headroom). `FD_TRACE_SHADOWS=1` counts the scaled
+  draws, `=2` lists the chain with c21/c22; `FD_SHADOW_KEEP_FILTER=1` keeps the
+  game's c21.
+- **HDR output** (`[Graphics] HDR`, on restart; `HdrPaperWhite`, `HdrPeak` in
+  nits, live). At start-up `xenia_bridge.cpp` finds the window's DXGI output;
+  only when Windows HDR is on for it (colour space G2084) the presenter is
+  created with `fd_present_hooks.hdr_output` (patches/xenia.patch): guest
+  output, paint intermediates and swap chain R16G16B16A16_FLOAT, swap chain in
+  scRGB (`SetColorSpace1(RGB_FULL_G10_NONE_P709)`), UI pipelines with the same
+  format; FSR / CAS are replaced by bilinear (they assume SDR values).
+  `FD_FORCE_HDR=1` forces it on an SDR desktop (tests). The game renders an
+  8-bit SDR image (its scene is 8888 at half scale, graded by the
+  `samp_ColoremapR/GB` tables in its final composite, PS 130), so HDR is an
+  expansion of that image: the native renderer copies the composite's target
+  right after the grading draw, before the HUD (`FrameCache::hudless`), and
+  `present_hdr.hlsl` writes linear scRGB: mid tones at paper white, a smooth
+  curve from linear brightness 0.35 (`FD_HDR_KNEE`) up to the peak (gain
+  1 + (peak/paper - 1) t^2), brightness = mean of luminance and max channel so
+  lava and fire also rise, half an 8-bit step of dither before the expansion.
+  Where the final image differs from the hudless copy (HUD, subtitles, menus)
+  the pixel stays at paper white. Menus and videos (no grading draw) are
+  plain SDR at paper white. `FD_HDR_SHOW=1` paints the expansion red and the
+  HUD-masked areas blue (checked in the first level: text boxes and subtitles
+  masked, the lit sand expanded mildly). Captures (`FD_CAPTURE`) map scRGB back
+  to sRGB at paper white. Not yet seen on an HDR display; the ImGui overlay
+  (F1, FPS counter) is drawn with SDR values into scRGB, so it is dimmer
+  (80 nits white).
+
+Checks: with all three at their defaults the native output is identical to
+the previous renderer (the four replay frames compared pixel for pixel, then
+`fd_native_frame_tests` exact, `fd_native_geometry_tests` 3160 draws match,
+runtime ctest).

@@ -33,7 +33,11 @@ struct Data {
     int scale = 1;
     bool vsync = true;
     int frameLimit = 60;
-    int anisotropy = -1;
+    int anisotropy = -1;    // -1 game default, 2..5: anisotropic 2x / 4x / 8x / 16x
+    int shadowScale = 1;    // native renderer: shadow maps 1x / 2x / 4x the game's 512x512 (live)
+    bool hdr = false;       // native renderer: HDR output (scRGB; on restart)
+    int hdrPaperWhite = 200; // nits of SDR white in HDR (live)
+    int hdrPeak = 800;       // nits of the brightest highlights in HDR (live)
     int presentation = 0; // bilinear, FSR, CAS
     int sharpness = 20;
     int upscaler = 0; // native renderer: off, DLAA, DLSS quality / balanced / performance / ultra (live)

@@ -22,6 +22,9 @@ void Normalize(Data& d) {
     if (d.frameLimit != 0 && d.frameLimit != 30 && d.frameLimit != 60 && d.frameLimit != 120)
         d.frameLimit = 60;
     if (d.anisotropy != -1 && (d.anisotropy < 2 || d.anisotropy > 5)) d.anisotropy = -1;
+    if (d.shadowScale != 1 && d.shadowScale != 2 && d.shadowScale != 4) d.shadowScale = 1;
+    d.hdrPaperWhite = std::clamp(d.hdrPaperWhite, 80, 500);
+    d.hdrPeak = std::clamp(d.hdrPeak, std::max(d.hdrPaperWhite, 400), 4000);
     d.presentation = std::clamp(d.presentation, 0, 2);
     d.sharpness = std::clamp(d.sharpness, 0, 100);
     d.upscaler = std::clamp(d.upscaler, 0, 5);
@@ -58,6 +61,10 @@ void Load(const std::filesystem::path& path) {
     d.vsync = read(L"Graphics", L"VSync", d.vsync) != 0;
     d.frameLimit = read(L"Graphics", L"FrameLimit", d.frameLimit);
     d.anisotropy = read(L"Graphics", L"Anisotropy", d.anisotropy);
+    d.shadowScale = read(L"Graphics", L"ShadowScale", d.shadowScale);
+    d.hdr = read(L"Graphics", L"HDR", d.hdr) != 0;
+    d.hdrPaperWhite = read(L"Graphics", L"HdrPaperWhite", d.hdrPaperWhite);
+    d.hdrPeak = read(L"Graphics", L"HdrPeak", d.hdrPeak);
     d.presentation = read(L"Graphics", L"Presentation", d.presentation);
     d.sharpness = read(L"Graphics", L"Sharpness", d.sharpness);
     d.upscaler = read(L"Graphics", L"Upscaler", d.upscaler);
@@ -108,6 +115,10 @@ bool Save() {
     write(L"Graphics", L"VSync", d.vsync);
     write(L"Graphics", L"FrameLimit", d.frameLimit);
     write(L"Graphics", L"Anisotropy", d.anisotropy);
+    write(L"Graphics", L"ShadowScale", d.shadowScale);
+    write(L"Graphics", L"HDR", d.hdr);
+    write(L"Graphics", L"HdrPaperWhite", d.hdrPaperWhite);
+    write(L"Graphics", L"HdrPeak", d.hdrPeak);
     write(L"Graphics", L"Presentation", d.presentation);
     write(L"Graphics", L"Sharpness", d.sharpness);
     write(L"Graphics", L"Upscaler", d.upscaler);
@@ -145,7 +156,7 @@ bool Bind(Action action, uint16_t key) {
 }
 bool GraphicsChanged(const Data& a, const Data& b) {
     return a.scale != b.scale || a.vsync != b.vsync ||
-           a.frameLimit != b.frameLimit || a.anisotropy != b.anisotropy;
+           a.frameLimit != b.frameLimit || a.anisotropy != b.anisotropy || a.hdr != b.hdr;
 }
 std::string KeyName(uint16_t key) {
     switch (key) {
