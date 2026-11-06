@@ -1501,8 +1501,19 @@ Even pacing, revised (`game_loop.cpp`):
 Result: no limit + even pacing holds 60 in most of play (299-301 of 300
 steps on screen for exactly 2 frames per 10 s window) and drops to 30 in the
 heaviest moments (the village cut scene with the horizon in view, ~29 ms
-frames). Left: the game thread's ~15 KB of copies per draw when a draw is
-committed (`Pending` -> `Command`), the per-draw constant copies on the
-worker (0.7 ms), indices re-uploaded every frame although cached (11 MB),
-and the GPU wait at the end of each frame (~2.8 ms, the GPU starts only
-after the whole frame is recorded).
+frames). The game thread is now the limit: at 60, frames after a world
+step take ~14 ms (~3.5 ms of it waiting for the simulation jobs the step
+started), step frames ~10 ms; the capture is ~60% of its CPU (begin 0.85,
+geometry 2.45, commit 2.0, other 1.1 ms).
+
+Tried and reverted: a pooled per-draw payload (constants + device state)
+handed from `Pending` to `Command` by pointer. Commit went 2.0 -> 1.05 ms
+but begin 0.85 -> 2.1 ms: the cost is writing ~15 KB of memory last touched
+two frames ago per draw, wherever it happens. What would help is writing
+less per draw: only the constants a shader uses (its cbuffer declarations
+give the ranges, but `NAME(INDEX)` with a non-literal index can reach past
+them, so only literal-index shaders could be trimmed), and only the ~145
+context words captured instead of the whole 4 KB `context` (most of it
+zero-filled per draw). Also left on the worker: indices re-uploaded every
+frame although cached (11 MB), and the GPU wait at the end of each frame
+(~2.8 ms, the GPU starts only after the whole frame is recorded).
