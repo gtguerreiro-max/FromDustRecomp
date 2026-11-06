@@ -1,5 +1,8 @@
 #include "texture_decode.h"
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -176,7 +179,38 @@ DecodedTexture Decode(std::span<const uint32_t,6> fetch,std::span<const uint8_t>
     }
     // Large images (the CPU-written water textures change every frame) are
     // decoded in row bands on a few threads; each band writes its own rows.
+    // Fast path for the 32-bit formats of the CPU-written simulation
+    // textures (k_8_8_8_8 and k_16_16, ~15 updates per second each in play):
+    // one word load and an endian permutation per texel instead of four
+    // checked byte reads. Same results as the general path below.
+    const bool fast32=storage.block==1&&storage.bytes==4&&(info.format==6||info.format==14||info.format==25);
+    const uint32_t swap=info.endian==1?1:info.endian==2?3:info.endian==3?2:0;
+    bool useFast=true;
+    auto decodeFast=[&](uint32_t firstRow,uint32_t endRow){
+        const uint32_t tiledPitch=(pitchBlocks+31)&~31u;
+        for(uint32_t y=firstRow;y<endRow;++y)for(uint32_t x=0;x<columns;++x)
+        {
+            const uint64_t at=offset+(tiled?(volumeRows?TextureBlockAddress3D(x,y,volumeZ,pitchBlocks,volumeRows,4):Tiled(x+xBlocks,y+yBlocks,tiledPitch,4)):
+                (uint64_t(y+yBlocks)*pitchBlocks+x+xBlocks)*4);
+            if(at+4>bytes.size())throw std::runtime_error("Texture texel outside supplied storage");
+            uint32_t word;memcpy(&word,bytes.data()+at,4);
+            if(swap==1)word=((word&0x00FF00FFu)<<8)|((word>>8)&0x00FF00FFu);
+            else if(swap==3)word=__builtin_bswap32(word);
+            else if(swap==2)word=word<<16|word>>16;
+            if(!fixed){memcpy(result.pixels.data()+(size_t(y)*width+x)*4,&word,4);continue;}
+            float pixel[4]={0,0,0,1};
+            for(uint32_t c=0;c<2;++c)
+            {
+                const uint32_t value=c?word>>16:word&0xFFFF;
+                double v=fixedSigned[c]?double(int32_t((value^32768)-32768)):double(value);
+                if(fixedNormalized)v=fixedSigned[c]?(std::max)(v/32767.0,-1.0):v/65535.0;
+                pixel[c]=float(v*fixedPower);
+            }
+            memcpy(result.pixels.data()+(size_t(y)*width+x)*16,pixel,16);
+        }
+    };
     auto decodeRows=[&](uint32_t firstRow,uint32_t endRow){
+    if(fast32&&useFast){decodeFast(firstRow,endRow);return;}
     for(uint32_t y=firstRow;y<endRow;++y)for(uint32_t x=0;x<columns;++x)
     {
         const uint64_t at=offset+(tiled?(volumeRows?TextureBlockAddress3D(x,y,volumeZ,pitchBlocks,volumeRows,storage.bytes):Tiled(x+xBlocks,y+yBlocks,(pitchBlocks+31)&~31u,storage.bytes)):
@@ -219,6 +253,19 @@ DecodedTexture Decode(std::span<const uint32_t,6> fetch,std::span<const uint8_t>
             work.push_back(std::async(std::launch::async,decodeRows,(std::min)(rows,band*step),(std::min)(rows,(band+1)*step)));
         decodeRows(0,(std::min)(rows,step));
         for(auto& done:work)done.get(); // rethrows decode errors
+    }
+    // FD_CHECK_FAST_DECODE=1: decode again on the general path and compare.
+    static const bool check=getenv("FD_CHECK_FAST_DECODE")!=nullptr;
+    if(check&&fast32)
+    {
+        static std::atomic<unsigned> checks{0},mismatches{0};
+        auto fast=result.pixels;
+        useFast=false;decodeRows(0,rows);
+        const bool same=fast==result.pixels;
+        mismatches+=!same;
+        if(++checks%49==1||!same)
+            fprintf(stderr,"fast texture decode check: format %u %ux%u %s (%u checks, %u mismatches)\n",info.format,width,height,
+                same?"identical":"MISMATCH",checks.load(),mismatches.load());
     }
     return result;
 }

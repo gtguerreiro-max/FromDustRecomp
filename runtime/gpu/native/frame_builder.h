@@ -20,6 +20,8 @@ struct GeometryBatch
         Draw state;
         Geometry geometry;
         void BindGeometryAndConstants(Draw& draw) const;
+        // The same, into `state` itself (the render worker owns the batch).
+        void BindInPlace();
     };
     std::vector<Command> commands;
     StreamArena streams;

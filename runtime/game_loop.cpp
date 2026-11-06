@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <immintrin.h>
 #include <chrono>
 #include <cstdlib>
 #include <map>
@@ -52,6 +53,7 @@ bool g_decision = true;
 double g_debt = 0;
 std::chrono::steady_clock::time_point g_last{};
 std::atomic<int> g_frameLimit{0}, g_evenRate{0};
+std::atomic<bool> g_frameGeneration{false};
 std::atomic<float> g_evenWorkMs{0};
 bool g_dumpFrames = false;
 
@@ -79,13 +81,20 @@ bool Decide(uint64_t index)
     {
         if (g_last.time_since_epoch().count())
         {
-            double steps = std::chrono::duration<double>(now - g_last).count() * rate;
-            // A frame interval within 10% of 1/k world steps counts as exactly
-            // that: at 60 FPS the timing jitter around 0.5 otherwise makes
-            // the world step after 1, 2 or 3 frames, an uneven motion.
+            const double measured = std::chrono::duration<double>(now - g_last).count() * rate;
+            double steps = measured;
+            // A frame interval within 15% of 1/k world steps counts as exactly
+            // that: at 60 FPS the timing jitter around 0.5 (and a late frame
+            // followed by a short one) otherwise makes the world step after
+            // 1, 2 or 3 frames, an uneven motion. The difference is kept and
+            // paid back once it reaches a quarter step, so a steady rate off
+            // the divisor (say 55 FPS) does not slow the world down.
             static const bool noSnap = getenv("FD_NO_SIM_SNAP") != nullptr;
+            static double residual = 0;
             for (int k = 1; k <= 4 && !noSnap; ++k)
-                if (std::abs(steps * k - 1.0) < 0.1) { steps = 1.0 / k; break; }
+                if (std::abs(measured * k - 1.0) < 0.15) { steps = 1.0 / k; break; }
+            residual += measured - steps;
+            if (std::abs(residual) >= 0.25) { steps += residual; residual = 0; }
             g_debt = (std::min)(g_debt + steps, 2.0);
         }
         else
@@ -133,11 +142,15 @@ void PaceLoop(double rate)
     using namespace std::chrono;
     using clock = steady_clock;
     static clock::time_point next, woke;
-    static int level = -1, frames = 0, missed = 0, fitting = 0, calmWindows = 0;
+    static int level = -1, frames = 0, missed = 0, longFrames = 0, calmWindows = 0;
+    // Windows of calm needed before trying the faster rate again: doubles
+    // after a try that fell back within a few windows, back to 3 once the
+    // faster rate held.
+    static int calmNeeded = 3, windowsSinceUp = 1 << 20;
     static double workSum = 0;
     static const bool off = getenv("FD_NO_EVEN_PACE") != nullptr;
     const auto now = clock::now();
-    if (rate <= 0 || off || !settings::Get().evenPacing)
+    if (rate <= 0 || off || g_frameGeneration.load() || !settings::Get().evenPacing)
     {
         g_evenRate = 0;
         g_evenWorkMs = 0;
@@ -150,17 +163,23 @@ void PaceLoop(double rate)
     const int limit = g_frameLimit.load();
     int fastest = 0;
     while (limit > 0 && fastest < 2 && even[fastest] + microseconds(200) < nanoseconds(1000000000LL / limit)) ++fastest;
-    if (level < 0) level = fastest, frames = missed = fitting = calmWindows = 0, workSum = 0;
+    if (level < 0) level = fastest, frames = missed = longFrames = calmWindows = 0, workSum = 0;
     level = std::clamp(level, fastest, 2);
     // FD_EVEN_PACE_FIXED=<120|60|30>: hold that rate (diagnostics).
     static const int fixed = [] { const char* v = getenv("FD_EVEN_PACE_FIXED"); return v ? atoi(v) : 0; }();
     if (fixed) level = fixed >= 120 ? 0 : fixed >= 60 ? 1 : 2;
-    // A frame's own time, without this wait: windows of 30 frames, >= 4 over
-    // the interval -> the next slower rate; 3 windows with every frame well
-    // inside the faster interval -> faster again.
+    // Windows of 30 frames. A frame that overruns its interval is fine as
+    // long as the next one catches up with the cadence (frames with and
+    // without a world step differ in cost): "late" is a frame that starts more
+    // than a quarter interval after its deadline. >= 3 late frames -> the
+    // next slower rate. Faster again after `calmNeeded` windows in a row
+    // whose frames average under 95% of the faster interval, with at most one
+    // over 130% of it (frames at a slower rate all step the world, the
+    // heavier kind, so this errs on the safe side).
     if (woke.time_since_epoch().count())
     {
         const auto work = now - woke;
+        const auto lateness = now > next ? now - next : clock::duration{};
         // FD_TRACE_SIM_STEPS: the last frames' own times, "s" = a world step.
         static const bool trace = getenv("FD_TRACE_SIM_STEPS") != nullptr;
         static float recent[40] = {}, recentWait[40][4] = {};
@@ -194,30 +213,50 @@ void PaceLoop(double rate)
         }
         ++frames;
         workSum += duration<double, std::milli>(work).count();
-        if (work > even[level] - microseconds(500)) ++missed;
-        if (level > fastest && work < even[level - 1] * 85 / 100) ++fitting;
+        if (lateness > even[level] / 4) ++missed;
+        if (level > fastest && work > even[level - 1] * 13 / 10) ++longFrames;
         // A long gap (loading, a pause) is not a frame.
-        if (work > seconds(1)) frames = missed = fitting = 0, workSum = 0;
+        if (work > seconds(1)) frames = missed = longFrames = 0, workSum = 0;
         if (frames >= 30)
         {
             const int before = level;
-            if (missed >= 4 && level < 2) ++level, calmWindows = 0;
-            else if (level > fastest && fitting == frames) { if (++calmWindows >= 3) --level, calmWindows = 0; }
+            ++windowsSinceUp;
+            if (missed >= 3 && level < 2)
+            {
+                ++level, calmWindows = 0;
+                if (windowsSinceUp < 8) calmNeeded = (std::min)(calmNeeded * 2, 48);
+            }
+            else if (level > fastest && longFrames <= 1 &&
+                     workSum / frames < duration<double, std::milli>(even[level - 1]).count() * 0.95)
+            {
+                if (++calmWindows >= calmNeeded) --level, calmWindows = 0, windowsSinceUp = 0;
+            }
             else calmWindows = 0;
+            if (windowsSinceUp == 40) calmNeeded = 3;
             g_evenWorkMs = float(workSum / frames);
             if (level != before) g_dumpFrames = true;
             if (level != before)
-                kernel::Log("even pacing: %.0f FPS (frames take %.1f ms without the wait, %d of %d over %.1f ms)",
+                kernel::Log("even pacing: %.0f FPS (frames take %.1f ms without the wait, %d of %d late at %.1f ms; next try after %d calm windows)",
                     1e9 / double(even[level].count()), workSum / frames, missed, frames,
-                    duration<double, std::milli>(even[before]).count());
-            frames = missed = fitting = 0;
+                    duration<double, std::milli>(even[before]).count(), calmNeeded);
+            frames = missed = longFrames = 0;
             workSum = 0;
         }
     }
     g_evenRate = int(1e9 / double(even[level].count()) + 0.5);
-    if (now < next) std::this_thread::sleep_until(next);
-    // Missed deadlines are dropped, not caught up with a burst.
-    next = (std::max)(next, now) + even[level];
+    // FD_EVEN_PACE_SPIN=<ms>: diagnostics, busy-wait the last <ms> of the
+    // wait instead of sleeping (CPU power states after a sleep).
+    static const double spinMs = [] { const char* v = getenv("FD_EVEN_PACE_SPIN"); return v ? atof(v) : 0.0; }();
+    if (now < next)
+    {
+        const auto spinFrom = next - duration_cast<nanoseconds>(duration<double, std::milli>(spinMs));
+        if (spinFrom > now) std::this_thread::sleep_until(spinFrom);
+        while (clock::now() < next) _mm_pause();
+    }
+    // A frame a little late keeps the cadence (the next one gets less sleep);
+    // deadlines missed by more than half an interval are dropped, not caught
+    // up with a burst.
+    next = (now <= next + even[level] / 2 ? next : now) + even[level];
     woke = clock::now();
 }
 
@@ -243,6 +282,7 @@ namespace gameloop
 {
 void SetSimulationRate(double hz) { g_setting = (std::max)(hz, 0.0); }
 void SetFrameLimit(int fps) { g_frameLimit = (std::max)(fps, 0); }
+void SetFrameGenerationActive(bool active) { g_frameGeneration = active; }
 int EvenPaceRate() { return g_evenRate.load(); }
 float EvenPaceWorkMs() { return g_evenWorkMs.load(); }
 double SimulationRate() { return Rate(); }

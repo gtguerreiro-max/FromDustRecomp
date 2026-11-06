@@ -79,6 +79,7 @@ void ApplyLive() {
     gpu::native::SetUpscalerSetting(gpu::native::UpscalerMode(d.upscaler));
     gpu::native::SetRenderScaleSetting(d.renderScale / 100.0);
     if (gpu::native::fg::Loaded()) gpu::native::fg::SetFrames(gpu::native::fg::ConfiguredFrames(d.frameGeneration));
+    gameloop::SetFrameGenerationActive(gpu::native::fg::Loaded() && gpu::native::fg::ConfiguredFrames(d.frameGeneration) > 0);
     // Fixed-rate world: 30 world steps per second, the game loop up to 120 FPS.
     gameloop::SetSimulationRate(d.decoupledSim ? 30.0 : 0.0);
     gpu::SetVblankRate(d.decoupledSim ? 240 : 60);
@@ -333,7 +334,8 @@ private:
                         ImGui::Checkbox("Even frame pacing", &d.evenPacing);
                         Help("Holds 120, 60 or 30 FPS, the fastest of them the PC keeps up with, so each world step stays on screen "
                              "for the same time. Rates in between (say 45 or 55 FPS) show some steps for one frame and others for two: "
-                             "water and people move in small jerks while the camera is smooth. Off: the plain frame limit.");
+                             "water and people move in small jerks while the camera is smooth. Off: the plain frame limit. "
+                             "Not used with DLSS Frame Generation, which paces the frames itself.");
                         if (const int even = gameloop::EvenPaceRate(); even > 0)
                             ImGui::TextDisabled("Now paced at %d FPS (frames take %.1f ms). Rates between 30, 60 and 120 would "
                                                 "show the world's steps unevenly.", even, gameloop::EvenPaceWorkMs());

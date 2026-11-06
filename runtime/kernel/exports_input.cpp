@@ -3,7 +3,11 @@
 #include "../input.h"
 #include "../game_loop.h"
 #include "../latency.h"
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 namespace {
 void WritePad(uint32_t address, const pcinput::Gamepad& pad) {
@@ -28,7 +32,13 @@ KFUNC(XamInputGetState) {
     static pcinput::Gamepad held[4], shown[4];
     static uint32_t packets[4];
     if (!result && ARG0 < 4) {
-        if (gameloop::InputMayChange()) held[ARG0] = state.pad;
+        const uint16_t raw = state.pad.buttons;
+        const bool mayChange = gameloop::InputMayChange();
+        // FD_TRACE_PAD=1: calls while a button is down or the shown buttons change.
+        static const bool tracePad = getenv("FD_TRACE_PAD") != nullptr;
+        if (tracePad && (raw || held[ARG0].buttons))
+            fprintf(stderr, "pad %u: raw %04X may %d held %04X packet %u thread %lu t %llu\n", ARG0, raw, int(mayChange), held[ARG0].buttons, packets[ARG0], GetCurrentThreadId(), GetTickCount64());
+        if (mayChange) held[ARG0] = state.pad;
         else {
             state.pad.buttons = held[ARG0].buttons;
             state.pad.leftTrigger = held[ARG0].leftTrigger;

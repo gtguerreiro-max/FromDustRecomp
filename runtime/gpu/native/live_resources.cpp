@@ -2,6 +2,9 @@
 #ifdef FD_NATIVE_RENDERER
 #include "../../kernel/kernel.h"
 #include "live_resources.h"
+#include <cstring>
+#include <string>
+#include <map>
 #include "../xenia_bridge.h"
 #include "../../input.h"
 #include <algorithm>
@@ -51,6 +54,40 @@ void LiveResources::Bind(Draw& draw,const ShaderCatalog& shaders)
         if(!cached.resource||revision!=cached.revision||promptStale)
         {
             ++profileCaptured;profileCaptureBytes+=cached.storage.baseBytes+cached.storage.mipBytes;
+            // FD_TRACE_TEXTURE_CAPTURES=1: every 10 s, the textures captured
+            // again most often, and how often their bytes were unchanged.
+            static const bool traceCaptures=getenv("FD_TRACE_TEXTURE_CAPTURES")!=nullptr;
+            if(traceCaptures)
+            {
+                struct Seen{uint64_t captures=0,same=0,hash=0;uint32_t bytes=0,format=0,width=0,height=0;};
+                static std::map<uint32_t,Seen> seen;
+                static ULONGLONG since=GetTickCount64();
+                auto& entry=seen[cached.storage.baseAddress];
+                const uint8_t* data=mem::Ptr<uint8_t>(mem::kPhysicalBase|cached.storage.baseAddress);
+                uint64_t hash=1469598103934665603ull;
+                for(uint32_t at=0;at+8<=cached.storage.baseBytes;at+=8){uint64_t word;memcpy(&word,data+at,8);hash=(hash^word)*1099511628211ull;}
+                entry.same+=entry.captures&&hash==entry.hash;
+                ++entry.captures;entry.hash=hash;entry.bytes=cached.storage.baseBytes+cached.storage.mipBytes;
+                entry.format=draw.textureFetches[slot][1]&0x3F;
+                entry.width=(draw.textureFetches[slot][2]&0x1FFF)+1;entry.height=(draw.textureFetches[slot][2]>>13&0x1FFF)+1;
+                if(GetTickCount64()-since>=10000)
+                {
+                    std::vector<std::pair<uint64_t,uint32_t>> top;
+                    for(const auto& [address,value]:seen)top.push_back({value.captures,address});
+                    std::sort(top.rbegin(),top.rend());
+                    std::string text;
+                    char item[128];
+                    for(size_t i=0;i<top.size()&&i<10;++i)
+                    {
+                        const auto& v=seen[top[i].second];
+                        snprintf(item,sizeof(item)," %08X %ux%u fmt %u %u KB: %llu captures, %llu unchanged;",top[i].second,v.width,v.height,v.format,v.bytes/1024,
+                            (unsigned long long)v.captures,(unsigned long long)v.same);
+                        text+=item;
+                    }
+                    kernel::Log("texture captures (10 s):%s",text.c_str());
+                    seen.clear();since=GetTickCount64();
+                }
+            }
             const auto captureStart=std::chrono::steady_clock::now();
             struct CaptureTimer{double& total;std::chrono::steady_clock::time_point start;~CaptureTimer(){total+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}} captureTimer{profileCaptureMs,captureStart};
             Watch(cached.storage);

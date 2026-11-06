@@ -297,34 +297,23 @@ namespace kernel::debug
                     break;
                 CONTEXT context{};
                 context.ContextFlags = CONTEXT_FULL;
+                // Walk the stack into a fixed buffer while the thread is
+                // suspended and aggregate after resuming it: allocating here
+                // deadlocks when the thread was suspended inside the heap.
+                uint64_t frames[64];
+                int depthCount = 0;
                 if (GetThreadContext(thread, &context))
                 {
-                    ++samples;
-                    std::vector<uint64_t> seen;
-                    uint64_t selfKey = 0;
-                    for (int depth = 0; depth < 64 && context.Rip && context.Rsp >= 0x10000; depth++)
+                    for (; depthCount < 64 && context.Rip && context.Rsp >= 0x10000; depthCount++)
                     {
                         // Key: guest address, or host RIP (tagged) for runtime code.
                         const uint32_t guest = GuestFromHost(context.Rip);
-                        uint64_t key = guest ? guest : (uint64_t(1) << 63) | context.Rip;
-                        if (!guest)
-                        {
-                            // Group host samples by function start.
-                            DWORD64 imageBase;
-                            if (PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr))
-                                key = (uint64_t(1) << 63) | (imageBase + fn->BeginAddress);
-                        }
-                        if (depth == 0)
-                            ++self[selfKey = key];
-                        else if (depth == 1)
-                            ++callers[{selfKey, key}];
-                        if (std::find(seen.begin(), seen.end(), key) == seen.end())
-                        {
-                            seen.push_back(key);
-                            ++inclusive[key];
-                        }
-                        DWORD64 imageBase;
+                        DWORD64 imageBase = 0;
                         PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+                        uint64_t key = guest ? guest : (uint64_t(1) << 63) | context.Rip;
+                        // Group host samples by function start.
+                        if (!guest && fn) key = (uint64_t(1) << 63) | (imageBase + fn->BeginAddress);
+                        frames[depthCount] = key;
                         if (!fn)
                         {
                             // A leaf frame: the return address is on top of the stack
@@ -333,7 +322,10 @@ namespace kernel::debug
                             SIZE_T got = 0;
                             if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(context.Rsp), &ret, sizeof(ret), &got) ||
                                 got != sizeof(ret))
+                            {
+                                ++depthCount;
                                 break;
+                            }
                             context.Rip = ret;
                             context.Rsp += 8;
                             continue;
@@ -344,6 +336,14 @@ namespace kernel::debug
                     }
                 }
                 ::ResumeThread(thread);
+                if (depthCount)
+                {
+                    ++samples;
+                    ++self[frames[0]];
+                    if (depthCount > 1) ++callers[{frames[0], frames[1]}];
+                    for (int i = 0; i < depthCount; ++i)
+                        if (std::find(frames, frames + i, frames[i]) == frames + i) ++inclusive[frames[i]];
+                }
                 Sleep(1);
             }
             timeEndPeriod(1);

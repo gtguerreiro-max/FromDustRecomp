@@ -45,6 +45,35 @@ struct StreamArena
     {
         std::map<std::pair<uint32_t, uint32_t>, Converted> streams, indices;
         uint64_t frame = 0;
+        // Replaced converted buffers, kept for reuse once no frame in flight
+        // refers to them: a dynamic stream rewritten every world step then
+        // alternates between two buffers instead of a fresh zero-filled
+        // allocation (~16 MB per frame in play) each time.
+        std::vector<std::shared_ptr<const std::vector<uint8_t>>> retired;
+        size_t retiredBytes = 0;
+        std::shared_ptr<std::vector<uint8_t>> Take(size_t size)
+        {
+            for (size_t i = retired.size(); i-- > 0;)
+                if (retired[i]->size() == size && retired[i].use_count() == 1)
+                {
+                    auto reused = std::const_pointer_cast<std::vector<uint8_t>>(std::move(retired[i]));
+                    retired.erase(retired.begin() + ptrdiff_t(i));
+                    retiredBytes -= size;
+                    return reused;
+                }
+            return std::make_shared<std::vector<uint8_t>>(size);
+        }
+        void Retire(std::shared_ptr<const std::vector<uint8_t>> old)
+        {
+            if (!old || old->size() < 4096) return;
+            retiredBytes += old->size();
+            retired.push_back(std::move(old));
+            while (retiredBytes > (256u << 20) && !retired.empty())
+            {
+                retiredBytes -= retired.front()->size();
+                retired.erase(retired.begin());
+            }
+        }
         // Called once per frame: drops ranges unused for 300 frames (moving
         // dynamic buffers would otherwise grow the cache without bound).
         void NextFrame()

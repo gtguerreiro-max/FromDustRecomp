@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -487,11 +488,16 @@ struct gpu::native::Renderer::Impl
     std::unique_ptr<RenderDevice> device;
     std::unique_ptr<RenderCommandQueue> queue;
     std::unique_ptr<RenderCommandList> list;
+    // Texture uploads: their own list, so the frame's list can be recorded
+    // while the GPU copies (the queue orders the two; the frame's fence wait
+    // covers both before the next frame resets them).
+    std::unique_ptr<RenderCommandList> uploadList;
     std::unique_ptr<RenderCommandFence> fence;
     std::unique_ptr<FrameCache> frameCache;
     double profileMs[5]{};
     double profileResMs[5]{};
     double profileDrawMs[4]{};
+    double profileCopyMs[2]{}; // vertex + index copies, constant copies
     uint32_t profileFrames=0;
     Microsoft::WRL::ComPtr<ID3D12Device> externalDevice;
     D3D12Texture* outputTexture=nullptr;
@@ -549,8 +555,9 @@ struct gpu::native::Renderer::Impl
         }
         auto newQueue = newDevice->createCommandQueue(RenderCommandListType::DIRECT);
         auto newList = newQueue ? newQueue->createCommandList() : nullptr;
+        auto newUploadList = newQueue ? newQueue->createCommandList() : nullptr;
         auto newFence = newDevice->createCommandFence();
-        if (!newQueue || !newList || !newFence)
+        if (!newQueue || !newList || !newUploadList || !newFence)
         {
             if (newInfoQueue) newInfoQueue->Release();
             return false;
@@ -558,7 +565,9 @@ struct gpu::native::Renderer::Impl
         api = std::move(newApi);
         device = std::move(newDevice);
         queue = std::move(newQueue);
+        uploadList.reset();
         list = std::move(newList);
+        uploadList = std::move(newUploadList);
         fence = std::move(newFence);
         infoQueue = newInfoQueue;
         return true;
@@ -773,12 +782,16 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         memcpy(streamBuffer->map(), streamFile.data(), streamFile.size());
         streamBuffer->unmap();
     }
+    // Live frames: one copy from the shared converted streams (~20 MB in
+    // play), on another thread while this one records the commands; joined
+    // before submission. The future's destructor also waits on early returns.
+    std::future<void> streamCopy;
     if (!frame.streamSegments.empty())
     {
-        // Live frames: one copy from the shared converted streams.
         auto* map = static_cast<uint8_t*>(streamBuffer->map());
-        for (const auto& segment : frame.streamSegments) memcpy(map + segment.offset, segment.data, segment.size);
-        streamBuffer->unmap();
+        streamCopy = std::async(std::launch::async, [map, segments = frame.streamSegments] {
+            for (const auto& segment : segments) memcpy(map + segment.offset, segment.data, segment.size);
+        });
     }
     const auto profileUploads=std::chrono::steady_clock::now();
     auto* vertexMap = static_cast<uint8_t*>(vertexBuffer->map());
@@ -897,7 +910,10 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                 memcpy(map + u.to + size_t(y) * pitch, (u.pixels?u.pixels:textureFile.data()+u.from) + size_t(y) * u.width * texel, u.width * texel);
         }
         if(map)stagingBuffer->unmap();
-        if(!uploads.empty())list->begin();
+        // FD_UPLOAD_WAIT=1 restores the CPU wait for the texture copies.
+        static const bool uploadWait = CachedEnv("FD_UPLOAD_WAIT") != nullptr;
+        auto& upload = uploadWait ? list : uploadList;
+        if(!uploads.empty())upload->begin();
         for (uint32_t i = 0; i < textureCount; ++i)
         {
             if(reused[i])textures.push_back(storage.staticTextures.at(versions[i]).texture);
@@ -909,7 +925,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                     {texture=std::move(free->second);storage.freeTextures.erase(free);}
                 if(!texture)texture=CreateTexture(device.get(), RenderTextureDesc::Texture2D(dimensions[i].first, dimensions[i].second,mipCounts[i], textureFormats[i]));
                 textures.push_back(std::move(texture));
-                list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(textures.back().get(), RenderTextureLayout::COPY_DEST));
+                upload->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(textures.back().get(), RenderTextureLayout::COPY_DEST));
                 if(versioned){auto& cached=storage.staticTextures[versions[i]];cached.texture=textures.back();cached.shape={dimensions[i].first,dimensions[i].second,mipCounts[i],textureFormats[i]};}
             }
         }
@@ -917,23 +933,23 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         {
             const auto format = textureFormats[u.index];
             const uint32_t texel = FormatBytes(format);
-            list->copyTextureRegion(RenderTextureCopyLocation::Subresource(textures[u.index].get(), u.mip),
+            upload->copyTextureRegion(RenderTextureCopyLocation::Subresource(textures[u.index].get(), u.mip),
                 RenderTextureCopyLocation::PlacedFootprint(stagingBuffer, format, u.width, u.height, 1,
                                                           ((u.width * texel + 255) & ~255u) / texel, u.to));
         }
         for (uint32_t i = 0; i < textureCount; ++i)
         {
-            if(!uploads.empty())list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(textures[i].get(), RenderTextureLayout::SHADER_READ));
+            if(!uploads.empty())upload->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(textures[i].get(), RenderTextureLayout::SHADER_READ));
             sets[0]->setTexture(i, textures[i].get(), RenderTextureLayout::SHADER_READ);
         }
         if(!frame.continuous||CachedEnv("FD_REPLAY_TRACE"))printf("fd_replay: %u captured mip chains uploaded\n", mipTextureCount);
         // Nothing new (every texture reused): no upload submission to wait for.
         if(!uploads.empty())
         {
-            list->end();
-            const RenderCommandList* uploadCommands = list.get();
-            queue->executeCommandLists(&uploadCommands, 1, nullptr, 0, nullptr, 0, fence.get());
-            queue->waitForCommandFence(fence.get());
+            upload->end();
+            const RenderCommandList* uploadCommands = upload.get();
+            queue->executeCommandLists(&uploadCommands, 1, nullptr, 0, nullptr, 0, uploadWait ? fence.get() : nullptr);
+            if (uploadWait) queue->waitForCommandFence(fence.get());
         }
     }
     const auto profileTextures=std::chrono::steady_clock::now();
@@ -1292,7 +1308,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     auto targetFor = [&](const Draw& d) -> Target& {
         const auto surfaceKey=keyOf(d);
         const auto [width,height]=targetExtent(d);
-        const double scale=drawScale(size_t(&d-draws.data()),width,height);
+        const double scale=drawScale(draws.IndexOf(d),width,height);
         const TargetKey key=std::tuple_cat(surfaceKey,std::tuple{width,height,(std::max)(targetCounts[surfaceKey],1u),uint32_t(std::lround(scale*1000))});
         Target& t = targets[key];
         if (t.framebuffer) return t;
@@ -2175,13 +2191,21 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             const size_t first = size_t(atoi(skip)), last = strchr(skip, '-') ? size_t(atoi(strchr(skip, '-') + 1)) : first;
             if (i >= first && i <= last) continue;
         }
+        const auto copyStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         memcpy(vertexMap + vertexAt, d.vertices, d.vertexBytes);
         memcpy(indexMap + indexAt, d.indices, d.indexBytes);
+        const auto indexCopied=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         uint8_t* drawConstants = constantMap + kPerDraw * (i + 1);
         memcpy(drawConstants, d.constants, 4096);
         memcpy(drawConstants + 4096, d.psConstants, 4096);
         uint8_t* shared = drawConstants + 8192;
         memset(shared, 0, kSharedSize);
+        if(profile)
+        {
+            const auto copied=std::chrono::steady_clock::now();
+            profileCopyMs[0]+=std::chrono::duration<double,std::milli>(indexCopied-copyStart).count();
+            profileCopyMs[1]+=std::chrono::duration<double,std::milli>(copied-indexCopied).count();
+        }
         const auto [viewportWidth,viewportHeight]=targetExtent(d);
         const auto nativeViewport=BuildViewport(d,viewportWidth,viewportHeight);
         float halfPixel[2]={nativeViewport.halfPixel[0],nativeViewport.halfPixel[1]};
@@ -2490,6 +2514,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         nativeOutput->shaderRead=true;
     }
     const auto profileRecorded=std::chrono::steady_clock::now();
+    if (streamCopy.valid()) { streamCopy.get(); streamBuffer->unmap(); }
     list->end();
     vertexBuffer->unmap();
     indexBuffer->unmap();
@@ -2511,7 +2536,9 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             fprintf(stderr,"native resource profile: sets %.2f ms, buffers %.2f ms, textures %.2f ms, cubes %.2f ms, volumes %.2f ms\n",profileResMs[0]/60,profileResMs[1]/60,profileResMs[2]/60,profileResMs[3]/60,profileResMs[4]/60);
             std::fill(std::begin(profileResMs),std::end(profileResMs),0.0);
             fprintf(stderr,"native render profile: resources %.2f ms, surfaces %.2f ms, record %.2f ms, close %.2f ms, submit/wait %.2f ms\n",profileMs[0]/60,profileMs[1]/60,profileMs[2]/60,profileMs[3]/60,profileMs[4]/60);
-            fprintf(stderr,"native draw profile: clear %.2f ms, resolve %.2f ms, prepare %.2f ms, bind/draw %.2f ms\n",profileDrawMs[0]/60,profileDrawMs[1]/60,profileDrawMs[2]/60,profileDrawMs[3]/60);
+            fprintf(stderr,"native draw profile: clear %.2f ms, resolve %.2f ms, prepare %.2f ms (vertex/index copies %.2f, constant copies %.2f), bind/draw %.2f ms\n",
+                profileDrawMs[0]/60,profileDrawMs[1]/60,profileDrawMs[2]/60,profileCopyMs[0]/60,profileCopyMs[1]/60,profileDrawMs[3]/60);
+            std::fill(std::begin(profileCopyMs),std::end(profileCopyMs),0.0);
             std::fill(std::begin(profileMs),std::end(profileMs),0.0);profileFrames=0;
             std::fill(std::begin(profileDrawMs),std::end(profileDrawMs),0.0);
         }

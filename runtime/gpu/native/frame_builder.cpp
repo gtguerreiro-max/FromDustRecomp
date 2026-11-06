@@ -11,6 +11,13 @@ void GeometryBatch::Command::BindGeometryAndConstants(Draw& draw)const
     draw.constants=reinterpret_cast<const uint8_t*>(vertexConstants.data());
     draw.psConstants=reinterpret_cast<const uint8_t*>(pixelConstants.data());
 }
+void GeometryBatch::Command::BindInPlace()
+{
+    if(state.clear||state.resolve)return;
+    geometry.Bind(state);state.vs=vertexShader;state.ps=pixelShader;
+    state.constants=reinterpret_cast<const uint8_t*>(vertexConstants.data());
+    state.psConstants=reinterpret_cast<const uint8_t*>(pixelConstants.data());
+}
 std::vector<Draw> BuildFrameDraws(const GeometryBatch& batch,const ShaderCatalog& shaders,
     const TextureTables& textures,const std::map<uint32_t,uint32_t>& resources)
 {

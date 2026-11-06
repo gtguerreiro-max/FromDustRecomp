@@ -66,11 +66,42 @@ struct Draw
 };
 
 
+// The frame's draws: contiguous, or embedded at a fixed stride in larger
+// records (the live capture's commands, read in place instead of copying
+// ~7 KB of state per draw on the render worker).
+class DrawView
+{
+public:
+    DrawView() = default;
+    DrawView(std::span<const Draw> draws) : base(reinterpret_cast<const uint8_t*>(draws.data())), count(draws.size()), stride(sizeof(Draw)) {}
+    DrawView(const std::vector<Draw>& draws) : DrawView(std::span<const Draw>(draws)) {}
+    DrawView(const Draw* first, size_t count, size_t stride) : base(reinterpret_cast<const uint8_t*>(first)), count(count), stride(stride) {}
+    size_t size() const { return count; }
+    bool empty() const { return !count; }
+    const Draw& operator[](size_t i) const { return *reinterpret_cast<const Draw*>(base + i * stride); }
+    size_t IndexOf(const Draw& draw) const { return size_t(reinterpret_cast<const uint8_t*>(&draw) - base) / stride; }
+    struct Iterator
+    {
+        const uint8_t* at;
+        size_t stride;
+        const Draw& operator*() const { return *reinterpret_cast<const Draw*>(at); }
+        const Draw* operator->() const { return reinterpret_cast<const Draw*>(at); }
+        Iterator& operator++() { at += stride; return *this; }
+        bool operator==(const Iterator& other) const { return at == other.at; }
+        bool operator!=(const Iterator& other) const { return at != other.at; }
+    };
+    Iterator begin() const { return {base, stride}; }
+    Iterator end() const { return {base + count * stride, stride}; }
+private:
+    const uint8_t* base = nullptr;
+    size_t count = 0, stride = sizeof(Draw);
+};
+
 // Borrowed immutable data. RenderFrame finishes GPU execution before returning;
 // producers must keep every referenced byte alive and unchanged for that call.
 struct FrameInput
 {
-    std::span<const Draw> draws;
+    DrawView draws;
     std::span<const uint8_t> textures, mips, cubes, streams;
     std::span<const uint8_t> debugPS, depthVS, depthPS, depthFloatPS;
     bool continuous=false;

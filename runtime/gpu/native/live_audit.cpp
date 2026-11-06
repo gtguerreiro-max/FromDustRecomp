@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -150,7 +151,7 @@ struct Context
     std::unique_ptr<RenderWorker> worker;
     void* gameToken = nullptr; // the Reflex frame the game thread is building
     uint64_t dumpAt=UINT64_MAX;
-    double packMs=0,renderMs=0,presentMs=0;
+    double packMs=0,renderMs=0,presentMs=0,resolveMs=0;
     uint64_t frames = 0, initializations = 0, matched = 0, invalid = 0;
     Frame pending, last, total;
     std::map<std::pair<uint32_t, uint32_t>, uint64_t> unknownInitializations;
@@ -282,6 +283,39 @@ bool Initialize()
                         for(const auto& command:batch.commands){mesh+=command.pixelShader=="086";terrain+=command.pixelShader=="146";depth+=command.vertexShader=="067";}
                         kernel::Log("native CPU frame %llu: %zu records, mesh %u terrain %u mesh-depth %u",c->frames+1,batch.commands.size(),mesh,terrain,depth);
                     }
+                    // FD_TRACE_SHADER_MIX=1: every 5 s, draws per frame by
+                    // shader pair (top 24), resolves and clears per frame.
+                    static const bool traceMix=getenv("FD_TRACE_SHADER_MIX")!=nullptr;
+                    if(traceMix)
+                    {
+                        static std::map<std::string,uint64_t> pairs;
+                        static uint64_t mixFrames=0,mixCommands=0,mixResolves=0,mixClears=0;
+                        static ULONGLONG mixSince=GetTickCount64();
+                        ++mixFrames;mixCommands+=batch.commands.size();
+                        for(const auto& command:batch.commands)
+                        {
+                            if(command.state.resolve){++mixResolves;continue;}
+                            if(command.state.clear){++mixClears;continue;}
+                            ++pairs[command.vertexShader+"/"+command.pixelShader];
+                        }
+                        if(GetTickCount64()-mixSince>=5000)
+                        {
+                            std::vector<std::pair<uint64_t,std::string>> sorted;
+                            for(const auto& [name,count]:pairs)sorted.push_back({count,name});
+                            std::sort(sorted.rbegin(),sorted.rend());
+                            std::string text;
+                            char item[64];
+                            for(size_t i=0;i<sorted.size()&&i<24;++i)
+                            {
+                                snprintf(item,sizeof(item)," %s:%.1f",sorted[i].second.c_str(),double(sorted[i].first)/double(mixFrames));
+                                text+=item;
+                            }
+                            kernel::Log("shader mix: %llu frames, %.1f records, %.1f resolves, %.1f clears per frame;%s",
+                                (unsigned long long)mixFrames,double(mixCommands)/double(mixFrames),double(mixResolves)/double(mixFrames),
+                                double(mixClears)/double(mixFrames),text.c_str());
+                            pairs.clear();mixFrames=mixCommands=mixResolves=mixClears=0;mixSince=GetTickCount64();
+                        }
+                    }
                     const bool dump=GetTickCount64()>=c->dumpAt;
                     if(dump)c->dumpAt=UINT64_MAX;
                     fg::GameFrameEnd(c->gameToken);
@@ -295,9 +329,11 @@ bool Initialize()
                     fg::RenderBegin(job.token);
                     const auto started=std::chrono::steady_clock::now();
                     for(const auto& texture:job.textures)ResolveTexture(*texture);
-                    std::vector<gpu::native::Draw> draws;draws.reserve(job.commands.size());
-                    for(const auto& command:job.commands){gpu::native::Draw draw;command.BindGeometryAndConstants(draw);draws.push_back(std::move(draw));}
-                    FrameInput input;input.draws=draws;input.resources=job.textures;
+                    const auto resolvedTextures=std::chrono::steady_clock::now();
+                    c->resolveMs+=std::chrono::duration<double,std::milli>(resolvedTextures-started).count();
+                    for(auto& command:job.commands)command.BindInPlace();
+                    FrameInput input;input.resources=job.textures;
+                    if(!job.commands.empty())input.draws=DrawView(&job.commands[0].state,job.commands.size(),sizeof(job.commands[0]));
                     input.streams=job.bytes;input.continuous=true;input.frontBufferBase=job.frontBuffer;
                     job.views.reserve(job.segments.size());
                     for(const auto& segment:job.segments)job.views.push_back({segment.offset,uint32_t(segment.data->size()),segment.data->data()});
@@ -321,7 +357,7 @@ bool Initialize()
                     c->packMs+=std::chrono::duration<double,std::milli>(packed-started).count();
                     c->renderMs+=std::chrono::duration<double,std::milli>(rendered-packed).count();
                     c->presentMs+=std::chrono::duration<double,std::milli>(presented-rendered).count();
-                    if(c->renderer->CompletedFrames()%60==0){kernel::Log("native frame costs: pack %.2f ms, render %.2f ms, present/pace %.2f ms",c->packMs/60,c->renderMs/60,c->presentMs/60);c->packMs=c->renderMs=c->presentMs=0;}
+                    if(c->renderer->CompletedFrames()%60==0){kernel::Log("native frame costs: pack %.2f ms (texture resolves %.2f), render %.2f ms, present/pace %.2f ms",c->packMs/60,c->resolveMs/60,c->renderMs/60,c->presentMs/60);c->packMs=c->renderMs=c->presentMs=c->resolveMs=0;}
                 });
             }
         }

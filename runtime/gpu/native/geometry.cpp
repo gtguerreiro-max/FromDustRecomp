@@ -110,12 +110,18 @@ uint32_t Stream(StreamArena& arena, uint32_t address, std::span<const uint8_t> b
                     misses.clear(); total = 0;
                 }
             }
+            auto fresh = arena.persistent->Take(bytes.size());
             for (unsigned attempt = 0;; ++attempt)
             {
-                auto fresh = std::make_shared<std::vector<uint8_t>>(bytes.size());
                 SwapWords(fresh->data(), bytes.data(), bytes.size());
                 const uint64_t after = arena.revision(address, uint32_t(bytes.size()));
-                if (after == revision) { cached.bytes = std::move(fresh); cached.revision = revision; break; }
+                if (after == revision)
+                {
+                    arena.persistent->Retire(std::move(cached.bytes));
+                    cached.bytes = std::move(fresh);
+                    cached.revision = revision;
+                    break;
+                }
                 if (attempt == 3) throw std::runtime_error("Vertex stream changed repeatedly during native acquisition");
                 revision = after;
             }

@@ -1419,14 +1419,16 @@ intervals. First level, from the save:
   (~85 per 10 s) or 2 (~215): water and people move in jerks while the
   camera is smooth. That is the stutter. Even where 60 held (menus), timing
   jitter around 0.5 steps per frame gave 1 / 2 / 3 frame steps (78 / 144 / 78).
-- Limit none (the game's own cap, 120): ~103-106 FPS, steps of 3 or 4 frames.
 - Holding 60 exactly (`FD_EVEN_PACE_FIXED=60`): ~54 FPS, frames 18-25 ms.
-  The game puts more into a longer frame: ~446 draws per frame at ~103 FPS,
-  ~1400 at ~54 FPS, ~1540 at 30 FPS, and our capture cost follows the draws.
-  So a 60 FPS cadence does not fit on this PC although 100+ FPS does.
   Per-frame waits of the game thread (kernel object waits, delays, critical
   sections, the renderer hand-over; `kernel::ThreadWaits`) show the rest is
   CPU work: e.g. 18.2 ms with 4.7 ms of waits.
+- Correction (2026-11-06): the "~103 FPS with no limit" sessions never left
+  the world map (~300 draws per frame; `FD_TRACE_SHADER_MIX=1` shows draws per
+  shader pair). The game does not draw more in longer frames: play is ~1390
+  draws per frame at any rate, and before the round below it ran at ~51 FPS
+  with no limit at all. The test menu flow is timing-sensitive: with a 60
+  limit the title screen sometimes takes START only after 40 s.
 
 Changes (`game_loop.cpp`):
 - Snapping: a frame interval within 10% of 1/k world steps (k = 1..4) counts
@@ -1443,8 +1445,64 @@ Changes (`game_loop.cpp`):
   ~9 ms of work). `FD_NO_EVEN_PACE=1` turns it off, `FD_EVEN_PACE_FIXED=<n>`
   holds a rate.
 
-Result on this PC: limit 60 + even pacing -> 60 FPS in menus, 30 FPS with
-every step on screen for exactly one frame in play (300 of 300). The
-alternative is even pacing off and no limit: ~103 FPS with 3 / 4 frame
-steps (small unevenness, smooth camera). Making 60 hold needs the per-draw
-capture cost down, or finding what the game scales with the frame time.
+Result on this PC (2026-11-05): limit 60 + even pacing -> 60 FPS in menus,
+30 FPS with every step on screen for exactly one frame in play (300 of 300).
+
+## Frame cost round 2: 60 FPS in play — 2026-11-06
+
+First level from the save, fixed-rate world, no limit, VSync, RTX 5060 Ti /
+Ryzen 5 5600X. Play went from ~51 FPS (frames 18-25 ms) to ~70 FPS (frames
+12-15 ms); with DLAA + DLSS FG 2x from ~45 to ~73 game FPS (~146 shown).
+`FD_PROFILE` on guest thread 3 and the native profile (`FD_NATIVE_PROFILE`,
+now with texture resolves and per-draw copies) showed where:
+- Game thread, vertex streams: a converted stream that changed (~16 MB per
+  frame in play, the simulation rewrites terrain / water vertex data) was a
+  fresh zero-filled allocation every time: 11.6% of the thread in `memset`,
+  4.7% in `NtFreeVirtualMemory`. `StreamArena::Persistent` now keeps replaced
+  buffers and reuses one once no frame in flight holds it (`Take` / `Retire`,
+  at most 256 MB). Geometry capture 6.9 -> 2.8 ms per frame.
+- Render worker, draw state: every draw's ~7 KB `Draw` was copied out of its
+  command. `FrameInput::draws` is now a `DrawView` (contiguous draws, or
+  draws embedded at a stride), and the worker binds geometry and constants in
+  place (`Command::BindInPlace`). Pack 2.7 -> 0.9 ms.
+- Texture decode: the four CPU-written simulation textures (two 512x1024
+  k_8_8_8_8, two 512x512 k_16_16, ~15 updates per second each;
+  `FD_TRACE_TEXTURE_CAPTURES=1` lists them) went through four checked byte
+  reads per texel. A fast path for 32-bit formats loads one word and permutes
+  the endian; `FD_CHECK_FAST_DECODE=1` decodes again on the general path and
+  compares (4460 checks, 0 differences). Resolves 1.55 -> 0.8 ms.
+- Render worker, uploads: the stream space (~20 MB) is copied on another
+  thread while the commands are recorded (joined before submission), and the
+  texture upload has its own command list submitted without a CPU wait
+  (`FD_UPLOAD_WAIT=1` restores the wait). Resources 2.3 -> 0.5 ms.
+- Profiler: it allocated while the sampled thread was suspended and hung the
+  game when that thread held the heap lock; it now walks into a fixed buffer
+  and aggregates after resuming, and reads leaf return addresses safely.
+
+Even pacing, revised (`game_loop.cpp`):
+- Frames with and without a world step differ in cost (here ~10 ms and
+  ~14 ms; a frame after a step waits ~3.5 ms for the simulation jobs it
+  started). A frame that overruns its interval is fine when the next catches
+  up, so the pacer keeps its cadence (a frame up to half an interval late
+  does not reset it) and "late" now means starting more than a quarter
+  interval after the deadline (>= 3 per 30 frames -> slower rate). Faster
+  again after `calmNeeded` calm windows (average under 95% of the faster
+  interval, at most one frame over 130%); `calmNeeded` doubles after a try
+  that fails within 8 windows (up to 48) and returns to 3 once a rate holds.
+- Snapping: 15% tolerance, and the difference is accumulated and paid back at
+  a quarter step, so a steady off-divisor rate (say 55 FPS) no longer slows
+  the world down.
+- Off while DLSS Frame Generation is active (`SetFrameGenerationActive`):
+  holding the game loop kept DLSS-G at one frame per present.
+- Diagnostics: `FD_EVEN_PACE_SPIN=<ms>` busy-waits the end of the wait (no
+  difference: not a CPU power-state effect), `FD_TRACE_PAD=1` (pad states the
+  game sees).
+
+Result: no limit + even pacing holds 60 in most of play (299-301 of 300
+steps on screen for exactly 2 frames per 10 s window) and drops to 30 in the
+heaviest moments (the village cut scene with the horizon in view, ~29 ms
+frames). Left: the game thread's ~15 KB of copies per draw when a draw is
+committed (`Pending` -> `Command`), the per-draw constant copies on the
+worker (0.7 ms), indices re-uploaded every frame although cached (11 MB),
+and the GPU wait at the end of each frame (~2.8 ms, the GPU starts only
+after the whole frame is recorded).
