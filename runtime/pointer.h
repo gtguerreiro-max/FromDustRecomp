@@ -23,6 +23,8 @@ bool Active();
 bool Project(float x, float y, float z, float& sx, float& sy);
 // Distance from the camera (its near-plane centre) to a world point.
 bool CameraDistance(float x, float y, float z, float& distance);
+// The camera's position (its near-plane centre).
+bool CameraPosition(float& x, float& y, float& z);
 // Edge scrolling (direct mode): the camera follows a focus point of its own
 // instead of the Breath. The cursor update passes the game's cursor position
 // (live) and the Breath's new one (x, y on height z); the Breath is kept on

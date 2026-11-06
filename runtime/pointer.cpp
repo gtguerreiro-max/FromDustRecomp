@@ -247,6 +247,19 @@ bool Project(float x, float y, float z, float& sx, float& sy)
     sx = float((v[0] / v[3] + 1) * 0.5); sy = float((1 - v[1] / v[3]) * 0.5);
     return true;
 }
+bool CameraPosition(float& x, float& y, float& z)
+{
+    double inv[16];
+    {
+        std::lock_guard lock(g_mutex);
+        if (!g_camera || !Invert(g_rows, inv)) return false;
+    }
+    double v[4];
+    for (int r = 0; r < 4; ++r) v[r] = inv[r * 4 + 3];
+    if (std::fabs(v[3]) < 1e-9) return false;
+    x = float(v[0] / v[3]); y = float(v[1] / v[3]); z = float(v[2] / v[3]);
+    return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+}
 bool CameraDistance(float x, float y, float z, float& distance)
 {
     double inv[16];

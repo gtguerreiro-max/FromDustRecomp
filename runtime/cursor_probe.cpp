@@ -38,6 +38,7 @@ PPC_FUNC(sub_8A1FA470)
 #include "pointer.h"
 #include "camera_assist.h"
 #include "input.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 namespace
@@ -105,7 +106,11 @@ PPC_FUNC(sub_8A1F4298)
         if (GetTickCount64() - last > 500 && pointer::CameraDistance(ReadFloat(cursor + 1744), ReadFloat(cursor + 1748), height, distance))
         {
             last = GetTickCount64();
-            kernel::Log("camera distance: t %.1f %.1f", (GetTickCount64() - g_processStart) / 1000.0, distance);
+            float ex = 0, ey = 0, ez = 0;
+            pointer::CameraPosition(ex, ey, ez);
+            const float hx = ReadFloat(cursor + 1744) - ex, hy = ReadFloat(cursor + 1748) - ey;
+            kernel::Log("camera distance: t %.1f %.1f, camera z %.1f, cursor z %.1f, horizontal %.1f, zoom %.2f", (GetTickCount64() - g_processStart) / 1000.0,
+                        distance, ez, height, std::sqrt(hx * hx + hy * hy), camera::GlobalZoom());
         }
     }
     const float liveX = ReadFloat(cursor + 1744), liveY = ReadFloat(cursor + 1748);
@@ -126,12 +131,6 @@ PPC_FUNC(sub_8A1F4298)
     }
     // Edge scrolling: on screen, carried by the camera at the edges.
     if (pointer::EdgeScroll(liveX, liveY, x, y, height) && !moved && (x != liveX || y != liveY)) moved = true;
-    if (!moved)
-    {
-        if (ReadFloat(self + 280) == 0.0f && ReadFloat(self + 284) == 0.0f && ReadFloat(self + 288) == 0.0f)
-            WriteFloat(self + 280, 1e-6f);
-        return;
-    }
     static const bool trace = getenv("FD_TRACE_POINTER") != nullptr;
     if (trace)
     {
@@ -146,6 +145,12 @@ PPC_FUNC(sub_8A1F4298)
             kernel::Log("pointer: t %.1f cursor %08X (%.2f %.2f %.2f) on screen (%.3f %.3f), mouse (%.3f %.3f) -> (%.2f %.2f), focus %s(%.2f %.2f)", (GetTickCount64() - g_processStart) / 1000.0, cursor,
                 ReadFloat(cursor + 1744), ReadFloat(cursor + 1748), height, sx, sy, mx, my, x, y, focus ? "" : "off ", fx, fy);
         }
+    }
+    if (!moved)
+    {
+        if (ReadFloat(self + 280) == 0.0f && ReadFloat(self + 284) == 0.0f && ReadFloat(self + 288) == 0.0f)
+            WriteFloat(self + 280, 1e-6f);
+        return;
     }
     static const bool dry = getenv("FD_POINTER_DRY") != nullptr;
     if (dry) return;
@@ -214,6 +219,51 @@ PPC_FUNC(sub_8A043680)
         }
     }
     __imp__sub_8A043680(ctx, base);
+}
+
+// Global view zoom: dustai sub_8A1FB830 copies DustAi::CameraManager's
+// parameters (r3) into the camera's working set (r4); m_globalCameraHeight
+// (+304) and m_globalDistanceToCursor (+308) land at +192 and +196 (read by
+// sub_8A111500). The copy is scaled by the wheel's zoom factor.
+PPC_FUNC_IMPL(__imp__sub_8A1FB830);
+PPC_FUNC(sub_8A1FB830)
+{
+    const uint32_t dest = ctx.r4.u32;
+    __imp__sub_8A1FB830(ctx, base);
+    static const bool trace = getenv("FD_TRACE_CAMERA_DISTANCE") != nullptr;
+    const float zoom = camera::GlobalZoom();
+    if (trace)
+    {
+        static ULONGLONG last = 0;
+        static uint64_t calls = 0;
+        ++calls;
+        if (GetTickCount64() - last > 2000)
+        {
+            last = GetTickCount64();
+            kernel::Log("camera params: %llu copies, dest %08X, global height %.2f distance %.2f, zoom %.3f", (unsigned long long)calls, dest,
+                        ReadFloat(dest + 192), ReadFloat(dest + 196), zoom);
+        }
+    }
+    // m_globalCameraHeight is an absolute height: scaling it alone would
+    // flatten the view when zooming in. It is scaled above a reference, the
+    // Breath's height eased over about two seconds (the camera does not bob
+    // over hills), so the view keeps its angle.
+    static float reference = NAN;
+    static ULONGLONG referenceTick = 0;
+    const uint32_t cursor = mem::Read32(0x8A295318);
+    if (cursor >= 0x40000000u && cursor < 0xC0000000u)
+    {
+        float fx, fy, z = ReadFloat(cursor + 1752);
+        pointer::Focus(fx, fy, z);
+        const ULONGLONG now = GetTickCount64();
+        const float dt = referenceTick ? (std::min)(0.1f, (now - referenceTick) / 1000.0f) : 0.0f;
+        referenceTick = now;
+        if (std::isfinite(z)) reference = std::isfinite(reference) ? reference + (z - reference) * (std::min)(1.0f, dt * 0.5f) : z;
+    }
+    if (zoom == 1.0f || !dest) return;
+    const float height = ReadFloat(dest + 192), ground = std::isfinite(reference) && reference < height ? reference : 0.0f;
+    WriteFloat(dest + 192, ground + (height - ground) * zoom);
+    WriteFloat(dest + 196, ReadFloat(dest + 196) * zoom);
 }
 
 // Edge scrolling: dustai sub_8A1FF3B0 is the camera's follow node. It copies

@@ -470,6 +470,8 @@ private:
                 ImGui::Combo("Rotate camera", &d.cameraButton, "Off\0Drag with the right button\0Drag with the middle button\0");
                 Help("Hold the button and move the mouse to rotate the camera.");
                 ImGui::Combo("Mouse wheel", &d.wheelZoom, "Off\0Zoom\0Inverted zoom\0");
+                Help("In the global view the wheel zooms the view straight in and out (it stays in the global view; "
+                     "the camera keeps its angle). In the close camera it zooms like the right stick.");
                 Section("CAMERA AND CONTROLLER");
                 ImGui::Checkbox("Prefer the global view (RB camera)", &d.globalView);
                 Help("Keeps the far camera, an overview that suits a PC screen and the mouse. When the game returns to the close "

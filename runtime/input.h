@@ -36,6 +36,10 @@ void SetPointerQuery(bool (*active)());
 // Observer of the player's buttons (XInput mask) each poll, before injected
 // presses (camera_assist.cpp).
 void SetButtonObserver(void (*observer)(uint16_t buttons));
+// Wheel zoom of the global view (camera_assist.cpp): while `active` returns
+// true, wheel movement goes to `zoom` (notches, > 0 = forward) instead of the
+// right stick.
+void SetWheelZoom(bool (*active)(), void (*zoom)(float notches));
 // Mouse movement since the last call while the Breath is grabbed by the mouse
 // (hidden cursor), as fractions of the window size (+x right, +y down).
 bool TakeMouseDelta(float& dx, float& dy);

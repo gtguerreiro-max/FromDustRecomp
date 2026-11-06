@@ -1652,3 +1652,33 @@ with it. The Breath is kept on screen.
   Breath went from 0.60 to 0.93 of the screen width with the camera still,
   scrolled at the edge, came back to the centre and up the screen with the
   camera still; at the map limit the focus stops.
+
+## Mouse wheel: straight zoom of the global view — 2026-11-06
+
+The wheel used to hold the right stick's vertical axis, the game's own zoom,
+which zooms the global view into the close camera. Now, in the global view
+(`camera::InGlobalView`, from the distance check of the global view assist),
+the wheel changes a zoom factor instead (0.9 per notch, fractions of a notch
+for high-resolution wheels, 0.4-1.6, eased over about a quarter of a second;
+F1 > Controls > Mouse wheel, Inverted flips it). In the close camera the
+wheel still zooms like the stick.
+
+- The camera's parameters come from `DustAi::CameraManager` (reflection
+  names in dustai: m_globalCameraHeight, m_globalDistanceToCursor,
+  m_globalFocale, m_sandboxDistanceMin/Max/Increment, ...). Every frame
+  `sub_8A1FB830` copies them (r3 +88..+308) into the camera's working set
+  (r4 +4..+212): m_globalCameraHeight +304 -> +192, m_globalDistanceToCursor
+  +308 -> +196 (read by `sub_8A111500`). The override scales the copy.
+- m_globalCameraHeight is an absolute height (camera z 147 with height 150,
+  191.8 at x1.3, 87.8 at x0.6, the Breath at z 38.8): scaling it alone
+  flattened the view (at x0.45 it looked at the horizon). It is scaled above
+  a reference, the Breath's height eased over about two seconds (no bobbing
+  over hills): first level, x1 54.5 degrees down to the Breath, x0.35 53, x1.6
+  49; camera distance 133 -> 45 / 203.
+- The global view assist's threshold follows the zoom (max(35, 60 x zoom));
+  the close camera is ~25 from the Breath, the global view at x0.4 ~50.
+- Checked with wheel messages posted to the window (5 notches in: x0.59, 10
+  out: x1.6) in the first level: no switch to the close camera, no assist RB
+  taps. `FD_CAMERA_ZOOM_TEST=<s>:<factor>;...` forces factors;
+  `FD_TRACE_CAMERA_DISTANCE=1` logs the camera height, the horizontal
+  distance and the zoom. The zoom is not saved between sessions.

@@ -67,6 +67,8 @@ const ULONGLONG g_inputStart = GetTickCount64();
 std::atomic<bool> g_lastKeyboard{true};
 std::atomic<bool (*)()> g_pointerActive{nullptr};
 std::atomic<void (*)(uint16_t)> g_buttonObserver{nullptr};
+std::atomic<bool (*)()> g_wheelZoomActive{nullptr};
+std::atomic<void (*)(float)> g_wheelZoom{nullptr};
 float g_grabX = 0, g_grabY = 0;      // pending grabbed mouse movement (pixels)
 float g_grabWidth = 1, g_grabHeight = 1;
 ULONGLONG g_grabTick = 0;
@@ -250,6 +252,16 @@ uint32_t GetState(uint32_t user, State& state) {
                 if (cameraKey != VK_RBUTTON && (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) state.pad.rightTrigger = 255;
             }
             // Each wheel notch holds the camera's vertical axis (zoom) briefly.
+            // In the global view the wheel zooms it straight in and out
+            // (camera_assist.cpp) instead of the stick's zoom, which falls back
+            // to the close camera.
+            const auto zoomActive = g_wheelZoomActive.load();
+            const auto zoom = g_wheelZoom.load();
+            if (d.wheelZoom && zoomActive && zoom && zoomActive()) {
+                // Fractions of a notch too (high-resolution wheels).
+                if (const int wheel = g_wheel.exchange(0))
+                    zoom(float(wheel) / WHEEL_DELTA * (d.wheelZoom == 2 ? -1.0f : 1.0f));
+            }
             if (const int wheel = g_wheel.exchange(0); wheel && d.wheelZoom) {
                 const int direction = (wheel > 0 ? 1 : -1) * (d.wheelZoom == 2 ? -1 : 1);
                 // 220 ms of full deflection per notch; notches in the same
@@ -293,6 +305,7 @@ uint32_t GetState(uint32_t user, State& state) {
 }
 void SetPointerQuery(bool (*active)()) { g_pointerActive = active; }
 void SetButtonObserver(void (*observer)(uint16_t buttons)) { g_buttonObserver = observer; }
+void SetWheelZoom(bool (*active)(), void (*zoom)(float notches)) { g_wheelZoomActive = active; g_wheelZoom = zoom; }
 void WindowAspect(float& width, float& height) {
     std::lock_guard lock(g_pollMutex);
     if (g_grabWidth > 1 && g_grabHeight > 1) { width = g_grabWidth; height = g_grabHeight; }
