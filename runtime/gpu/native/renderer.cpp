@@ -509,6 +509,28 @@ struct gpu::native::Renderer::Impl
     D3D12Texture* outputTexture=nullptr;
     uint32_t outputWidth=0,outputHeight=0;
     D3D12Texture* outputHudless=nullptr; // this frame's scene before the HUD (HDR), or null
+    // Continuous frames: the GPU finishes a frame while the worker presents it
+    // and prepares the next one; the CPU wait for it moves to the start of the
+    // next RenderFrame (FD_NATIVE_FRAME_WAIT=1 waits at the end, as before).
+    // What the frame's commands reference stays alive here until that wait.
+    struct InFlight
+    {
+        std::unique_ptr<RenderDescriptorSet> sets[5];
+        std::map<uint64_t, std::pair<uint32_t, std::unique_ptr<RenderSampler>>> samplers;
+        std::vector<std::shared_ptr<RenderTexture>> textures, cubeTextures, volumeTextures;
+        std::vector<std::shared_ptr<RenderTextureView>> cubeViews;
+        std::vector<std::unique_ptr<RenderTextureView>> volumeViews;
+        std::map<uint64_t, std::pair<uint32_t, std::unique_ptr<RenderTextureView>>> tableViews;
+        std::unique_ptr<RenderBuffer> staging, cubeStaging, volumeStaging;
+        std::vector<std::unique_ptr<Packed>> retiredPacked;
+        std::vector<std::unique_ptr<Snapshot>> retiredDepthSnapshots, retiredSnapshots;
+        std::unique_ptr<RenderShader> pixelShader;
+    };
+    std::unique_ptr<InFlight> inFlight;
+    // The last submitted frame's fence value: the presenter's copy waits for
+    // it on the GPU.
+    ID3D12Fence* frameFence=nullptr;
+    uint64_t frameFenceValue=0;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> presentHdrRoot;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> presentHdrPipeline;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> presentRoot;
@@ -599,6 +621,9 @@ struct gpu::native::Renderer::Impl
 
 int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std::string& dir, FrameOutput* output)
 {
+    // The previous continuous frame must be complete before its buffers are
+    // rewritten and what it referenced is released.
+    if(inFlight){queue->waitForCommandFence(fence.get());inFlight.reset();}
     const bool profile=frame.continuous&&getenv("FD_NATIVE_PROFILE");
     const auto profileStart=std::chrono::steady_clock::now();
     // Diagnostic environment options are stable during one submission. Avoid
@@ -2677,7 +2702,30 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     const RenderCommandList* lists = list.get();
     const auto profileSubmit=std::chrono::steady_clock::now();
     queue->executeCommandLists(&lists, 1, nullptr, 0, nullptr, 0, fence.get());
-    queue->waitForCommandFence(fence.get());
+    {
+        auto* submitted=static_cast<D3D12CommandFence*>(fence.get());
+        frameFence=submitted->d3d;frameFenceValue=submitted->fenceValue-1;
+    }
+    // Live frames without readbacks: no CPU wait here (see InFlight).
+    static const bool frameWait=CachedEnv("FD_NATIVE_FRAME_WAIT")!=nullptr;
+    const bool deferWait=frame.continuous&&dir.empty()&&!output&&dumps.empty()&&!frameWait
+#ifdef FD_REPLAY_RENDERDOC
+        &&!renderdoc
+#endif
+        ;
+    if(deferWait)
+    {
+        inFlight=std::make_unique<InFlight>();
+        for(int i=0;i<5;++i)inFlight->sets[i]=std::move(sets[i]);
+        inFlight->samplers=std::move(samplers);
+        inFlight->textures=std::move(textures);inFlight->cubeTextures=std::move(cubeTextures);inFlight->volumeTextures=std::move(volumeTextures);
+        inFlight->cubeViews=std::move(cubeViews);inFlight->volumeViews=std::move(volumeViews);inFlight->tableViews=std::move(tableViews);
+        inFlight->staging=std::move(staging);inFlight->cubeStaging=std::move(cubeStaging);inFlight->volumeStaging=std::move(volumeStaging);
+        inFlight->retiredPacked=std::move(retiredPacked);
+        inFlight->retiredDepthSnapshots=std::move(retiredDepthSnapshots);inFlight->retiredSnapshots=std::move(retiredSnapshots);
+        inFlight->pixelShader=std::move(pixelShader);
+    }
+    else queue->waitForCommandFence(fence.get());
     const auto profileFinished=std::chrono::steady_clock::now();
     if(profile)
     {
@@ -2957,6 +3005,9 @@ bool gpu::native::Renderer::Impl::PresentTo(ID3D12Resource* destination,ID3D12Co
     for(auto& barrier:barriers)std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
     presentList->ResourceBarrier(2,barriers);
     if(FAILED(presentList->Close()))return false;
+    // The frame may still be rendering (no CPU wait at its end): the copy
+    // waits for it on the GPU.
+    if(frameFence&&FAILED(destinationQueue->Wait(frameFence,frameFenceValue)))return false;
     ID3D12CommandList* commands[]={presentList.Get()};destinationQueue->ExecuteCommandLists(1,commands);
     if(FAILED(destinationQueue->Signal(presentFence.Get(),++presentSerial)))return false;
     presentSlotSerials[slot]=presentSerial;

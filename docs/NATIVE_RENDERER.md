@@ -1699,3 +1699,45 @@ F1 > Controls > Mouse, all live and saved in [Controls]:
   with GlobalZoom=80 and 5 notches in saved 47.
 - `tools/test_frame_generation.ps1 -Settings -SettingsTab controls` opens the
   F1 menu on that tab.
+
+## Frame cost round 4: no CPU wait for the GPU at the end of a frame — 2026-11-06
+
+Measured first (first level, DLAA, fixed-rate world, no limit, ~85-90 FPS):
+- Game thread, per frame with even pacing (`FD_TRACE_SIM_STEPS`): world-step
+  frames ~7 ms of which ~1.8 ms waiting for the render worker (hand-over),
+  the next frame ~12 ms of which ~3.6 ms waiting for the simulation jobs.
+  `FD_TRACE_WAITS=<guest thread>` (new, `kernel/objects.cpp`) lists the
+  objects a thread waits on with the guest caller and the last signalling
+  thread: main thread 3 waits ~120 ms/s on an event of the job system
+  (caller 0x88124110, signalled by workers 14-16). The workers run
+  GalileoSimulatorWater_9_9 and are idle ~73% of the time.
+- Render worker ~11-13 ms per frame: as long as the game thread, so it also
+  bounded the frame rate; ~3.3 ms of it was the CPU waiting for the GPU to
+  finish the frame (`waitForCommandFence` right after submitting).
+- Note: `FD_PROFILE` (the sampling profiler) slows the profiled thread a lot
+  (88 -> ~37 FPS); use its percentages, not the frame rate.
+
+Change: continuous frames without readbacks no longer wait at the end of
+`RenderFrame`. The next `RenderFrame` waits for the previous frame's fence
+first (before it rewrites the upload buffers or releases anything), and what
+the frame's commands reference (descriptor sets, samplers, texture lists,
+table views, stagings, retired snapshots) stays alive in `Impl::InFlight`
+until then. The presenter's copy (`PresentTo`) waits for the frame's fence on
+the GPU (`ID3D12CommandQueue::Wait`). `FD_NATIVE_FRAME_WAIT=1` restores the
+old wait. Render worker per frame: pack 1.6 -> 0.7 ms, present 1.7 ->
+0.3 ms, about 9.4 ms in all.
+
+Results (first level, DLAA, no limit): ~85-90 -> ~90-103 FPS; DLAA + FG 2x
+~82 -> ~97-105 game FPS (2 frames per present, status 0); forced HDR ~100;
+limit 60 with even pacing 300 of 300 steps on screen for 2 frames. A session
+with the D3D12 debug layer (`tools/test_frame_generation.ps1 -D3DDebug`)
+reports no errors (only the existing input layout type warnings); frame and
+geometry reference tests exact.
+
+Tried and reverted: XenonRecomp's registers-as-locals options for the water
+module (`GalileoSimulatorWater_9_9`). With `non_volatile_as_local` the DLL
+entry (SEH frame) crashed at guest 0xFFFFFF70; without it,
+`non_argument_as_local` breaks the `__savevmx` helpers (they take r11 / r12
+from the context: crash at 0xFFFFFFF8); with only CR / CTR / XER / reserved
+as locals a float exception (0xC000008F) appeared. The module is back to the
+original configuration.

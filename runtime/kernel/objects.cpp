@@ -1,4 +1,7 @@
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <mutex>
 #include "objects.h"
 
 #include <unordered_map>
@@ -161,9 +164,65 @@ namespace kernel
 
     uint64_t* ThreadWaits() { thread_local uint64_t waits[4] = {}; return waits; }
 
+    // FD_TRACE_WAITS=<guest thread id>: diagnostic. Every 10 s, the objects
+    // that thread waited on longest, with the guest caller of the wait and the
+    // guest thread that last signalled each object.
+    namespace
+    {
+        struct WaitStat { uint64_t ns = 0; uint32_t count = 0; uint32_t caller = 0; };
+        const uint32_t g_traceWaits = [] { const char* v = getenv("FD_TRACE_WAITS"); return v ? uint32_t(atoi(v)) : 0u; }();
+        std::mutex g_waitStatLock;
+        std::unordered_map<KernelObject*, WaitStat> g_waitStats;
+        std::unordered_map<KernelObject*, uint32_t> g_lastNotifier; // dispatcher lock
+        std::chrono::steady_clock::time_point g_waitStatsSince = std::chrono::steady_clock::now();
+        struct WaitTrace
+        {
+            KernelObject* object = nullptr;
+            uint32_t caller = 0;
+            std::chrono::steady_clock::time_point start;
+            explicit WaitTrace(KernelObject* const* objects, uint32_t count)
+            {
+                GuestThread* self = g_traceWaits ? CurrentThread() : nullptr;
+                if (!self || self->id != g_traceWaits || !count) return;
+                object = objects[0];
+                caller = self->ctx ? uint32_t(self->ctx->lr) : 0;
+                start = std::chrono::steady_clock::now();
+            }
+            ~WaitTrace()
+            {
+                if (!object) return;
+                const auto now = std::chrono::steady_clock::now();
+                std::lock_guard lock(g_waitStatLock);
+                auto& stat = g_waitStats[object];
+                stat.ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count());
+                ++stat.count;
+                stat.caller = caller;
+                if (now - g_waitStatsSince < std::chrono::seconds(10)) return;
+                std::vector<std::pair<KernelObject*, WaitStat>> top(g_waitStats.begin(), g_waitStats.end());
+                std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+                const double seconds = std::chrono::duration<double>(now - g_waitStatsSince).count();
+                for (size_t i = 0; i < top.size() && i < 8; ++i)
+                {
+                    uint32_t notifier = 0;
+                    {
+                        std::lock_guard dispatcher(g_dispatcherLock);
+                        auto found = g_lastNotifier.find(top[i].first);
+                        if (found != g_lastNotifier.end()) notifier = found->second;
+                    }
+                    Log("waits of thread %u: object %p type %d, %.1f ms/s, %u waits, caller %08X, last signalled by thread %u",
+                        g_traceWaits, (void*)top[i].first, int(top[i].first->type), top[i].second.ns / 1e6 / seconds, top[i].second.count,
+                        top[i].second.caller, notifier);
+                }
+                g_waitStats.clear();
+                g_waitStatsSince = now;
+            }
+        };
+    }
+
     uint32_t WaitForObjects(KernelObject* const* objects, uint32_t count, bool waitAll, const Deadline* deadline)
     {
         WaitTimer timer(0);
+        WaitTrace trace(objects, count);
         thread_local Waiter waiter;
         std::unique_lock lock(g_dispatcherLock);
         bool registered = false;
@@ -234,6 +293,8 @@ namespace kernel
         if (!object)
             return;
         std::lock_guard lock(g_dispatcherLock);
+        if (g_traceWaits)
+            if (GuestThread* self = CurrentThread()) g_lastNotifier[object] = self->id;
         for (Waiter* waiter : object->waiters)
             waiter->cv.notify_one();
     }
