@@ -2702,6 +2702,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     const RenderCommandList* lists = list.get();
     const auto profileSubmit=std::chrono::steady_clock::now();
     queue->executeCommandLists(&lists, 1, nullptr, 0, nullptr, 0, fence.get());
+    if(profile)
+    {
+        static double executeMs=0;static uint32_t executeFrames=0;
+        executeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-profileSubmit).count();
+        if(++executeFrames==60){fprintf(stderr,"native submit profile: ExecuteCommandLists %.2f ms\n",executeMs/60);executeMs=0;executeFrames=0;}
+    }
     {
         auto* submitted=static_cast<D3D12CommandFence*>(fence.get());
         frameFence=submitted->d3d;frameFenceValue=submitted->fenceValue-1;

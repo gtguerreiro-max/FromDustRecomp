@@ -484,3 +484,44 @@ index 6542341..70a4366 100644
  class D3D12Provider : public GraphicsProvider {
   public:
    ~D3D12Provider();
+diff --git a/src/xenia/ui/imgui_drawer.cc b/src/xenia/ui/imgui_drawer.cc
+index c226ab1..e037ffc 100644
+--- a/src/xenia/ui/imgui_drawer.cc
++++ b/src/xenia/ui/imgui_drawer.cc
+@@ -59,6 +59,8 @@ UPDATE_from_uint32(font_size, 2024, 8, 31, 20, 12);
+ namespace xe {
+ namespace ui {
+ 
++bool (*fd_imgui_continuous_repaint)() = nullptr;
++
+ // File: 'ProggyTiny.ttf' (35656 bytes)
+ // Exported using binary_to_compressed_c.cpp
+ constexpr char kProggyTinyCompressedDataBase85[10953 + 1] =
+@@ -731,7 +733,10 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   // it now if needed.
+   DetachIfLastWindowRemoved();
+ 
+-  if (!dialogs_.empty() || !notifications_.empty()) {
++  const bool dialogs_need_repaint =
++      !dialogs_.empty() &&
++      (!fd_imgui_continuous_repaint || fd_imgui_continuous_repaint());
++  if (dialogs_need_repaint || !notifications_.empty()) {
+     // Repaint (and handle input) continuously if still active.
+     presenter_->RequestUIPaintFromUIThread();
+   }
+diff --git a/src/xenia/ui/imgui_drawer.h b/src/xenia/ui/imgui_drawer.h
+index 6c32a22..e22b884 100644
+--- a/src/xenia/ui/imgui_drawer.h
++++ b/src/xenia/ui/imgui_drawer.h
+@@ -32,6 +32,11 @@ enum ImGuiKey : int;
+ namespace xe {
+ namespace ui {
+ 
++// From Dust: whether open dialogs need continuous repaints (null: always, as
++// upstream). An idle overlay repaints with the game's frames instead: with
++// VSync, 240 Hz UI repaints queued flips that held up the renderer.
++extern bool (*fd_imgui_continuous_repaint)();
++
+ class ImGuiDialog;
+ class ImGuiNotification;
+ class Window;

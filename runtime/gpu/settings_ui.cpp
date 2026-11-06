@@ -151,6 +151,9 @@ public:
     }
 private:
     bool visible_ = false, saveFailed_ = false, restartFailed_ = false;
+public:
+    bool Visible() const { return visible_; }
+private:
     int capture_ = -1;
     settings::Data startup_;
     uint64_t previousFrames_ = 0;
@@ -629,6 +632,9 @@ bool Initialize(xe::ui::Window* window, xe::ui::GraphicsProvider* provider,xe::u
     style.Colors[ImGuiCol_SliderGrab] = ImVec4(.88f, .76f, .47f, 1);
     g_baseStyle=style;
     g_overlay = std::make_unique<Overlay>(g_imgui.get());
+    // Only the open F1 menu needs continuous repaints (hover, animation); the
+    // FPS counter repaints with each game frame. FD_UI_CONTINUOUS=1: always.
+    if (!getenv("FD_UI_CONTINUOUS")) xe::ui::fd_imgui_continuous_repaint = [] { return g_overlay && g_overlay->Visible(); };
     ApplyLive();
     return true;
 }

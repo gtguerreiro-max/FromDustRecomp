@@ -1741,3 +1741,24 @@ entry (SEH frame) crashed at guest 0xFFFFFF70; without it,
 from the context: crash at 0xFFFFFFF8); with only CR / CTR / XER / reserved
 as locals a float exception (0xC000008F) appeared. The module is back to the
 original configuration.
+
+## Frame cost round 5: VSync no longer holds up the renderer — 2026-11-06
+
+After round 4 the submission itself (`ExecuteCommandLists`) took ~2.4 ms per
+frame with VSync on and 0.06 ms with VSync off (101-108 FPS). Cause: Xenia's
+ImGui drawer requests continuous repaints while any dialog exists, and the PC
+overlay (FPS counter) is always one, so the presenter repainted and presented
+at the monitor's 240 Hz; with VSync every present waits for a flip, and the
+queued flips held up the renderer's submissions on the same GPU.
+
+Change (patches/xenia.patch): `xe::ui::fd_imgui_continuous_repaint`, asked by
+the ImGui drawer before it requests a continuous repaint (null: always, as
+upstream). The settings UI answers true only while the F1 menu is open; with
+it closed the window repaints once per game frame (each guest output refresh
+requests a paint) and on window events. `FD_UI_CONTINUOUS=1` restores the
+continuous repaints.
+
+Results (first level, DLAA, fixed-rate world, no limit, VSync on):
+`ExecuteCommandLists` 2.4 -> 0.05 ms, render worker ~7.9 ms per frame,
+~100 -> ~107-114 FPS. The F1 menu still repaints continuously while open.
+`native submit profile` (with `FD_NATIVE_PROFILE`) prints the submission time.
