@@ -462,6 +462,9 @@ private:
                      "Breath, as in the original game.");
                 ImGui::BeginDisabled(!d.edgeScroll);
                 ImGui::SliderInt("Edge scroll speed", &d.edgeScrollSpeed, 25, 300, "%d %%");
+                Help("How fast the camera scrolls with the Breath at the very edge of the screen.");
+                ImGui::SliderInt("Edge zone", &d.edgeScrollBand, 3, 15, "%d %% of the screen");
+                Help("How close to the edge the Breath must be for the camera to start scrolling.");
                 ImGui::EndDisabled();
                 ImGui::EndDisabled();
                 ImGui::EndDisabled();
@@ -469,9 +472,22 @@ private:
                 Help("Left = LT (absorb matter), right = RT (release). Hold them like the triggers.");
                 ImGui::Combo("Rotate camera", &d.cameraButton, "Off\0Drag with the right button\0Drag with the middle button\0");
                 Help("Hold the button and move the mouse to rotate the camera.");
+                ImGui::BeginDisabled(d.cameraButton == 0);
+                ImGui::SliderInt("Rotation speed", &d.mouseRotateSpeed, 25, 300, "%d %%");
+                Help("Camera rotation by mouse drag (Camera sensitivity below also applies).");
+                ImGui::Checkbox("Invert rotation left / right", &d.mouseRotateInvertX);
+                ImGui::SameLine();
+                ImGui::Checkbox("Invert up / down", &d.mouseRotateInvertY);
+                ImGui::EndDisabled();
                 ImGui::Combo("Mouse wheel", &d.wheelZoom, "Off\0Zoom\0Inverted zoom\0");
                 Help("In the global view the wheel zooms the view straight in and out (it stays in the global view; "
                      "the camera keeps its angle). In the close camera it zooms like the right stick.");
+                ImGui::BeginDisabled(d.wheelZoom == 0);
+                ImGui::SliderInt("Zoom speed", &d.wheelZoomSpeed, 25, 300, "%d %%");
+                Help("Zoom per wheel notch in the global view (100 %: 10 % closer or farther per notch).");
+                ImGui::Checkbox("Remember the zoom", &d.rememberZoom);
+                Help("Keeps the global view's zoom between sessions.");
+                ImGui::EndDisabled();
                 Section("CAMERA AND CONTROLLER");
                 ImGui::Checkbox("Prefer the global view (RB camera)", &d.globalView);
                 Help("Keeps the far camera, an overview that suits a PC screen and the mouse. When the game returns to the close "

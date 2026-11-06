@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <mutex>
+#include <thread>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -27,7 +28,8 @@ bool g_global = false;
 // Global view zoom: target set by the wheel, current eased towards it.
 constexpr float kZoomMin = 0.4f, kZoomMax = 1.6f, kZoomStep = 0.9f;
 float g_zoomTarget = 1.0f, g_zoom = 1.0f;
-ULONGLONG g_zoomTick = 0;
+ULONGLONG g_zoomTick = 0, g_zoomChanged = 0;
+bool g_zoomLoaded = false;
 ULONGLONG g_closeSince = 0, g_lastInjected = 0, g_lastLook = 0, g_lastFrame = 0;
 uint16_t g_previousButtons = 0;
 }
@@ -76,13 +78,35 @@ bool InGlobalView()
 }
 void ZoomNotches(float notches)
 {
+    const float speed = settings::Get().wheelZoomSpeed / 100.0f;
     std::lock_guard lock(g_mutex);
-    g_zoomTarget = std::clamp(g_zoomTarget * std::pow(kZoomStep, notches), kZoomMin, kZoomMax);
+    g_zoomTarget = std::clamp(g_zoomTarget * std::pow(kZoomStep, notches * speed), kZoomMin, kZoomMax);
+    g_zoomChanged = GetTickCount64();
 }
 float GlobalZoom()
 {
+    const auto d = settings::Get();
     std::lock_guard lock(g_mutex);
     const ULONGLONG now = GetTickCount64();
+    // The remembered zoom (F1 > Controls > Remember the zoom), once.
+    if (!g_zoomLoaded)
+    {
+        g_zoomLoaded = true;
+        if (d.rememberZoom) g_zoom = g_zoomTarget = std::clamp(d.globalZoom / 100.0f, kZoomMin, kZoomMax);
+    }
+    // Saved 2 s after the wheel stops (off the game thread).
+    if (g_zoomChanged && now - g_zoomChanged > 2000)
+    {
+        g_zoomChanged = 0;
+        const int percent = int(std::lround(g_zoomTarget * 100.0f));
+        if (d.rememberZoom && percent != d.globalZoom)
+        {
+            auto updated = d;
+            updated.globalZoom = percent;
+            settings::Set(updated);
+            std::thread([percent] { const bool saved = settings::Save(); kernel::Log("camera: global view zoom %d%% %s", percent, saved ? "saved" : "not saved"); }).detach();
+        }
+    }
     // FD_CAMERA_ZOOM_TEST=<s>:<factor>;...: diagnostic zoom targets over time.
     static const char* test = getenv("FD_CAMERA_ZOOM_TEST");
     static const ULONGLONG start = now;

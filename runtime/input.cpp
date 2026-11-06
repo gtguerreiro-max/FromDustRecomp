@@ -202,13 +202,17 @@ uint32_t GetState(uint32_t user, State& state) {
                 // cursor being clipped / warped, not a hand movement.
                 if (std::abs(dx) > 600 || std::abs(dy) > 400) dx = dy = 0;
                 if (std::abs(dx) >= 3 || std::abs(dy) >= 3) g_lastKeyboard = true;
+                // Mouse rotation: F1 > Controls > Rotation speed / invert.
+                const float rotate = 40000.0f * (d.mouseRotateSpeed / 100.0f) / elapsed;
+                const float rotateX = dx * rotate * (d.mouseRotateInvertX ? -1.0f : 1.0f);
+                const float rotateY = -dy * rotate * (d.mouseRotateInvertY ? -1.0f : 1.0f);
                 if (turning) {
-                    state.pad.rightX = Axis(state.pad.rightX + dx * 40000.0f / elapsed);
-                    state.pad.rightY = Axis(state.pad.rightY - dy * 40000.0f / elapsed);
+                    state.pad.rightX = Axis(state.pad.rightX + rotateX);
+                    state.pad.rightY = Axis(state.pad.rightY + rotateY);
                 } else if (!d.mouseBreath && d.mouseCamera && (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) {
                     // Legacy mode: right-button drag turns the camera.
-                    state.pad.rightX = Axis(state.pad.rightX + dx * 40000.0f / elapsed);
-                    state.pad.rightY = Axis(state.pad.rightY - dy * 40000.0f / elapsed);
+                    state.pad.rightX = Axis(state.pad.rightX + rotateX);
+                    state.pad.rightY = Axis(state.pad.rightY + rotateY);
                 }
                 if (pointing && !absolute && !turning) {
                     // Grabbed: the cursor update hook moves the Breath by this much on screen.

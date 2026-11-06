@@ -204,8 +204,8 @@ bool EdgeScroll(float liveX, float liveY, float& x, float& y, float z)
     if ((cx != sx || cy != sy) && Unproject(cx, cy, z, rx, ry)) { x = rx; y = ry; sx = cx; sy = cy; }
     // Inside the edge band, scroll towards it: up to half a view width per
     // second at the edge (x Edge scroll speed), carrying the Breath.
-    constexpr float band = 0.08f;
-    auto push = [](float s) { return s < band ? -(band - s) / band : s > 1 - band ? (s - (1 - band)) / band : 0.0f; };
+    const float band = d.edgeScrollBand / 100.0f;
+    auto push = [band](float s) { return s < band ? -(band - s) / band : s > 1 - band ? (s - (1 - band)) / band : 0.0f; };
     const float px = push(sx), py = push(sy);
     if ((px != 0 || py != 0) && perWidth > 0 && dt > 0)
     {

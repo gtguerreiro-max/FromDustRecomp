@@ -1682,3 +1682,20 @@ wheel still zooms like the stick.
   taps. `FD_CAMERA_ZOOM_TEST=<s>:<factor>;...` forces factors;
   `FD_TRACE_CAMERA_DISTANCE=1` logs the camera height, the horizontal
   distance and the zoom. The zoom is not saved between sessions.
+
+## Mouse settings — 2026-11-06
+
+F1 > Controls > Mouse, all live and saved in [Controls]:
+- Breath sensitivity (`MouseSpeed`, existing), edge scroll speed
+  (`EdgeScrollSpeed`) and the edge zone (`EdgeScrollBand`, 3-15 % of the
+  screen, 8 by default).
+- Camera rotation by mouse drag: its own speed (`MouseRotateSpeed`, the stick
+  Camera sensitivity still applies on top) and inversion per axis
+  (`MouseRotateInvertX` / `MouseRotateInvertY`).
+- Wheel zoom of the global view: speed per notch (`WheelZoomSpeed`, 100 % =
+  10 % per notch) and "Remember the zoom" (`RememberZoom`, `GlobalZoom` in
+  percent): the zoom is loaded once at the first camera frame and saved 2 s
+  after the wheel stops (off the game thread). Checked: a session starting
+  with GlobalZoom=80 and 5 notches in saved 47.
+- `tools/test_frame_generation.ps1 -Settings -SettingsTab controls` opens the
+  F1 menu on that tab.

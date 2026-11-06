@@ -4,7 +4,7 @@
 # Usage: tools/test_frame_generation.ps1 [-Frames 1..3] [-Dlaa 1] [-RunSeconds 150]
 param([ValidateRange(0,3)][int]$Frames=1, [ValidateRange(0,5)][int]$Dlaa=1,
       [ValidateRange(20,1800)][int]$RunSeconds=150, [int[]]$CaptureAt=@(70,110,140),
-      [string]$Schedule='10:0010:600', [string]$OutputDirectory='', [switch]$Settings, [string]$Graphics='', [int]$GuestCaptureAt=0, [int]$DumpAt=0, [int]$FrameLimit=30, [int]$VblankHz=0, [switch]$KeepSave, [string]$Renderer='native', [switch]$NativeProfile, [int]$VSync=1, [string]$SaveFrom='')
+      [string]$Schedule='10:0010:600', [string]$OutputDirectory='', [switch]$Settings, [string]$Graphics='', [int]$GuestCaptureAt=0, [int]$DumpAt=0, [int]$FrameLimit=30, [int]$VblankHz=0, [switch]$KeepSave, [string]$Renderer='native', [switch]$NativeProfile, [int]$VSync=1, [string]$SaveFrom='', [string]$SettingsTab='graphics')
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 if(!$OutputDirectory){$OutputDirectory=Join-Path $root 'build\frame-generation'}
@@ -12,7 +12,7 @@ $output=[IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $output -Force|Out-Null
 foreach($n in 'FD_NATIVE_DUMP_AT','FD_NATIVE_PROFILE','FD_REPLAY_DEBUG','FD_NATIVE_UPSCALER','FD_CAPTURE','FD_CAPTURE_SECONDS',
     'FD_SETTINGS_OPEN','FD_SETTINGS_TAB','FD_HIDE_WINDOW','FD_FRAME_GENERATION'){Remove-Item "Env:$n" -ErrorAction SilentlyContinue}
-if($Settings){$env:FD_SETTINGS_OPEN='1';$env:FD_SETTINGS_TAB='graphics'}
+if($Settings){$env:FD_SETTINGS_OPEN='1';$env:FD_SETTINGS_TAB=$SettingsTab}
 if($GuestCaptureAt){$env:FD_CAPTURE=Join-Path $output 'guest.png';$env:FD_CAPTURE_SECONDS=[string]$GuestCaptureAt}
 if($DumpAt){$env:FD_NATIVE_DUMP_AT=[string]$DumpAt}
 if($VblankHz){$env:FD_VBLANK_HZ=[string]$VblankHz}else{Remove-Item Env:FD_VBLANK_HZ -ErrorAction SilentlyContinue}

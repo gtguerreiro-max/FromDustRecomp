@@ -36,6 +36,10 @@ void Normalize(Data& d) {
     d.inputMode = std::clamp(d.inputMode, 0, 2);
     d.mouseMode = std::clamp(d.mouseMode, 0, 1);
     d.edgeScrollSpeed = std::clamp(d.edgeScrollSpeed, 25, 300);
+    d.edgeScrollBand = std::clamp(d.edgeScrollBand, 3, 15);
+    d.mouseRotateSpeed = std::clamp(d.mouseRotateSpeed, 25, 300);
+    d.wheelZoomSpeed = std::clamp(d.wheelZoomSpeed, 25, 300);
+    d.globalZoom = std::clamp(d.globalZoom, 40, 160);
     d.sensitivity = std::clamp(d.sensitivity, 25, 300);
     d.deadzone = std::clamp(d.deadzone, 0, 30);
     d.volume = std::clamp(d.volume, 0, 100);
@@ -83,6 +87,13 @@ void Load(const std::filesystem::path& path) {
     d.globalView = read(L"Controls", L"GlobalView", d.globalView) != 0;
     d.edgeScroll = read(L"Controls", L"EdgeScroll", d.edgeScroll) != 0;
     d.edgeScrollSpeed = read(L"Controls", L"EdgeScrollSpeed", d.edgeScrollSpeed);
+    d.edgeScrollBand = read(L"Controls", L"EdgeScrollBand", d.edgeScrollBand);
+    d.mouseRotateSpeed = read(L"Controls", L"MouseRotateSpeed", d.mouseRotateSpeed);
+    d.mouseRotateInvertX = read(L"Controls", L"MouseRotateInvertX", d.mouseRotateInvertX) != 0;
+    d.mouseRotateInvertY = read(L"Controls", L"MouseRotateInvertY", d.mouseRotateInvertY) != 0;
+    d.wheelZoomSpeed = read(L"Controls", L"WheelZoomSpeed", d.wheelZoomSpeed);
+    d.rememberZoom = read(L"Controls", L"RememberZoom", d.rememberZoom) != 0;
+    d.globalZoom = read(L"Controls", L"GlobalZoom", d.globalZoom);
     d.mouseSpeed = read(L"Controls", L"MouseSpeed", d.mouseSpeed);
     d.mouseButtons = read(L"Controls", L"MouseButtons", d.mouseButtons) != 0;
     d.cameraButton = read(L"Controls", L"CameraButton", d.cameraButton);
@@ -139,6 +150,13 @@ bool Save() {
     write(L"Controls", L"GlobalView", d.globalView);
     write(L"Controls", L"EdgeScroll", d.edgeScroll);
     write(L"Controls", L"EdgeScrollSpeed", d.edgeScrollSpeed);
+    write(L"Controls", L"EdgeScrollBand", d.edgeScrollBand);
+    write(L"Controls", L"MouseRotateSpeed", d.mouseRotateSpeed);
+    write(L"Controls", L"MouseRotateInvertX", d.mouseRotateInvertX);
+    write(L"Controls", L"MouseRotateInvertY", d.mouseRotateInvertY);
+    write(L"Controls", L"WheelZoomSpeed", d.wheelZoomSpeed);
+    write(L"Controls", L"RememberZoom", d.rememberZoom);
+    write(L"Controls", L"GlobalZoom", d.globalZoom);
     write(L"Controls", L"MouseSpeed", d.mouseSpeed);
     write(L"Controls", L"MouseButtons", d.mouseButtons);
     write(L"Controls", L"CameraButton", d.cameraButton);

@@ -57,6 +57,13 @@ struct Data {
     bool globalView = true; // keep the far (RB) camera unless the player leaves it
     bool edgeScroll = true; // direct mouse: the camera moves only while the Breath is at the screen edges
     int edgeScrollSpeed = 100;
+    int edgeScrollBand = 8;      // edge band, percent of the screen
+    int mouseRotateSpeed = 100;  // camera rotation by mouse drag, percent
+    bool mouseRotateInvertX = false;
+    bool mouseRotateInvertY = false;
+    int wheelZoomSpeed = 100;    // global view zoom per wheel notch, percent of 10 %
+    bool rememberZoom = true;    // keep the global view zoom between sessions
+    int globalZoom = 100;        // the remembered zoom, percent of the game's distance
     int mouseMode = 0; // 0 direct (the Breath moves with the mouse on screen), 1 classic (mouse as stick)
     int mouseSpeed = 100;
     bool mouseButtons = true;
