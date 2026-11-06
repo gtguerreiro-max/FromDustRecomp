@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <map>
+#include <unordered_map>
 #include <optional>
 #include <stdexcept>
 
@@ -35,6 +36,7 @@ struct Pending
     const NativeShader* shader = nullptr;
     std::string pixelShader;
     std::array<uint32_t,1024> vertexConstants, pixelConstants;
+    uint16_t vsConstFirst=0, vsConstEnd=256, psConstFirst=0, psConstEnd=256;
     std::array<uint32_t,192> fetches;
     std::optional<Draw> state;
     std::string stateError;
@@ -101,7 +103,11 @@ struct LiveGeometryCapture::Impl
     bool pullPrimary=false;
     std::function<void(Draw&)> onCommand;
     std::function<void(GeometryBatch&)> onFrame;
-    std::map<std::pair<uint32_t,uint32_t>,uint64_t> watchedStreams;
+    // Per watched range: its revision and the write generation it was read
+    // at (unchanged generation: no page changed, skip the page scan).
+    struct WatchedRange { uint64_t revision = UINT64_MAX, generation = UINT64_MAX; };
+    struct RangeHash { size_t operator()(const std::pair<uint32_t,uint32_t>& key) const { return std::hash<uint64_t>{}(uint64_t(key.first) << 32 | key.second); } };
+    std::unordered_map<std::pair<uint32_t,uint32_t>,WatchedRange,RangeHash> watchedStreams;
     // FD_NATIVE_PROFILE: CPU cost of the live collection, per frame.
     bool profile=getenv("FD_NATIVE_PROFILE")!=nullptr;
     double profileMs[4]{}; // begin, build geometry, commit, process other
@@ -112,13 +118,16 @@ struct LiveGeometryCapture::Impl
         batch.streams.persistent=persistentStreams;
         persistentStreams->NextFrame();
         batch.streams.revision=[this](uint32_t address,uint32_t size) {
-            auto [at,inserted]=watchedStreams.try_emplace({address,size},UINT64_MAX);
+            const uint64_t generation=xenia::PhysicalWriteGeneration();
+            auto [at,inserted]=watchedStreams.try_emplace({address,size});
+            if(!inserted&&at->second.generation==generation)return at->second.revision;
             auto revision=xenia::PhysicalRevision(address,size);
-            if(inserted||at->second!=revision)
+            if(inserted||at->second.revision!=revision)
             {
                 xenia::WatchPhysical(address,size);
-                revision=xenia::PhysicalRevision(address,size);at->second=revision;
+                revision=xenia::PhysicalRevision(address,size);
             }
+            at->second={revision,generation};
             return revision;
         };
     }
@@ -277,8 +286,11 @@ struct LiveGeometryCapture::Impl
             }
             vertexBytes += geometry.vertices.size(); indexBytes += geometry.IndexBytes().size();
             const auto commitStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-            auto& command = batch.commands.emplace_back(pending.shader->name, pending.pixelShader,
-                pending.vertexConstants, pending.pixelConstants, *pending.state, std::move(geometry));
+            auto& draw = *pending.state;
+            draw.vsConstFirst = pending.vsConstFirst; draw.vsConstEnd = pending.vsConstEnd;
+            draw.psConstFirst = pending.psConstFirst; draw.psConstEnd = pending.psConstEnd;
+            auto& command = batch.commands.emplace_back(GeometryBatch::Command::UsedConstants{}, pending.shader->name, pending.pixelShader,
+                pending.vertexConstants, pending.pixelConstants, draw, std::move(geometry));
             command.state.regs[VGT_INDX_OFFSET]=baseVertex;
             Notify(command);
             if(profile)profileMs[2]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-commitStart).count();
@@ -368,8 +380,17 @@ void LiveGeometryCapture::Begin(uint32_t device, audit::DrawKind kind, const Nat
             memcpy(out, in, count * 4);
             for (size_t i = 0; i < count; ++i) out[i] = _byteswap_ulong(out[i]);
         };
-        readWords(pending.vertexConstants.data(), mem::Ptr<uint8_t>(device + 0x780), 1024);
-        readWords(pending.pixelConstants.data(), mem::Ptr<uint8_t>(device + 0x1780), 1024);
+        // Only the constant registers the shaders read (FD_FULL_CONSTANTS=1:
+        // all of them).
+        static const bool fullConstants = getenv("FD_FULL_CONSTANTS") != nullptr;
+        pending.vsConstFirst = fullConstants || !shader ? 0 : shader->constantFirst;
+        pending.vsConstEnd = fullConstants || !shader ? 256 : shader->constantEnd;
+        pending.psConstFirst = fullConstants ? 0 : pixelShader ? pixelShader->constantFirst : 0;
+        pending.psConstEnd = fullConstants ? 256 : pixelShader ? pixelShader->constantEnd : 0;
+        readWords(pending.vertexConstants.data() + pending.vsConstFirst * 4, mem::Ptr<uint8_t>(device + 0x780 + pending.vsConstFirst * 16),
+            size_t(pending.vsConstEnd - pending.vsConstFirst) * 4);
+        readWords(pending.pixelConstants.data() + pending.psConstFirst * 4, mem::Ptr<uint8_t>(device + 0x1780 + pending.psConstFirst * 16),
+            size_t(pending.psConstEnd - pending.psConstFirst) * 4);
         readWords(pending.fetches.data(), mem::Ptr<uint8_t>(device + 0x480), 192);
         const uint32_t object = mem::Read32(device + 0x3290);
         if (shader && Readable(object, 0x24))

@@ -19,6 +19,9 @@ void PrepareHostWrite(uint32_t address, uint32_t length);
 void WatchPhysical(uint32_t address,uint32_t length);
 uint64_t PhysicalRevision(uint32_t address,uint32_t length);
 uint64_t PhysicalWriteSerial();
+// Changes after every recorded write: a PhysicalRevision computed after
+// reading a generation stays valid while the generation is the same.
+uint64_t PhysicalWriteGeneration();
 ID3D12Device* NativeDevice();
 bool PresentNative(gpu::native::Renderer& renderer);
 }

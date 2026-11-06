@@ -51,6 +51,9 @@ std::mutex g_interruptMutex;
 thread_local xe::kernel::XThread* g_hostThread = nullptr;
 std::chrono::nanoseconds g_frameInterval{};
 std::atomic<uint64_t> g_writeSerial{0};
+// Bumped after each page revision is stored: a revision read while this is
+// unchanged is still current (g_writeSerial is bumped before the store).
+std::atomic<uint64_t> g_writeGeneration{0};
 std::array<std::atomic<uint64_t>,0x20000> g_pageRevisions{};
 
 void PaceFrame() {
@@ -177,6 +180,7 @@ bool Memory::OnPhysicalWrite(uint32_t address, uint32_t length) {
   for (uint32_t page = first; page < end; ++page) {
     if (!watched_pages_[page]) continue;
     g_pageRevisions[page].store(++g_writeSerial,std::memory_order_release);
+    g_writeGeneration.fetch_add(1,std::memory_order_release);
     for (const auto* entry : invalidation_callbacks_)
       entry->first(entry->second, page * 0x1000, 0x1000, true);
     if (!mem::ProtectPhysical(page*0x1000,0x1000,false))
@@ -237,6 +241,7 @@ uint64_t PhysicalRevision(uint32_t address,uint32_t length) {
   return revision;
 }
 uint64_t PhysicalWriteSerial(){return g_writeSerial.load(std::memory_order_acquire);}
+uint64_t PhysicalWriteGeneration(){return g_writeGeneration.load(std::memory_order_acquire);}
 bool Initialize() {
 #ifdef FD_NATIVE_RENDERER
   if(!gpu::native::Renderer::PrepareDeviceCreation())return false;

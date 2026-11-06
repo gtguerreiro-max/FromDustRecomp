@@ -1517,3 +1517,41 @@ context words captured instead of the whole 4 KB `context` (most of it
 zero-filled per draw). Also left on the worker: indices re-uploaded every
 frame although cached (11 MB), and the GPU wait at the end of each frame
 (~2.8 ms, the GPU starts only after the whole frame is recorded).
+
+## Frame cost round 3: less per draw — 2026-11-06
+
+Same scene and settings as round 2. Play with no limit ~70 -> ~84 FPS;
+DLAA + DLSS FG 2x ~73 -> ~82 game FPS (~165 shown). Even pacing now holds
+60 through the whole first-level session, the village cut scene included
+(300 of 300 world steps on screen for exactly 2 frames in every 10 s
+window; it used to drop to 30 there). Game thread capture per frame:
+begin 0.85 -> 0.54, geometry 2.45 -> 1.57, commit 2.0 -> 1.30 ms.
+- Float constants: each shader's read range is computed at catalog load
+  (`ConstantRange` in `shader_catalog.cpp`, from its cbuffer declarations;
+  `NAME(k)` with a literal k reads register R + k, any other index keeps
+  everything from R on; 30 of 1108 shaders need the full bank). The capture
+  reads, the command copies and the renderer uploads only that range
+  (`Draw::vsConst*` / `psConst*`); the terrain passes read ~11 of 256 VS
+  registers. `FD_FULL_CONSTANTS=1` captures everything,
+  `FD_POISON_CONSTANTS=1` fills the unread registers with NaN (played
+  through the menus, play and the cut scene with no visible change),
+  `FD_TRACE_CONSTANT_RANGES=1` prints the ranges.
+- Context registers: `Draw::context` keeps only the 147 words the capture
+  reads (`ContextRegisters`, was 1024 words, mostly zero); replays still
+  store all 1024.
+- Write-watch revisions: a range's revision is memoised with the write
+  generation it was read at (`PhysicalWriteGeneration`, bumped after each
+  page revision is stored; `PhysicalWriteSerial` is bumped before the store,
+  so a memo keyed on it could keep a stale revision; the texture memo in
+  `live_resources.cpp` now uses the generation too). The range map is
+  unordered.
+- `SnapshotDeviceState`: unchecked big-endian loads after its size check.
+- `BuildGeometry`: vertex fetch decode cached per distinct microcode
+  (`CachedFetches`, compared in full), scratch vectors reused.
+- Tried and reverted: a pooled payload handed over by pointer (round 2).
+
+Checks: `fd_native_frame_tests` (4 frames / 3160 draws, exact RGB),
+`fd_native_geometry_tests` (3160 draws match vertices, indices and pulled
+streams), the native unit tests, and sessions in the default mode and with
+DLAA + FG. `DrawView`'s iterator gained the traits the tests need (they no
+longer compiled after round 2).

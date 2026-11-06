@@ -1,7 +1,11 @@
 #include "shader_catalog.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <tuple>
 #include <fstream>
 #include <set>
 #include <regex>
@@ -19,6 +23,73 @@ uint32_t BigWord(std::span<const uint8_t> bytes, size_t offset)
 bool Equal(std::span<const uint8_t> a, std::span<const uint8_t> b)
 {
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+}
+// The float constant registers a shader reads, [first, end) of the 256 of
+// its stage, from its cbuffer declarations ("float4 NAME[n] :
+// packoffset(cR);") and the indices it uses: NAME(k) with a literal k reads
+// R + k; any other index can reach every register from R on (the accessor
+// macros allow indices past the declared size). Anything unexpected keeps
+// the full range. Only the reads matter: the capture and the upload then
+// copy just this range of each draw's 4 KB bank.
+std::pair<uint16_t,uint16_t> ConstantRange(const std::string& source,ShaderStage stage)
+{
+    const char* const block=stage==ShaderStage::Vertex?"cbuffer VertexShaderConstants":"cbuffer PixelShaderConstants";
+    const size_t at=source.find(block);
+    if(at==std::string::npos)return{0,0}; // no float constants at all
+    const size_t open=source.find('{',at),close=open==std::string::npos?open:source.find("};",open);
+    if(open==std::string::npos||close==std::string::npos)return{0,256};
+    auto identifier=[](char c){return std::isalnum(static_cast<unsigned char>(c))||c=='_';};
+    unsigned lo=256,hi=0;
+    for(size_t line=open+1;line<close;)
+    {
+        size_t eol=source.find('\n',line);
+        if(eol==std::string::npos||eol>close)eol=close;
+        const std::string text=source.substr(line,eol-line);
+        line=eol+1;
+        const size_t pack=text.find("packoffset(c");
+        if(pack==std::string::npos)continue;
+        // "type name[count] : packoffset(cR...)"
+        size_t p=text.find_first_not_of(" \t");
+        const size_t typeEnd=text.find_first_of(" \t",p);
+        if(p==std::string::npos||typeEnd==std::string::npos)return{0,256};
+        if(text.compare(p,typeEnd-p,"float4"))return{0,256};
+        p=text.find_first_not_of(" \t",typeEnd);
+        size_t nameEnd=p;
+        while(nameEnd<text.size()&&identifier(text[nameEnd]))++nameEnd;
+        if(nameEnd==p)return{0,256};
+        const std::string name=text.substr(p,nameEnd-p);
+        unsigned count=0;
+        if(nameEnd<text.size()&&text[nameEnd]=='[')count=unsigned(std::strtoul(text.c_str()+nameEnd+1,nullptr,10));
+        const unsigned reg=unsigned(std::strtoul(text.c_str()+pack+12,nullptr,10));
+        if(reg>=256)return{0,256};
+        for(size_t use=source.find(name,close);use!=std::string::npos;use=source.find(name,use+name.size()))
+        {
+            if(use>0&&identifier(source[use-1]))continue;
+            size_t after=use+name.size();
+            if(after<source.size()&&identifier(source[after]))continue;
+            while(after<source.size()&&(source[after]==' '||source[after]=='\t'))++after;
+            if(after<source.size()&&source[after]=='(')
+            {
+                int depth=0;size_t end=after;
+                for(;end<source.size();++end){if(source[end]=='(')++depth;else if(source[end]==')'&&--depth==0)break;}
+                if(end>=source.size())return{0,256};
+                std::string argument=source.substr(after+1,end-after-1);
+                argument.erase(0,argument.find_first_not_of(" \t"));
+                argument.erase(argument.find_last_not_of(" \t")+1);
+                const bool literal=!argument.empty()&&argument.size()<4&&std::all_of(argument.begin(),argument.end(),[](char c){return c>='0'&&c<='9';});
+                if(literal&&count)
+                {
+                    const unsigned index=reg+unsigned(std::stoul(argument));
+                    if(index>=256)return{0,256};
+                    lo=(std::min)(lo,index);hi=(std::max)(hi,index+1);
+                }
+                else{lo=(std::min)(lo,reg);hi=256;}
+            }
+            else{lo=(std::min)(lo,reg);hi=(std::max)(hi,(std::min)(256u,reg+(count?count:1)));}
+        }
+    }
+    if(hi<=lo)return{0,0};
+    return{uint16_t(lo),uint16_t(hi)};
 }
 uint32_t TextureMask(const std::string& source)
 {
@@ -97,6 +168,12 @@ ShaderCatalog ShaderCatalog::Parse(std::span<const uint8_t> bytes)
         if (std::memcmp(dxil.data(), "DXBC", 4)) throw std::runtime_error("Invalid native shader DXIL container");
         shader.source.assign(reinterpret_cast<const char*>(source.data()), source.size());
         shader.textureMask=TextureMask(shader.source);
+        if(shader.stage==ShaderStage::Vertex||shader.stage==ShaderStage::Pixel)
+            std::tie(shader.constantFirst,shader.constantEnd)=ConstantRange(shader.source,shader.stage);
+        // FD_TRACE_CONSTANT_RANGES=1: each shader's constant range at load.
+        static const bool traceRanges=std::getenv("FD_TRACE_CONSTANT_RANGES")!=nullptr;
+        if(traceRanges)std::fprintf(stderr,"constant range %s %s: %u-%u\n",shader.name.c_str(),shader.stage==ShaderStage::Vertex?"vs":"ps",
+            unsigned(shader.constantFirst),unsigned(shader.constantEnd));
         shader.dxil.assign(dxil.begin(), dxil.end());
         result.namedShaders.emplace(shader.name,result.shaders.size());
         result.shaders.push_back(std::move(shader));

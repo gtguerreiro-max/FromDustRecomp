@@ -1,5 +1,8 @@
 #pragma once
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <span>
 #include <string>
 #include <vector>
@@ -20,6 +23,41 @@ enum Reg
     PA_SU_VTX_CNTL, RB_STENCILREFMASK, RB_STENCILREFMASK_BF,
     RB_BLEND_RED, RB_BLEND_GREEN, RB_BLEND_BLUE, RB_BLEND_ALPHA,
     kRegCount
+};
+
+// The context registers 0x2000-0x23FF of a draw, indexed from 0x2000, keeping
+// only the ones the live capture reads from the device (SnapshotDeviceState:
+// 147 words instead of 1024; reads of any other register return 0 and
+// writes to them are dropped). A draw is copied a few times per frame, ~1400
+// draws in play, and the full block was mostly zeros.
+class ContextRegisters
+{
+public:
+    static constexpr uint32_t kRegisters = 1024;
+    // Kept ranges [first, first + count), relative to 0x2000.
+    struct Range { uint16_t first, count; };
+    static constexpr Range kKept[] = {
+        {0x000,16}, {0x081,2}, {0x100,21}, {0x180,5}, {0x200,12},
+        {0x280,21}, {0x300,38}, {0x380,8}, {0x388,24}
+    };
+    static constexpr uint32_t kWords = 16 + 2 + 21 + 5 + 12 + 21 + 38 + 8 + 24;
+    uint32_t& operator[](uint32_t index) { const int slot = Slot(index); return slot >= 0 ? words[slot] : (dropped = 0); }
+    uint32_t operator[](uint32_t index) const { const int slot = Slot(index); return slot >= 0 ? words[slot] : 0; }
+    static int Slot(uint32_t index)
+    {
+        static const auto table = [] {
+            std::array<int16_t, kRegisters> result;
+            result.fill(-1);
+            int16_t next = 0;
+            for (const auto& range : kKept)
+                for (uint32_t k = 0; k < range.count; ++k) result[range.first + k] = next++;
+            return result;
+        }();
+        return index < kRegisters ? table[index] : -1;
+    }
+private:
+    uint32_t words[kWords] = {};
+    uint32_t dropped = 0;
 };
 
 struct Draw
@@ -47,7 +85,7 @@ struct Draw
     bool hasFetchMetadata = false;
     uint32_t textureFetches[32][6] = {};
     bool hasContext = false;
-    uint32_t context[1024] = {};
+    ContextRegisters context;
     bool hasPixelCenter = false;
     bool hasBlendConstants = false;
     bool clear = false;
@@ -63,6 +101,9 @@ struct Draw
     bool hasStencilState = false;
     // CPU writes supersede an earlier GPU resolve until the next copy.
     uint32_t cpuTextureMask=0;
+    // Float constant registers the shaders read ([first, end) of 256): only
+    // these are captured and uploaded; the rest of the banks is stale.
+    uint16_t vsConstFirst=0,vsConstEnd=256,psConstFirst=0,psConstEnd=256;
 };
 
 
@@ -75,6 +116,7 @@ public:
     DrawView() = default;
     DrawView(std::span<const Draw> draws) : base(reinterpret_cast<const uint8_t*>(draws.data())), count(draws.size()), stride(sizeof(Draw)) {}
     DrawView(const std::vector<Draw>& draws) : DrawView(std::span<const Draw>(draws)) {}
+    template <size_t N> DrawView(const std::array<Draw, N>& draws) : DrawView(std::span<const Draw>(draws)) {}
     DrawView(const Draw* first, size_t count, size_t stride) : base(reinterpret_cast<const uint8_t*>(first)), count(count), stride(stride) {}
     size_t size() const { return count; }
     bool empty() const { return !count; }
@@ -82,11 +124,17 @@ public:
     size_t IndexOf(const Draw& draw) const { return size_t(reinterpret_cast<const uint8_t*>(&draw) - base) / stride; }
     struct Iterator
     {
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Draw;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const Draw*;
+        using reference = const Draw&;
         const uint8_t* at;
         size_t stride;
         const Draw& operator*() const { return *reinterpret_cast<const Draw*>(at); }
         const Draw* operator->() const { return reinterpret_cast<const Draw*>(at); }
         Iterator& operator++() { at += stride; return *this; }
+        Iterator operator++(int) { Iterator before = *this; at += stride; return before; }
         bool operator==(const Iterator& other) const { return at == other.at; }
         bool operator!=(const Iterator& other) const { return at != other.at; }
     };

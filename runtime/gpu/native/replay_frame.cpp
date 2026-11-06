@@ -127,7 +127,7 @@ std::vector<Draw> ParseReplay(const std::vector<uint8_t>& file)
         }
         if (fetchMetadata)
             for (auto& fetch : d.textureFetches) for (uint32_t& word : fetch) word = u32();
-        if (fullContext) for (uint32_t& word : d.context) word = u32();
+        if (fullContext) for (uint32_t k = 0; k < ContextRegisters::kRegisters; ++k) d.context[k] = u32();
         draws.push_back(d);
     }
     if (at != file.size()) throw std::runtime_error("Unexpected trailing replay data");
@@ -231,7 +231,7 @@ void ReplayFrame::Save(const FrameInput& frame,const std::string& directory)
         text(draw.ps);payload(draw.psConstants,4096);payload(draw.bases,sizeof(draw.bases));payload(draw.swizzles,sizeof(draw.swizzles));
         payload(draw.boolLoop,sizeof(draw.boolLoop));payload(draw.vertexFetch,512);payload(draw.expAdjust,sizeof(draw.expAdjust));
         payload(draw.fetchFormats,sizeof(draw.fetchFormats));payload(draw.samplerStates,sizeof(draw.samplerStates));
-        payload(draw.textureFetches,sizeof(draw.textureFetches));payload(draw.context,sizeof(draw.context));
+        payload(draw.textureFetches,sizeof(draw.textureFetches));{uint32_t context[ContextRegisters::kRegisters];for(uint32_t k=0;k<ContextRegisters::kRegisters;++k)context[k]=draw.context[k];payload(context,sizeof(context));}
     }
     save("replay.bin",bytes);save("textures.rgba",frame.textures);save("mips.rgba",frame.mips);save("cubes.rgba",frame.cubes);save("streams.bin",frame.streams);
     save("volumes.rgba",frame.volumes);

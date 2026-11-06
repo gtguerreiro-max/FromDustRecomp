@@ -2196,8 +2196,14 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         memcpy(indexMap + indexAt, d.indices, d.indexBytes);
         const auto indexCopied=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         uint8_t* drawConstants = constantMap + kPerDraw * (i + 1);
-        memcpy(drawConstants, d.constants, 4096);
-        memcpy(drawConstants + 4096, d.psConstants, 4096);
+        // Only the registers the shaders read. FD_POISON_CONSTANTS=1 fills the
+        // rest with NaN: a shader that reads outside its range shows it.
+        static const bool poisonConstants = CachedEnv("FD_POISON_CONSTANTS") != nullptr;
+        if (poisonConstants) std::fill_n(reinterpret_cast<uint32_t*>(drawConstants), 2048, 0x7FC00000u);
+        if (d.vsConstEnd > d.vsConstFirst)
+            memcpy(drawConstants + d.vsConstFirst * 16, d.constants + d.vsConstFirst * 16, size_t(d.vsConstEnd - d.vsConstFirst) * 16);
+        if (d.psConstEnd > d.psConstFirst && d.psConstants)
+            memcpy(drawConstants + 4096 + d.psConstFirst * 16, d.psConstants + d.psConstFirst * 16, size_t(d.psConstEnd - d.psConstFirst) * 16);
         uint8_t* shared = drawConstants + 8192;
         memset(shared, 0, kSharedSize);
         if(profile)

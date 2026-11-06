@@ -44,7 +44,7 @@ void LiveResources::Bind(Draw& draw,const ShaderCatalog& shaders)
         auto [at,inserted]=resources.try_emplace(key);
         auto& cached=at->second;
         if(inserted){cached.storage=DescribeTextureStorage(draw.textureFetches[slot]);Watch(cached.storage);++profileInserted;}
-        const uint64_t serial=xenia::PhysicalWriteSerial();
+        const uint64_t serial=xenia::PhysicalWriteGeneration();
         if(cached.checkedSerial!=serial){cached.checkedRevision=Revision(cached.storage);cached.checkedSerial=serial;}
         uint64_t revision=cached.checkedRevision;
         // The prompt atlas is decoded again when the prompt style changes

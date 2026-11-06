@@ -1,5 +1,7 @@
 #include "device_state.h"
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 namespace gpu::native
@@ -29,18 +31,22 @@ constexpr uint32_t registers[kRegCount] = {
 Draw SnapshotDeviceState(std::span<const uint8_t> device, const PacketState& packet)
 {
     if (device.size() < 0x2A70 || !packet.hasScissor) throw std::runtime_error("Incomplete native packet/device state");
+    // Every offset read below lies under 0x2A70 (checked above): unchecked
+    // big-endian loads (~380 per draw).
+    const uint8_t* const base = device.data();
+    auto Big = [base](size_t offset) { uint32_t value; std::memcpy(&value, base + offset, 4); return _byteswap_ulong(value); };
     Draw result;
     for (const auto& block : blocks)
-        for (uint32_t k=0;k<block.count;++k) result.context[block.first-0x2000+k]=Big(device,block.offset+k*4);
+        for (uint32_t k=0;k<block.count;++k) result.context[block.first-0x2000+k]=Big(block.offset+k*4);
     result.context[0x81]=packet.scissorTL;
     result.context[0x82]=packet.scissorBR;
     result.context[0x102]=packet.indexOffset;
     for (uint32_t k=0;k<kRegCount;++k) result.regs[k]=result.context[registers[k]-0x2000];
-    for (uint32_t k=0;k<40;++k) result.boolLoop[k]=Big(device,0x2780+k*4);
+    for (uint32_t k=0;k<40;++k) result.boolLoop[k]=Big(0x2780+k*4);
     for (uint32_t slot=0;slot<32;++slot)
     {
         auto* fetch=result.textureFetches[slot];
-        for (uint32_t k=0;k<6;++k) fetch[k]=Big(device,0x480+slot*24+k*4);
+        for (uint32_t k=0;k<6;++k) fetch[k]=Big(0x480+slot*24+k*4);
         const bool texture=(fetch[0]&3)==2;
         result.slots[slot]=-1;
         result.bases[slot]=texture ? fetch[1]&0x1FFFF000 : 0;

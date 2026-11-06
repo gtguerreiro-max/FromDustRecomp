@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <map>
+#include <unordered_map>
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
@@ -227,6 +228,28 @@ std::vector<Fetch> Fetches(std::span<const uint8_t> code,bool inheritMini=false)
     }
     return result;
 }
+// Fetches of a live vertex microcode snapshot, decoded once per distinct
+// code (a draw used to decode its shader's fetches again, with two
+// allocations; ~1400 draws per frame in play reuse a few dozen programs).
+// Keyed by the code's bytes, compared in full on a hit. Per thread; the
+// reference is valid until the next call on that thread.
+const std::vector<Fetch>& CachedFetches(std::span<const uint8_t> code,bool inheritMini)
+{
+    struct Entry { std::vector<uint8_t> code; bool inheritMini=false; std::vector<Fetch> fetches; };
+    thread_local std::unordered_map<uint64_t,Entry> cache;
+    uint64_t hash=1469598103934665603ull^uint64_t(inheritMini)^(uint64_t(code.size())<<1);
+    size_t at=0;
+    for(;at+8<=code.size();at+=8){uint64_t word;memcpy(&word,code.data()+at,8);hash=(hash^word)*1099511628211ull;}
+    for(;at<code.size();++at)hash=(hash^code[at])*1099511628211ull;
+    if(auto found=cache.find(hash);found!=cache.end()&&found->second.inheritMini==inheritMini&&
+        found->second.code.size()==code.size()&&std::equal(code.begin(),code.end(),found->second.code.begin()))
+        return found->second.fetches;
+    auto fetches=Fetches(code,inheritMini);
+    if(cache.size()>=1024)cache.clear();
+    auto& entry=cache[hash];
+    entry.code.assign(code.begin(),code.end());entry.inheritMini=inheritMini;entry.fetches=std::move(fetches);
+    return entry.fetches;
+}
 void Element(std::vector<uint8_t>& output, std::span<const uint8_t> bytes, size_t offset, const Fetch& fetch)
 {
     const auto format = Describe(fetch.format);
@@ -276,7 +299,7 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
     if (!count || count > 1u << 20 || (primitive != 4 && primitive != 8) || program.codeOffset > livePhysical.size())
         throw std::runtime_error("Unsupported native geometry draw");
     const bool pullPrimary=bounds&&bounds->pullPrimary&&primitive==4;
-    const auto live = Fetches(livePhysical.subspan(program.codeOffset),pullPrimary);
+    const auto& live = CachedFetches(livePhysical.subspan(program.codeOffset),pullPrimary);
     // FD_TRACE_VFETCH=<vertex shader>: debug, its live (patched) vertex fetches, once.
     static const char* const traceShader = getenv("FD_TRACE_VFETCH");
     if (traceShader && program.name == traceShader)
@@ -294,8 +317,11 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
         }
     }
     struct Input { Fetch fetch; std::string semantic; bool pulled; };
-    std::vector<Input> inputs;
-    std::vector<bool> used(live.size());
+    // Reused per thread (no allocations per draw once warm).
+    thread_local std::vector<Input> inputs;
+    thread_local std::vector<uint8_t> used;
+    inputs.clear();
+    used.assign(live.size(), 0);
     Geometry result;
     uint32_t primaryStride = 0;
     for (size_t ordinal = 0; ordinal < program.inputs.size(); ++ordinal)
@@ -336,6 +362,7 @@ Geometry BuildGeometry(const VertexProgram& program, std::span<const uint8_t> li
     const auto primary = read(constants[190] & 0x1FFFFFFC, primarySize);
     if (primary.size() < primarySize || primary.size() > 32u << 20) throw std::runtime_error("Missing primary vertex stream");
     result.stride = uint32_t(inputs.size()) * 16;
+    result.semantics.reserve(inputs.size());
     for (const auto& input : inputs) result.semantics.push_back(input.semantic);
     size_t vertexCount = primary.size() / primaryStride;
     const uint32_t unit = indexed&& !index32 ? 2 : 4;

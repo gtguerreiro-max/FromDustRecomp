@@ -15,6 +15,16 @@ struct GeometryBatch
         Command(const std::string& vs,const std::string& ps,const std::array<uint32_t,1024>& vertex,
             const std::array<uint32_t,1024>& pixel,const Draw& drawState,Geometry&& drawGeometry)
             :vertexShader(vs),pixelShader(ps),vertexConstants(vertex),pixelConstants(pixel),state(drawState),geometry(std::move(drawGeometry)){}
+        // Copies only the constant registers the shaders read (the ranges in
+        // drawState); the rest of the banks is left unset.
+        struct UsedConstants{};
+        Command(UsedConstants,const std::string& vs,const std::string& ps,const std::array<uint32_t,1024>& vertex,
+            const std::array<uint32_t,1024>& pixel,const Draw& drawState,Geometry&& drawGeometry)
+            :vertexShader(vs),pixelShader(ps),state(drawState),geometry(std::move(drawGeometry))
+        {
+            std::copy(vertex.begin()+state.vsConstFirst*4,vertex.begin()+state.vsConstEnd*4,vertexConstants.begin()+state.vsConstFirst*4);
+            std::copy(pixel.begin()+state.psConstFirst*4,pixel.begin()+state.psConstEnd*4,pixelConstants.begin()+state.psConstFirst*4);
+        }
         std::string vertexShader,pixelShader;
         std::array<uint32_t,1024> vertexConstants,pixelConstants;
         Draw state;
