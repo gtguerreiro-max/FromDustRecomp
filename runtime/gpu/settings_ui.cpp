@@ -322,13 +322,15 @@ private:
                          "Needs an NVIDIA RTX GPU and the native renderer. Applies immediately.");
                     if (!nativeBackend_) ImGui::TextDisabled("Available with the native renderer (Jogar-nativo.cmd).");
 #ifdef FD_NATIVE_RENDERER
-                    else if (d.upscaler == 0) ImGui::TextDisabled("Off: the game's own image.");
+                    else if (d.upscaler == 0) ImGui::TextDisabled("Off: the game's own image (with its 2× MSAA).");
                     else if (status.available == 0) ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "DLSS unavailable: needs an NVIDIA RTX GPU, a recent driver and nvngx_dlss.dll.");
                     else if (status.available < 0 || !status.sceneFound) ImGui::TextDisabled("Active once a 3D scene is shown (menus and videos are unchanged).");
                     else ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "%s active  |  %u×%u → %u×%u  |  %llu frames  |  camera %s",
                                             gpu::native::UpscalerModeName(status.active), status.renderWidth, status.renderHeight,
                                             status.outputWidth, status.outputHeight, (unsigned long long)status.evaluatedFrames,
                                             status.cameraFound ? "found" : "not found (no motion vectors)");
+                    if (nativeBackend_ && d.upscaler != 0 && status.available != 0)
+                        ImGui::TextDisabled("The game's own 2× MSAA is off while DLAA / DLSS is active (they do the anti-aliasing).");
 #endif
                 }
                 Section("IMAGE QUALITY");

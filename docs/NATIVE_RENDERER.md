@@ -1802,3 +1802,21 @@ Checked (first level): ~3.7 frames per world step at ~111 FPS with alpha
 between steps, 109-114 FPS (no measurable cost: one 4 MB copy per step and a
 512x512 blend per frame), D3D12 debug layer without errors, the image as
 before; frame and geometry reference tests exact (replays do not interpolate).
+
+## The game's MSAA under DLAA / DLSS — 2026-11-06
+
+The native renderer follows the game's EDRAM sample count
+(`RB_SURFACE_INFO` bits 16-17): the scene surface (`0x10010410`) is 2x MSAA,
+resolved before the post-processing. Under DLAA / DLSS that is redundant (the
+NVIDIA upscaler does the anti-aliasing on the jittered scene) and only adds
+raster and resolve work. Live frames now render without the game's MSAA
+while an NVIDIA upscaler is active and available; with "Game default" the
+MSAA stays. A change rebuilds every target and colour / depth surface (their
+keys do not include the sample count). `FD_GAME_MSAA=1` keeps the MSAA under
+DLSS, `FD_NO_MSAA=1` always drops it, `FD_UPSCALER_TOGGLE=<s>` (diagnostic)
+alternates the configured upscaler and off to test live switching.
+
+Measured (first level, 2.5x internal resolution, DLAA, no limit): 94-95 ->
+98-99 FPS; the DLAA image looks the same. Nine live switches in a session
+with the D3D12 debug layer: no errors. Reference tests exact (replays keep
+the captured sample counts).

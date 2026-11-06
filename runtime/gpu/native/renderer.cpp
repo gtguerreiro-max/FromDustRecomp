@@ -574,6 +574,7 @@ struct gpu::native::Renderer::Impl
         uint32_t outWidth = 0, outHeight = 0;
         double lastRenderScale = 1, lastOutputScale = 1;
         uint32_t lastShadowScale = 1;
+        bool lastNoMsaa = false;
         std::map<std::string, int> shadowRoles; // shader -> 1 shadow caster, 2 VSM pass, 0 other
         std::map<std::string, bool> gradingShaders; // PS -> the game's final colour grading (samp_ColoremapR)
         std::unique_ptr<RenderFramebuffer> framebuffer;
@@ -653,7 +654,14 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     const char* traceDrawOption=getenv("FD_TRACE_DRAWS");
     const size_t traceDrawThrough=traceDrawOption?size_t(atoi(traceDrawOption)):0;
     const bool fixedFloat32=getenv("FD_FIXED_FLOAT32")!=nullptr;
-    const bool noMsaa=getenv("FD_NO_MSAA")!=nullptr,xenosPattern=getenv("FD_XENOS_SAMPLE_POSITIONS")!=nullptr;
+    // The game's own MSAA (2x on the scene) is redundant under DLAA / DLSS,
+    // which do the anti-aliasing: live frames render without it while an
+    // NVIDIA upscaler is active (FD_GAME_MSAA=1 keeps it, FD_NO_MSAA=1 always
+    // drops it).
+    static const bool keepGameMsaa=getenv("FD_GAME_MSAA")!=nullptr,dropMsaa=getenv("FD_NO_MSAA")!=nullptr;
+    const bool noMsaa=dropMsaa||(!keepGameMsaa&&frame.continuous&&shaderCatalog&&
+        ConfiguredUpscalerMode(UpscalerSetting())!=UpscalerMode::Off&&!(upscale.ngx.Tried()&&!upscale.ngx.Available()));
+    const bool xenosPattern=getenv("FD_XENOS_SAMPLE_POSITIONS")!=nullptr;
     const auto colorFormat=[&](uint32_t info){return ColorFormat(info,fixedFloat32);};
     const auto multisampling=[&](uint32_t surface){return Multisampling(surface,noMsaa,xenosPattern);};
     debugErrors = 0;
@@ -1448,8 +1456,16 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     };
     // A changed internal resolution leaves targets of the old scale behind;
     // drop them (and what only they referenced) instead of growing forever.
-    if(frame.continuous&&(renderScale!=upscale.lastRenderScale||outputScale!=upscale.lastOutputScale||shadowScale!=upscale.lastShadowScale))
+    if(frame.continuous&&(renderScale!=upscale.lastRenderScale||outputScale!=upscale.lastOutputScale||shadowScale!=upscale.lastShadowScale||noMsaa!=upscale.lastNoMsaa))
     {
+        // Sample counts are part of every target and surface: all of them
+        // are created again with the new one.
+        if(noMsaa!=upscale.lastNoMsaa)
+        {
+            targets.clear();storage.colorSurfaces.clear();depthSurfaces.clear();
+            fprintf(stderr,"native renderer: game MSAA %s\n",noMsaa?"off (DLAA / DLSS active)":"on");
+            upscale.lastNoMsaa=noMsaa;
+        }
         for(auto it=targets.begin();it!=targets.end();)
         {
             const double s=it->second.scale;

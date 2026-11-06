@@ -12,6 +12,7 @@
 #include <nvsdk_ngx_helpers.h>
 
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <mutex>
 #include <cmath>
@@ -113,6 +114,15 @@ void PublishUpscalerStatus(const UpscalerStatus& status) { std::lock_guard lock(
 
 UpscalerMode ConfiguredUpscalerMode(UpscalerMode configured)
 {
+    // FD_UPSCALER_TOGGLE=<seconds>: diagnostic, alternates the configured mode
+    // and off every that many seconds (tests switching live, as from F1).
+    static const double toggle = [] { const char* v = getenv("FD_UPSCALER_TOGGLE"); return v ? atof(v) : 0.0; }();
+    if (toggle > 0)
+    {
+        static const auto start = std::chrono::steady_clock::now();
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (int64_t(t / toggle) % 2) return UpscalerMode::Off;
+    }
     const char* value = getenv("FD_NATIVE_UPSCALER");
     if (!value || !*value) return configured;
     const std::string v(value);
