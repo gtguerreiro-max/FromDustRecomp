@@ -483,6 +483,7 @@ RenderMultisampling Multisampling(uint32_t surface,bool noMsaa,bool xenosPattern
 #include "depth_float.h"
 #include "present.h"
 #include "present_hdr.h"
+#include "world_interp_ps.h"
 #include "motion_vs.h"
 #include "motion_ps.h"
 #include "frame_generation.h"
@@ -527,6 +528,22 @@ struct gpu::native::Renderer::Impl
         std::unique_ptr<RenderShader> pixelShader;
     };
     std::unique_ptr<InFlight> inFlight;
+    // World interpolation: own copies of the height field of the previous and
+    // the current world step, and their blend for this frame (world_interp.hlsl).
+    struct WorldInterp
+    {
+        std::unique_ptr<RenderTexture> previous, current, blended;
+        std::unique_ptr<RenderFramebuffer> framebuffer;
+        std::unique_ptr<RenderShader> ps;
+        std::map<RenderFormat, std::unique_ptr<RenderPipeline>> pipelines;
+        std::map<std::string, bool> consumers; // PS -> samples g_SamplerHeightfield (slot 0)
+        RenderFormat format = RenderFormat::UNKNOWN;
+        uint32_t width = 0, height = 0, base = 0;
+        uint64_t version = UINT64_MAX;
+        std::chrono::steady_clock::time_point changed, lastFrame;
+        double frameInterval = 0; // seconds, eased
+        uint64_t blends = 0, steps = 0;
+    } worldInterp;
     // The last submitted frame's fence value: the presenter's copy waits for
     // it on the GPU.
     ID3D12Fence* frameFence=nullptr;
@@ -1967,6 +1984,126 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             up.hasPrevious=true;
         }
     };
+    // World interpolation (fixed-rate world): the CPU writes the simulation's
+    // height field (terrain and water heights, double-buffered) once per world
+    // step; the first passes of each frame (PS with g_SamplerHeightfield,
+    // slot 0) turn it into the height maps the terrain and water vertex
+    // shaders read. They sample a blend of the previous and the current step
+    // instead, advanced by the time since the step arrived, so the world's
+    // surfaces move at the frame rate (shown about one step later).
+    int32_t interpDescriptor = -1, interpSource = -1;
+    std::map<uint32_t, uint32_t> interpViews; // swizzle -> descriptor of a view of the blend
+    const double worldRate = frame.continuous && liveResources && shaderCatalog && packVs ? WorldInterpolationRate() : 0.0;
+    auto isHeightConsumer = [&](const std::string& ps) {
+        if (ps.empty()) return false;
+        auto found = worldInterp.consumers.find(ps);
+        if (found == worldInterp.consumers.end())
+        {
+            const auto* shader = shaderCatalog->Find(ps, ShaderStage::Pixel);
+            const std::string text = shader ? std::string(shader->source.begin(), shader->source.end()) : std::string();
+            const bool consumer = text.find("#define g_SamplerHeightfield_Texture2DDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 0)") != std::string::npos;
+            found = worldInterp.consumers.emplace(ps, consumer).first;
+        }
+        return found->second;
+    };
+    if (worldRate > 0)
+    {
+        auto& wi = worldInterp;
+        const Draw* consumer = nullptr;
+        for (const Draw& d : draws)
+            if (!d.clear && !d.resolve && d.slots[0] >= 0 && isHeightConsumer(d.ps)) { consumer = &d; break; }
+        if (consumer && uint32_t(consumer->slots[0]) < textures.size() && textures[consumer->slots[0]])
+        {
+            const int32_t si = consumer->slots[0];
+            const RenderFormat format = textureFormats[si];
+            const auto& sourceDesc = static_cast<D3D12Texture*>(textures[si].get())->desc;
+            const uint32_t width = sourceDesc.width, height = sourceDesc.height;
+            if (!wi.ps) wi.ps = device->createShader(fd_native_world_interp_ps, sizeof(fd_native_world_interp_ps), "ps_main", RenderShaderFormat::DXIL);
+            auto& pipeline = wi.pipelines[format];
+            if (!pipeline)
+            {
+                RenderGraphicsPipelineDesc desc;
+                desc.pipelineLayout = layout.get();
+                desc.vertexShader = packVs.get();
+                desc.pixelShader = wi.ps.get();
+                desc.renderTargetFormat[0] = format;
+                desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+                desc.renderTargetCount = 1;
+                desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+                pipeline = device->createGraphicsPipeline(desc);
+            }
+            if (!wi.blended || wi.width != width || wi.height != height || wi.format != format)
+            {
+                wi.previous = CreateTexture(device.get(), RenderTextureDesc::Texture2D(width, height, 1, format));
+                wi.current = CreateTexture(device.get(), RenderTextureDesc::Texture2D(width, height, 1, format));
+                wi.blended = CreateTexture(device.get(), RenderTextureDesc::ColorTarget(width, height, format));
+                const RenderTexture* color = wi.blended.get();
+                RenderFramebufferDesc fb; fb.colorAttachments = &color; fb.colorAttachmentsCount = 1;
+                wi.framebuffer = device->createFramebuffer(fb);
+                wi.width = width; wi.height = height; wi.format = format; wi.base = 0; wi.version = UINT64_MAX;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (wi.lastFrame.time_since_epoch().count())
+            {
+                const double interval = (std::min)(0.05, std::chrono::duration<double>(now - wi.lastFrame).count());
+                wi.frameInterval = wi.frameInterval > 0 ? wi.frameInterval * 0.9 + interval * 0.1 : interval;
+            }
+            wi.lastFrame = now;
+            const uint64_t version = si < int32_t(versions.size()) ? versions[si] : 0;
+            const bool first = !wi.base;
+            if (first || consumer->bases[0] != wi.base || version != wi.version)
+            {
+                // A new world step: the old current becomes the previous one.
+                std::swap(wi.previous, wi.current);
+                RenderTexture* source = textures[si].get();
+                list->barriers(RenderBarrierStage::COPY, {
+                    RenderTextureBarrier(source, RenderTextureLayout::COPY_SOURCE),
+                    RenderTextureBarrier(wi.current.get(), RenderTextureLayout::COPY_DEST)});
+                list->copyTextureRegion(RenderTextureCopyLocation::Subresource(wi.current.get()), RenderTextureCopyLocation::Subresource(source));
+                if (first)
+                {
+                    list->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(wi.previous.get(), RenderTextureLayout::COPY_DEST));
+                    list->copyTextureRegion(RenderTextureCopyLocation::Subresource(wi.previous.get()), RenderTextureCopyLocation::Subresource(source));
+                }
+                list->barriers(RenderBarrierStage::GRAPHICS, {
+                    RenderTextureBarrier(source, RenderTextureLayout::SHADER_READ),
+                    RenderTextureBarrier(wi.current.get(), RenderTextureLayout::SHADER_READ),
+                    RenderTextureBarrier(wi.previous.get(), RenderTextureLayout::SHADER_READ)});
+                wi.base = consumer->bases[0]; wi.version = version; wi.changed = now;
+                ++wi.steps;
+            }
+            // Reaches the current step one frame before the next one is due.
+            const double step = 1.0 / worldRate;
+            const float alpha = float((std::clamp)((std::chrono::duration<double>(now - wi.changed).count() + wi.frameInterval) / step, 0.0, 1.0));
+            if (pipeline && static_cast<D3D12GraphicsPipeline*>(pipeline.get())->d3d && packAt < kMaxPacks && nextView + 3 <= descriptorBase + kMaxTargets)
+            {
+                const uint32_t previousIndex = nextView++, currentIndex = nextView++, blendIndex = nextView++;
+                sets[0]->setTexture(previousIndex, wi.previous.get(), RenderTextureLayout::SHADER_READ);
+                sets[0]->setTexture(currentIndex, wi.current.get(), RenderTextureLayout::SHADER_READ);
+                uint32_t constants[4] = {previousIndex, currentIndex, 0, 0};
+                memcpy(&constants[2], &alpha, 4);
+                memcpy(packMap + 256 * packAt, constants, sizeof(constants));
+                list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wi.blended.get(), RenderTextureLayout::COLOR_WRITE));
+                list->setFramebuffer(wi.framebuffer.get());
+                list->setGraphicsPipelineLayout(layout.get());
+                for (uint32_t set = 0; set < 5; ++set) list->setGraphicsDescriptorSet(sets[set].get(), set);
+                list->setPipeline(pipeline.get());
+                list->setGraphicsRootDescriptor(RenderBufferReference(packConstants.get(), 256 * packAt++), 2);
+                list->setViewports(RenderViewport(0, 0, float(width), float(height)));
+                list->setScissors(RenderRect(0, 0, width, height));
+                list->drawInstanced(3, 1, 0, 0);
+                list->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wi.blended.get(), RenderTextureLayout::SHADER_READ));
+                sets[0]->setTexture(blendIndex, wi.blended.get(), RenderTextureLayout::SHADER_READ);
+                interpDescriptor = int32_t(blendIndex);
+                interpSource = si;
+                current = nullptr;
+                ++wi.blends;
+                if (CachedEnv("FD_TRACE_WORLD_INTERP") && wi.blends % 300 == 1)
+                    fprintf(stderr, "world interpolation: %llu frames, %llu steps, alpha %.2f, frame %.1f ms, %ux%u format %d\n",
+                        (unsigned long long)wi.blends, (unsigned long long)wi.steps, alpha, wi.frameInterval * 1000, width, height, int(format));
+            }
+        }
+    }
     // FD_STOP_AFTER=<record>: debug, replay only up to that record.
     const size_t stopAfter = getenv("FD_STOP_AFTER") ? size_t(atoi(getenv("FD_STOP_AFTER"))) : draws.size();
     for (size_t i = 0; i < draws.size() && i <= stopAfter; ++i)
@@ -2484,6 +2621,25 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                     view = tableViews.emplace(viewKey, std::make_pair(nextView++, std::move(textureView))).first;
                 }
                 if (view != tableViews.end()) index = view->second.first;
+            }
+            // World interpolation: the height field consumers read the blend.
+            if (slot == 0 && interpDescriptor >= 0 && d.slots[0] == interpSource && isHeightConsumer(d.ps))
+            {
+                index = uint32_t(interpDescriptor);
+                if (d.swizzles[0] != kIdentitySwizzle)
+                {
+                    auto view = interpViews.find(d.swizzles[0]);
+                    if (view == interpViews.end() && nextView < descriptorBase + kMaxTargets)
+                    {
+                        RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(worldInterp.format);
+                        viewDesc.componentMapping = SwizzleMapping(d.swizzles[0]);
+                        auto textureView = worldInterp.blended->createTextureView(viewDesc);
+                        sets[0]->setTexture(nextView, worldInterp.blended.get(), RenderTextureLayout::SHADER_READ, textureView.get());
+                        tableViews.emplace(uint64_t(0xFFFFFFFFu) << 32 | (uint64_t(nextView) & 0xFFFFFFFF), std::make_pair(nextView, std::move(textureView)));
+                        view = interpViews.emplace(d.swizzles[0], nextView++).first;
+                    }
+                    if (view != interpViews.end()) index = view->second;
+                }
             }
             const bool depthFetch = d.fetchFormats[slot] == 22 || d.fetchFormats[slot] == 23;
             auto& aliases = depthFetch ? resolvedDepth : resolved;

@@ -33,6 +33,13 @@ add_custom_command(OUTPUT "${present_header}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/present.hlsl" "${FD_NATIVE_DXC}"
     BYPRODUCTS "${FD_NATIVE_BUILTINS}/present.dxil" VERBATIM)
 list(APPEND FD_NATIVE_BUILTIN_HEADERS "${present_header}")
+set(world_interp_header "${FD_NATIVE_BUILTINS}/world_interp_ps.h")
+add_custom_command(OUTPUT "${world_interp_header}"
+    COMMAND "${FD_NATIVE_DXC}" -T ps_6_0 -E ps_main "${CMAKE_CURRENT_SOURCE_DIR}/world_interp.hlsl"
+        -Fh "${world_interp_header}" -Vn fd_native_world_interp_ps -Fo "${FD_NATIVE_BUILTINS}/world_interp_ps.dxil"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/world_interp.hlsl" "${FD_NATIVE_DXC}"
+    BYPRODUCTS "${FD_NATIVE_BUILTINS}/world_interp_ps.dxil" VERBATIM)
+list(APPEND FD_NATIVE_BUILTIN_HEADERS "${world_interp_header}")
 set(present_hdr_header "${FD_NATIVE_BUILTINS}/present_hdr.h")
 add_custom_command(OUTPUT "${present_hdr_header}"
     COMMAND "${FD_NATIVE_DXC}" -T cs_6_0 -E main "${CMAKE_CURRENT_SOURCE_DIR}/present_hdr.hlsl"

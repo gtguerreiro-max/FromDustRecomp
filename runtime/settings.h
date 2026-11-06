@@ -44,6 +44,7 @@ struct Data {
     int renderScale = 100; // native renderer internal resolution, percent of 1024x600 (live)
     bool decoupledSim = false; // world at a fixed 30 Hz, render up to the FPS limit (live)
     bool evenPacing = true;    // with it: only 120 / 60 / 30 FPS, so world steps stay on screen evenly
+    bool worldInterpolation = true; // fixed-rate world: terrain and water heights blended between steps
     int frameGeneration = 0; // native renderer, DLSS-G: off, 2x, 3x, 4x (load on restart)
     int inputMode = 0; // automatic, keyboard/mouse, controller
     int sensitivity = 100;

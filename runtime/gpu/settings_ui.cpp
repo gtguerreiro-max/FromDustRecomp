@@ -90,6 +90,8 @@ void ApplyLive() {
     gameloop::SetFrameGenerationActive(gpu::native::fg::Loaded() && gpu::native::fg::ConfiguredFrames(d.frameGeneration) > 0);
     // Fixed-rate world: 30 world steps per second, the game loop up to 120 FPS.
     gameloop::SetSimulationRate(d.decoupledSim ? 30.0 : 0.0);
+    gpu::native::SetWorldRateSource(&gameloop::SimulationRate);
+    gpu::native::SetWorldInterpolationSetting(d.worldInterpolation);
     gpu::SetVblankRate(d.decoupledSim ? 240 : 60);
 #endif
     g_applied = d;
@@ -385,6 +387,11 @@ private:
                     {
                         ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "World at 30 Hz  |  image up to %s FPS",
                             d.frameLimit ? std::to_string((std::min)(d.frameLimit, 120)).c_str() : "120");
+                        ImGui::Checkbox("Smooth terrain and water motion", &d.worldInterpolation);
+                        Help("The world simulation keeps its 30 steps per second; the terrain and water heights are blended "
+                             "between the last two steps for every frame, so water flows and terrain changes move at the frame "
+                             "rate instead of in 30 Hz steps. They are shown about one step (33 ms) later; the Breath, the camera "
+                             "and the HUD are not delayed. People and objects still move in 30 Hz steps.");
                         ImGui::Checkbox("Even frame pacing", &d.evenPacing);
                         Help("Holds 120, 60 or 30 FPS, the fastest of them the PC keeps up with, so each world step stays on screen "
                              "for the same time. Rates in between (say 45 or 55 FPS) show some steps for one frame and others for two: "

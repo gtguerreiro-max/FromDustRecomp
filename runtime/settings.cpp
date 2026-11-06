@@ -77,6 +77,7 @@ void Load(const std::filesystem::path& path) {
     d.frameGeneration = read(L"Graphics", L"FrameGeneration", d.frameGeneration);
     d.decoupledSim = read(L"Graphics", L"DecoupledSimulation", d.decoupledSim) != 0;
     d.evenPacing = read(L"Graphics", L"EvenPacing", d.evenPacing) != 0;
+    d.worldInterpolation = read(L"Graphics", L"WorldInterpolation", d.worldInterpolation) != 0;
     d.inputMode = read(L"Controls", L"Mode", d.inputMode);
     d.sensitivity = read(L"Controls", L"Sensitivity", d.sensitivity);
     d.deadzone = read(L"Controls", L"Deadzone", d.deadzone);
@@ -140,6 +141,7 @@ bool Save() {
     write(L"Graphics", L"FrameGeneration", d.frameGeneration);
     write(L"Graphics", L"DecoupledSimulation", d.decoupledSim);
     write(L"Graphics", L"EvenPacing", d.evenPacing);
+    write(L"Graphics", L"WorldInterpolation", d.worldInterpolation);
     write(L"Controls", L"Mode", d.inputMode);
     write(L"Controls", L"Sensitivity", d.sensitivity);
     write(L"Controls", L"Deadzone", d.deadzone);

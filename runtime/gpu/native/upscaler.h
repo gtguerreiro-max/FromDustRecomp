@@ -68,6 +68,12 @@ void HdrLevels(float& paperWhiteNits, float& peakNits);
 // The window's display at start-up: 1 Windows HDR on, 0 off, -1 not checked;
 // its reported peak luminance (nits, 0 when unknown).
 void SetHdrDisplay(int state, float maxNits);
+// World interpolation (F1 > Smooth world motion): the fixed-rate world's step
+// rate comes from the game loop (0: the world steps every frame, nothing to
+// interpolate). FD_NO_WORLD_INTERP=1 turns it off.
+void SetWorldRateSource(double (*rate)());
+void SetWorldInterpolationSetting(bool on);
+double WorldInterpolationRate();
 void HdrDisplay(int& state, float& maxNits);
 const char* UpscalerModeName(UpscalerMode mode);
 

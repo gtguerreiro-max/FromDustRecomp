@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <map>
+#include <set>
 #include "../xenia_bridge.h"
 #include "../../input.h"
 #include <algorithm>
@@ -36,6 +37,22 @@ void LiveResources::Bind(Draw& draw,const ShaderCatalog& shaders)
     {
         draw.slots[slot]=-1;
         if(!(mask>>slot&1)||(draw.textureFetches[slot][0]&3)!=2||!draw.bases[slot])continue;
+        // FD_TRACE_TEXTURE_USERS=<hex>[,<hex>]: diagnostic, the shaders and
+        // slots that sample those texture base addresses (logged once each).
+        static const std::vector<uint32_t> traceUsers=[]{
+            std::vector<uint32_t> bases;
+            if(const char* v=getenv("FD_TRACE_TEXTURE_USERS"))
+                for(const char* p=v;p&&*p;p=strchr(p,','),p=p?p+1:nullptr)bases.push_back(uint32_t(strtoul(p,nullptr,16)));
+            return bases;
+        }();
+        if(!traceUsers.empty()&&std::find(traceUsers.begin(),traceUsers.end(),draw.bases[slot])!=traceUsers.end())
+        {
+            static std::set<std::string> logged;
+            const std::string what=draw.vs+"/"+draw.ps+" slot "+std::to_string(slot)+" base "+std::to_string(draw.bases[slot]);
+            if(logged.insert(what).second)
+                kernel::Log("texture user: base %08X slot %u vs %s ps %s fetch %08X %08X %08X %08X %08X %08X",draw.bases[slot],slot,draw.vs.c_str(),draw.ps.c_str(),
+                    draw.textureFetches[slot][0],draw.textureFetches[slot][1],draw.textureFetches[slot][2],draw.textureFetches[slot][3],draw.textureFetches[slot][4],draw.textureFetches[slot][5]);
+        }
         std::array<uint32_t,6> key;
         std::copy_n(draw.textureFetches[slot],6,key.begin());
         // Filtering, clamp, swizzle and exponent adjustment are per draw.

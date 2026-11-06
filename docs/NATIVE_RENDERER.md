@@ -1762,3 +1762,43 @@ Results (first level, DLAA, fixed-rate world, no limit, VSync on):
 `ExecuteCommandLists` 2.4 -> 0.05 ms, render worker ~7.9 ms per frame,
 ~100 -> ~107-114 FPS. The F1 menu still repaints continuously while open.
 `native submit profile` (with `FD_NATIVE_PROFILE`) prints the submission time.
+
+## World above 30 Hz: interpolated terrain and water — 2026-11-06
+
+Running the world faster is not an option: each world update advances a
+fixed step (for example `sub_821C2B68` adds 1/30 to a timer per call; the
+engine has 1/30 and 1/60 constants in several places, the water module none),
+which is why frame-rate unlockers speed the water and the AI up. A 60 Hz
+world (`FD_SIM_HZ=60`) also costs ~25% of the frame rate (110 -> 81 FPS).
+
+Instead the terrain and water heights are interpolated at render time
+(F1 > Graphics > Smoothness > "Smooth terrain and water motion",
+`WorldInterpolation` in [Graphics], on by default; only with the fixed-rate
+world). Findings:
+- In play four CPU-written textures change every world step, in
+  double-buffered pairs (`FD_TRACE_TEXTURE_CAPTURES`): a 512x512 k_16_16
+  height field (terrain and water heights) and a 512x1024 k_8_8_8_8 texture
+  (material weights `samp_MatWeigthTex` and the vegetation atlas index
+  `samp_VegetationAtlasIndex`, a code: not interpolated).
+- `FD_TRACE_TEXTURE_USERS=<hex>,...` (new, `live_resources.cpp`) lists the
+  shaders sampling given texture addresses: the height field is read only by
+  the first passes of each frame (PS 088 / 090, `g_SamplerHeightfield`, slot
+  0), which build the height maps the terrain and water vertex shaders sample
+  (`g_Sampler_Heightfield`, VS 145 / 147 / 149 / 151 / 153).
+
+`renderer.cpp` (`WorldInterp`): when the height field bound to those passes
+changes (another buffer or version: a new world step), the renderer keeps its
+own copies of the previous and the current step (GPU copies) and, every
+frame, draws `world_interp.hlsl` (lerp) into a third texture that the
+consumer draws sample instead, with alpha = (time since the step arrived +
+one frame interval) x world rate, clamped to 1, so it reaches the current
+step on the last frame before the next one. The surfaces are therefore shown
+about one step (33 ms) late; the Breath, the camera and the HUD are not
+delayed; people, objects and materials still change at 30 Hz.
+`FD_NO_WORLD_INTERP=1` turns it off, `FD_TRACE_WORLD_INTERP=1` logs frames,
+steps and alpha.
+
+Checked (first level): ~3.7 frames per world step at ~111 FPS with alpha
+between steps, 109-114 FPS (no measurable cost: one 4 MB copy per step and a
+512x512 blend per frame), D3D12 debug layer without errors, the image as
+before; frame and geometry reference tests exact (replays do not interpolate).

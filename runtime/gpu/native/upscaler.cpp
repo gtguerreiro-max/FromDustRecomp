@@ -92,6 +92,19 @@ std::atomic<int> g_hdrDisplay{-1};
 std::atomic<float> g_hdrDisplayNits{0.0f};
 }
 void SetHdrDisplay(int state, float maxNits) { g_hdrDisplay = state; g_hdrDisplayNits = maxNits; }
+namespace
+{
+std::atomic<double (*)()> g_worldRate{nullptr};
+std::atomic<bool> g_worldInterpolation{true};
+}
+void SetWorldRateSource(double (*rate)()) { g_worldRate = rate; }
+void SetWorldInterpolationSetting(bool on) { g_worldInterpolation = on; }
+double WorldInterpolationRate()
+{
+    static const bool off = getenv("FD_NO_WORLD_INTERP") != nullptr;
+    const auto rate = g_worldRate.load();
+    return off || !g_worldInterpolation.load() || !rate ? 0.0 : rate();
+}
 void HdrDisplay(int& state, float& maxNits) { state = g_hdrDisplay.load(); maxNits = g_hdrDisplayNits.load(); }
 void SetUpscalerSetting(UpscalerMode mode) { g_setting = uint32_t(mode); }
 UpscalerMode UpscalerSetting() { return UpscalerMode(g_setting.load()); }
