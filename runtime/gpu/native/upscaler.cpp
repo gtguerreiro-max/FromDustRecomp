@@ -10,6 +10,9 @@
 
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
+#ifdef FD_DLSS_NR
+#include <nvsdk_ngx_defs_dlssnr.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -172,6 +175,7 @@ void UpscalerJitter(uint64_t index, double renderScale, float& x, float& y)
 Upscaler::~Upscaler()
 {
     Release();
+    ReleaseNeural();
     if (available) NVSDK_NGX_D3D12_Shutdown1(device);
 }
 
@@ -210,7 +214,145 @@ bool Upscaler::Initialize(ID3D12Device* d)
     }
     available = true;
     fprintf(stderr, "native upscaler: DLSS ready\n");
+#ifdef FD_DLSS_NR
+    // DLSS 5 Neural Rendering (feature 18): availability for this application.
+    {
+        int nrAvailable = 0, nrNeedsDriver = 0, nrInit = 0;
+        unsigned int nrMajor = 0, nrMinor = 0;
+        NVSDK_NGX_Parameter_GetI(params, NVSDK_NGX_Parameter_DLSSNR_Available, &nrAvailable);
+        NVSDK_NGX_Parameter_GetI(params, NVSDK_NGX_Parameter_DLSSNR_NeedsUpdatedDriver, &nrNeedsDriver);
+        NVSDK_NGX_Parameter_GetUI(params, NVSDK_NGX_Parameter_DLSSNR_MinDriverVersionMajor, &nrMajor);
+        NVSDK_NGX_Parameter_GetUI(params, NVSDK_NGX_Parameter_DLSSNR_MinDriverVersionMinor, &nrMinor);
+        NVSDK_NGX_Parameter_GetI(params, NVSDK_NGX_Parameter_DLSSNR_FeatureInitResult, &nrInit);
+        neuralAvailable = nrAvailable != 0;
+        fprintf(stderr, "native upscaler: DLSS neural rendering available %d, needs driver %d (min %u.%u), feature init result %08X\n",
+                nrAvailable, nrNeedsDriver, nrMajor, nrMinor, unsigned(nrInit));
+    }
+#endif
     return true;
+}
+
+namespace
+{
+std::mutex g_neuralLock;
+NeuralSettings g_neuralSettings;
+NeuralStatus g_neuralStatus;
+}
+void SetNeuralSettings(const NeuralSettings& settings) { std::lock_guard lock(g_neuralLock); g_neuralSettings = settings; }
+NeuralSettings GetNeuralSettings()
+{
+    std::lock_guard lock(g_neuralLock);
+    NeuralSettings settings = g_neuralSettings;
+    // FD_DLSS_NR=1 / 0 forces it on / off (tests).
+    if (const char* forced = getenv("FD_DLSS_NR"); forced && *forced) settings.enabled = atoi(forced) != 0;
+    // FD_DLSS_NR_PRESET=<0..7> (diagnostic): the network preset (0 default, 1 A, 2 B ...).
+    if (const char* preset = getenv("FD_DLSS_NR_PRESET"); preset && *preset) settings.preset = atoi(preset);
+    settings.passes = std::clamp(settings.passes, 1u, kMaxNeuralPasses);
+    // FD_DLSS_NR_SPLIT=1 / 2 (diagnostic): see NeuralSettings::split.
+    if (const char* split = getenv("FD_DLSS_NR_SPLIT"); split && *split) settings.split = atoi(split);
+    // FD_DLSS_NR_TOGGLE=<s> (diagnostic): on / off every s seconds, to test live switching.
+    static const int toggle = getenv("FD_DLSS_NR_TOGGLE") ? atoi(getenv("FD_DLSS_NR_TOGGLE")) : 0;
+    if (toggle > 0)
+    {
+        static const auto start = std::chrono::steady_clock::now();
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
+        settings.enabled = (seconds / toggle) % 2 == 0;
+    }
+    return settings;
+}
+NeuralStatus GetNeuralStatus() { std::lock_guard lock(g_neuralLock); return g_neuralStatus; }
+void PublishNeuralStatus(const NeuralStatus& status) { std::lock_guard lock(g_neuralLock); g_neuralStatus = status; }
+
+void Upscaler::ReleaseNeural()
+{
+#ifdef FD_DLSS_NR
+    for (NeuralPass& p : neural)
+        if (p.feature) NVSDK_NGX_D3D12_ReleaseFeature(p.feature);
+#endif
+    for (NeuralPass& p : neural) p = NeuralPass();
+    neuralFailed = false;
+}
+
+bool Upscaler::EvaluateNeural(ID3D12GraphicsCommandList* list, const NeuralFrame& f, uint32_t pass)
+{
+#ifdef FD_DLSS_NR
+    if (!available || !neuralAvailable || neuralFailed || pass >= kMaxNeuralPasses || !f.color || !f.output || !f.depth || !f.motion) return false;
+    NeuralPass& state = neural[pass];
+    ::NVSDK_NGX_Handle*& neuralFeature = state.feature;
+    if (!neuralFeature || state.width != f.width || state.height != f.height || state.preset != f.settings.preset)
+    {
+        if (neuralFeature) NVSDK_NGX_D3D12_ReleaseFeature(neuralFeature);
+        neuralFeature = nullptr;
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSSNR_Width, f.width);
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSSNR_Height, f.height);
+        NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset, f.settings.preset);
+        const NVSDK_NGX_Result r = NVSDK_NGX_D3D12_CreateFeature(list, NVSDK_NGX_Feature_DLSSNR, params, &neuralFeature);
+        if (NVSDK_NGX_FAILED(r))
+        {
+            fprintf(stderr, "native upscaler: DLSS neural rendering create failed (%08X) for %ux%u\n", unsigned(r), f.width, f.height);
+            neuralFeature = nullptr;
+            neuralFailed = true;
+            return false;
+        }
+        state.width = f.width; state.height = f.height; state.preset = f.settings.preset;
+        fprintf(stderr, "native upscaler: DLSS neural rendering %ux%u (render %ux%u, preset %d, pass %u)\n", f.width, f.height,
+                f.renderWidth, f.renderHeight, f.settings.preset, pass + 1);
+    }
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_Color, f.color);
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_Output, f.output);
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_Backbuffer, nullptr);
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_MVec, f.motion);
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_Depth, f.depth);
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_BidirectionalDistortionField, nullptr);
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_ControlMask, f.mask);
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_UI, nullptr);
+    NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_UIAlpha, nullptr);
+    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, f.settings.tone);
+    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength, f.settings.structure);
+    NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSSNR_Style, f.settings.model);
+    // The skin auto mask, combined with the (white) control mask by "min", as
+    // RTX Remix does; FD_DLSS_NR_NO_AUTOMASK=1 (diagnostic) uses the control mask alone.
+    static const bool autoMask = getenv("FD_DLSS_NR_NO_AUTOMASK") == nullptr;
+    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, autoMask ? 1 : 0);
+    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_MaskBlendMode,
+                             int(autoMask ? NVSDK_NGX_DLSSNR_Mask_Blend_Mode_Min : NVSDK_NGX_DLSSNR_Mask_Blend_Mode_None));
+    // -1: skin follows the local structure strength (the model's own default).
+    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, -1.0f);
+    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_Reset, f.reset ? 1 : 0);
+    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_DepthInverted, f.depthInverted ? 1 : 0);
+    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_Enabled, 1);
+    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_UICorrection, 0);
+    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_Intensity, f.settings.intensity);
+    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_MVecScaleX, 1.0f);
+    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_MVecScaleY, 1.0f);
+    auto rect = [&](const char* x, const char* y, const char* w, const char* h, uint32_t width, uint32_t height) {
+        NVSDK_NGX_Parameter_SetUI(params, x, 0); NVSDK_NGX_Parameter_SetUI(params, y, 0);
+        NVSDK_NGX_Parameter_SetUI(params, w, width); NVSDK_NGX_Parameter_SetUI(params, h, height);
+    };
+    rect(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseX, NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseY,
+         NVSDK_NGX_Parameter_DLSSNR_ColorSubrectWidth, NVSDK_NGX_Parameter_DLSSNR_ColorSubrectHeight, f.width, f.height);
+    rect(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseX, NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseY,
+         NVSDK_NGX_Parameter_DLSSNR_OutputSubrectWidth, NVSDK_NGX_Parameter_DLSSNR_OutputSubrectHeight, f.width, f.height);
+    rect(NVSDK_NGX_Parameter_DLSSNR_MVecSubrectBaseX, NVSDK_NGX_Parameter_DLSSNR_MVecSubrectBaseY,
+         NVSDK_NGX_Parameter_DLSSNR_MVecSubrectWidth, NVSDK_NGX_Parameter_DLSSNR_MVecSubrectHeight, f.renderWidth, f.renderHeight);
+    rect(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY,
+         NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, f.renderWidth, f.renderHeight);
+    rect(NVSDK_NGX_Parameter_DLSSNR_ControlMaskSubrectBaseX, NVSDK_NGX_Parameter_DLSSNR_ControlMaskSubrectBaseY,
+         NVSDK_NGX_Parameter_DLSSNR_ControlMaskSubrectWidth, NVSDK_NGX_Parameter_DLSSNR_ControlMaskSubrectHeight, f.renderWidth, f.renderHeight);
+    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_Jitter_Offset_X, f.jitterX);
+    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_Jitter_Offset_Y, f.jitterY);
+    const NVSDK_NGX_Result r = NVSDK_NGX_D3D12_EvaluateFeature(list, neuralFeature, params, nullptr);
+    if (NVSDK_NGX_FAILED(r))
+    {
+        static int logged = 0;
+        if (logged++ < 3) fprintf(stderr, "native upscaler: DLSS neural rendering evaluate failed (%08X)\n", unsigned(r));
+        return false;
+    }
+    return true;
+#else
+    (void)list; (void)f; (void)pass;
+    return false;
+#endif
 }
 
 bool Upscaler::Evaluate(ID3D12GraphicsCommandList* list, const UpscalerSetup& setup, const UpscalerFrame& frame)

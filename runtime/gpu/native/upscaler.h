@@ -96,6 +96,44 @@ struct UpscalerFrame
     bool reset = false;
 };
 
+// DLSS 5 3D-Guided Neural Rendering (NGX feature 18, nvngx_dlssnr.dll), on the
+// finished scene before the HUD. Settings apply live (F1 > Graphics).
+constexpr uint32_t kMaxNeuralPasses = 3;
+struct NeuralSettings
+{
+    bool enabled = false;
+    uint32_t model = 2;       // appearance model A / B / C (C by default)
+    float intensity = 1.0f, structure = 1.0f, tone = 1.0f; // the community default (RTX Remix: 0.7 / 0.3)
+    int preset = 2;           // 2: preset B (lightweight network), 0: default
+    uint32_t passes = 1;      // 1..kMaxNeuralPasses sequential passes, each on the previous one's output
+    int split = 0;            // diagnostic comparison: 1 right half only, 2 middle twice (before | after)
+    bool operator==(const NeuralSettings&) const = default;
+};
+void SetNeuralSettings(const NeuralSettings& settings);
+NeuralSettings GetNeuralSettings();
+struct NeuralStatus
+{
+    int available = -1;       // -1 not checked yet, 0 no, 1 yes
+    bool active = false;
+    uint64_t frames = 0;
+    uint32_t width = 0, height = 0;
+    char reason[96] = {};
+};
+NeuralStatus GetNeuralStatus();
+void PublishNeuralStatus(const NeuralStatus& status);
+struct NeuralFrame
+{
+    ID3D12Resource* color = nullptr;   // NON_PIXEL_SHADER_RESOURCE, finished LDR scene
+    ID3D12Resource* output = nullptr;  // UNORDERED_ACCESS, same size
+    ID3D12Resource* depth = nullptr;   // NON_PIXEL_SHADER_RESOURCE, render size
+    ID3D12Resource* motion = nullptr;  // NON_PIXEL_SHADER_RESOURCE, render size, render pixels
+    ID3D12Resource* mask = nullptr;    // NON_PIXEL_SHADER_RESOURCE, control mask (white: full effect)
+    uint32_t width = 0, height = 0, renderWidth = 0, renderHeight = 0;
+    float jitterX = 0, jitterY = 0;
+    bool reset = false, depthInverted = true;
+    NeuralSettings settings;
+};
+
 class Upscaler
 {
 public:
@@ -105,16 +143,31 @@ public:
     bool Initialize(ID3D12Device* device);
     bool Available() const { return available; }
     bool Tried() const { return tried; }
+    // DLSS 5 Neural Rendering (NGX feature 18) reported available for this application.
+    bool NeuralAvailable() const { return neuralAvailable; }
     // Records the DLSS evaluation into `list`, (re)creating the feature when the
     // setup changes. The caller restores its own pipeline / descriptor state.
     bool Evaluate(ID3D12GraphicsCommandList* list, const UpscalerSetup& setup, const UpscalerFrame& frame);
+    // DLSS 5 Neural Rendering on `frame` (creating the feature for its size).
+    // `pass` < kMaxNeuralPasses: each pass has its own feature (its own history).
+    bool EvaluateNeural(ID3D12GraphicsCommandList* list, const NeuralFrame& frame, uint32_t pass = 0);
+    // Frees the neural rendering feature (its VRAM) once it is turned off; the
+    // GPU must be done with it. A later evaluation creates it again.
+    void ReleaseNeural();
 
 private:
     void Release();
-    bool tried = false, available = false;
+    bool tried = false, available = false, neuralAvailable = false;
     ID3D12Device* device = nullptr;
     ::NVSDK_NGX_Parameter* params = nullptr;
     ::NVSDK_NGX_Handle* feature = nullptr;
+    struct NeuralPass
+    {
+        ::NVSDK_NGX_Handle* feature = nullptr;
+        uint32_t width = 0, height = 0;
+        int preset = -1;
+    } neural[kMaxNeuralPasses];
+    bool neuralFailed = false;
     UpscalerSetup current{};
 };
 

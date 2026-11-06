@@ -22,3 +22,5 @@ third_party/xenia_canary_ref/
 third_party/streamline/
 third_party/streamline_dl/
 third_party/dlss_sdk/
+# NVIDIA DLSS 5 Neural Rendering SDK (RTX Remix external package, see docs).
+third_party/dlss_nr/

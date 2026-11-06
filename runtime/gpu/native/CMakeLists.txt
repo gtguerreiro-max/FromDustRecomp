@@ -40,6 +40,15 @@ add_custom_command(OUTPUT "${world_interp_header}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/world_interp.hlsl" "${FD_NATIVE_DXC}"
     BYPRODUCTS "${FD_NATIVE_BUILTINS}/world_interp_ps.dxil" VERBATIM)
 list(APPEND FD_NATIVE_BUILTIN_HEADERS "${world_interp_header}")
+foreach(entry to_neural from_neural)
+    set(neural_header "${FD_NATIVE_BUILTINS}/neural_${entry}_ps.h")
+    add_custom_command(OUTPUT "${neural_header}"
+        COMMAND "${FD_NATIVE_DXC}" -T ps_6_0 -E ps_${entry} "${CMAKE_CURRENT_SOURCE_DIR}/neural_io.hlsl"
+            -Fh "${neural_header}" -Vn fd_native_neural_${entry}_ps -Fo "${FD_NATIVE_BUILTINS}/neural_${entry}_ps.dxil"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/neural_io.hlsl" "${FD_NATIVE_DXC}"
+        BYPRODUCTS "${FD_NATIVE_BUILTINS}/neural_${entry}_ps.dxil" VERBATIM)
+    list(APPEND FD_NATIVE_BUILTIN_HEADERS "${neural_header}")
+endforeach()
 set(present_hdr_header "${FD_NATIVE_BUILTINS}/present_hdr.h")
 add_custom_command(OUTPUT "${present_hdr_header}"
     COMMAND "${FD_NATIVE_DXC}" -T cs_6_0 -E main "${CMAKE_CURRENT_SOURCE_DIR}/present_hdr.hlsl"
@@ -74,6 +83,14 @@ target_include_directories(fd_native_renderer PRIVATE ${FD_NATIVE_ROOT}/third_pa
 # interposer is delay-loaded, only after its NVIDIA signature has been checked.
 set(FD_STREAMLINE_SDK "${FD_NATIVE_ROOT}/third_party/streamline")
 target_include_directories(fd_native_renderer PRIVATE "${FD_NATIVE_BUILTINS}" "${FD_DLSS_SDK}/include" "${FD_STREAMLINE_SDK}/include")
+# NVIDIA DLSS 5 Neural Rendering (NGX feature 18): third_party/dlss_nr is the
+# RTX Remix external package rtx-remix-ngx_sdk_dlnr@2 (headers, LICENSE.txt,
+# nvngx_dlssnr.dll; see docs/NATIVE_RENDERER.md). Optional.
+set(FD_DLSS_NR "${FD_NATIVE_ROOT}/third_party/dlss_nr")
+if(EXISTS "${FD_DLSS_NR}/include/nvsdk_ngx_defs_dlssnr.h")
+    target_include_directories(fd_native_renderer PRIVATE "${FD_DLSS_NR}/include")
+    target_compile_definitions(fd_native_renderer PRIVATE FD_DLSS_NR=1)
+endif()
 target_link_libraries(fd_native_renderer PUBLIC plume d3d12 dxgi dxguid "${FD_NGX_LIB}"
     "${FD_STREAMLINE_SDK}/lib/x64/sl.interposer.lib" delayimp)
 target_link_options(fd_native_renderer INTERFACE /DELAYLOAD:sl.interposer.dll)
@@ -90,4 +107,9 @@ function(fd_native_copy_sdk target)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../../third_party/dlss_sdk/lib/Windows_x86_64/rel/nvngx_dlss.dll" "$<TARGET_FILE_DIR:${target}>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${streamline_dlls} "$<TARGET_FILE_DIR:${target}>"
         VERBATIM)
+    set(nr "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../../third_party/dlss_nr/lib/Windows_x86_64/rel/nvngx_dlssnr.dll")
+    if(EXISTS "${nr}")
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${nr}" "$<TARGET_FILE_DIR:${target}>" VERBATIM)
+    endif()
 endfunction()

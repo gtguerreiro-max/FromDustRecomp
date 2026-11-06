@@ -1820,3 +1820,92 @@ Measured (first level, 2.5x internal resolution, DLAA, no limit): 94-95 ->
 98-99 FPS; the DLAA image looks the same. Nine live switches in a session
 with the D3D12 debug layer: no errors. Reference tests exact (replays keep
 the captured sample counts).
+
+## DLSS 5 Neural Rendering — 2026-11-06
+
+NVIDIA's DLSS 5 Neural Rendering ("3D-guided neural rendering", NGX feature
+18, `NVSDK_NGX_Feature_DLSSNR`) reworks the lighting and fine detail of the
+3D scene with a neural model guided by its depth and motion. It is an option
+in F1 > Graphics > "DLSS 5 Neural Rendering" (`[Graphics] NeuralRendering`,
+`NeuralModel` 0-2 for models A / B / C, C by default (the user's pick);
+`NeuralIntensity`, `NeuralStructure`, `NeuralTone` in percent, 0-200, 100 by
+default; `NeuralPasses` 1-3; all live). `FD_DLSS_NR=1` / `0` forces it on /
+off. The modding community calls the models Default, Natural and Cinematic.
+
+**Where the files come from.** The NGX headers for feature 18 and
+`nvngx_dlssnr.dll` are not in the public DLSS SDK yet. RTX Remix 1.6 ships
+them as an external packman package that its open-source build fetches from
+NVIDIA's own package remote: `rtx-remix-ngx_sdk_dlnr@2.7z` on
+`https://d1oqksizpb0e3d.cloudfront.net` (listed in dxvk-remix
+`scripts-common/packman/external_config.packman.xml`).
+`tools/fetch_dlss_nr.py` downloads it and installs it in
+`third_party/dlss_nr` (gitignored) only if the DLL's Authenticode signature
+is valid and from NVIDIA Corporation and its SHA-256 matches
+(`2BC19BC0...28789F`, FileVersion 310.9.16.0, "NVIDIA DLSSNR - DVS
+PRODUCTION"). The package's `LICENSE.txt` is the standard NVIDIA RTX SDKs
+licence. CMake defines `FD_DLSS_NR` when the headers are there and copies the
+DLL next to the executable.
+
+**No bypass.** NGX is initialised with this project's own ID
+(`NVSDK_NGX_D3D12_Init_with_ProjectID`, custom engine) and the driver's
+answer is used as it is: `DLSSNR.Available` = 1, no driver update needed
+(minimum 615.0), on an RTX 5060 Ti. Nothing patches or impersonates another
+application (the RTX SDKs licence forbids working around technical
+limitations); on a GPU or driver that says no, the option reports
+"unavailable" and the frame is unchanged.
+
+**Pipeline.** NR runs after the game's colour grading draw (the pixel shader
+that samples `samp_ColoremapR`, the same detection as the HDR hudless copy),
+on the tonemapped, sRGB-encoded SDR scene at the output size and before the
+HUD, subtitles and menus are drawn, as RTX Remix does. `neural_io.hlsl`
+copies the scene into an FP16 texture with alpha 1 (Remix's input format;
+the game's grading shader leaves its blue channel in alpha) and writes the
+FP16 result back into the scene's RGB, keeping the game's alpha. Other
+inputs: the DLAA motion pass's motion vectors (pixels, scale 1) and
+reverse-Z depth (`DepthInverted`) at the render size, a white control mask
+(1 = full effect), the camera jitter, reset on (re)creation. Preset B
+(Remix: "the lightweight network") at create, auto mask on with mask blend
+"min", skin structure -1 (follows the local structure, the model's own
+default). With 2-3 passes each pass reads the previous pass's output and has
+its own feature (its own history), as in the community's OptiScaler fork.
+Without DLAA / DLSS the motion pass runs for NR alone. Turning it off frees
+the features and their textures.
+
+Diagnostics: `FD_DLSS_NR_BYPASS=1` evaluates without using the result;
+`FD_DLSS_NR_SPLIT=1` shows the result on the right half only, `=2` the middle
+of the scene twice (before | after, the same pixels of the same frame);
+`FD_DLSS_NR_TOGGLE=<s>` switches it on / off every s seconds;
+`FD_DLSS_NR_PRESET=<n>` picks the network preset; `FD_DLSS_NR_NO_AUTOMASK=1`
+uses the control mask alone; `FD_DLSS_NR_DEPTH_NORMAL=1` flags the depth as
+not inverted. `FD_DLSS_NR_SWEEP=<file>` changes the settings live in one
+session: one step per line (`label enabled=1 model=2 intensity=1 structure=1
+tone=1 passes=1 preset=2 split=2`), each held `FD_DLSS_NR_SWEEP_STEP` seconds
+(6) from `FD_DLSS_NR_SWEEP_START` (100), then the guest output is saved as
+`<label>.png` next to the file and the frame rate logged (`nr sweep:`).
+
+**Strength: Remix's defaults vs the community's.** Measured on the same
+frame (`FD_DLSS_NR_SPLIT=2`, first level): with RTX Remix's defaults
+(structure 0.7, tone 0.3) the change is small, 1.1-1.6 / 255 on average and
+under 2% of the pixels change by more than 8 levels. That was not an input
+problem: FP16 / alpha-1 input instead of the 8-bit target, the depth flag
+flipped and the auto mask off all gave the same result, and the parameters
+match RTX Remix, the community UE5 plugin (DLSS5ForUE5) and the OptiScaler
+DLSS 5 forks. The modding community's baseline is intensity, local tone and
+local structure at 1.0 (on a 0-2 scale), skin structure -1, 1 pass: with that
+the village view changes by 4.8 / 255 on average and 31% of the pixels by
+more than 8 levels; in the global view the change is plain to see (water
+less cartoon turquoise, sand more neutral, deeper rock relief and contact
+shadows, a more photographic light). Those are the defaults now. Model C
+keeps more of the game's colour; A and B are greyer and add more detail.
+2-3 passes look washed out here.
+
+Cost (RTX 5060 Ti, Ryzen 5 5600X, first level, DLAA, fixed-rate world, no
+limit, no VSync): NR off at 2.5x internal resolution 95-99 FPS; NR on at
+2.5x (2560x1500) 54-57 FPS for all three models, at 2x (2048x1200) 69-78
+(off: 104-110), at 1.5x (1536x900) 82-84. The strengths do not change the
+cost; 2 passes ~51 FPS at 2x, 3 passes 40. Presets at 2x: B / default 72, A
+56, C 75. NR at 2.5x with Frame Generation 2x: ~55 game frames, ~110 shown.
+NR alone (no DLAA, the game's 2x MSAA, motion pass for NR only), switched
+on and off every 15 s under the D3D12 debug layer: the feature was created
+six times, no errors. With G-Sync, turn "Even frame pacing" off to keep the
+~72 FPS at 2x instead of the 60 it holds.

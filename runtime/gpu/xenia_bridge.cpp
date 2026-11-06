@@ -16,6 +16,7 @@
 #include "native/renderer.h"
 #ifdef FD_NATIVE_RENDERER
 #include "native/frame_generation.h"
+#include "native/upscaler.h"
 #endif
 #endif
 #include "../settings.h"
@@ -28,6 +29,8 @@
 #include "xenia/base/cvar.h"
 #include "xenia/gpu/gpu_flags.h"
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
@@ -398,6 +401,55 @@ bool Initialize() {
       } else kernel::Log("gpu: no guest image available for capture");
     }).detach();
   }
+#ifdef FD_NATIVE_RENDERER
+  // FD_DLSS_NR_SWEEP=<file> (diagnostic): DLSS 5 settings changed live in one session.
+  // One step per line, "label key=value ..." (enabled model intensity structure tone
+  // passes preset split; '#' starts a comment). Each step is held FD_DLSS_NR_SWEEP_STEP
+  // seconds (default 6) from FD_DLSS_NR_SWEEP_START (default 100), then the guest
+  // output is saved as <label>.png next to the file and the frame rate is logged.
+  if (const char* sweep = getenv("FD_DLSS_NR_SWEEP"); sweep && *sweep) {
+    std::thread([file = std::string(sweep)] {
+      std::vector<std::string> lines;
+      std::ifstream in(file);
+      for (std::string line; std::getline(in, line);)
+        if (!line.empty() && line[0] != '#') lines.push_back(line);
+      const char* start = getenv("FD_DLSS_NR_SWEEP_START");
+      const char* step = getenv("FD_DLSS_NR_SWEEP_STEP");
+      std::this_thread::sleep_for(std::chrono::seconds(start ? atoi(start) : 100));
+      const auto folder = std::filesystem::path(file).parent_path();
+      for (const std::string& line : lines) {
+        std::istringstream words(line);
+        std::string label, word;
+        words >> label;
+        gpu::native::NeuralSettings n = gpu::native::GetNeuralSettings();
+        while (words >> word) {
+          const size_t eq = word.find('=');
+          if (eq == std::string::npos) continue;
+          const std::string key = word.substr(0, eq);
+          const double value = atof(word.c_str() + eq + 1);
+          if (key == "enabled") n.enabled = value != 0;
+          else if (key == "model") n.model = uint32_t(value);
+          else if (key == "intensity") n.intensity = float(value);
+          else if (key == "structure") n.structure = float(value);
+          else if (key == "tone") n.tone = float(value);
+          else if (key == "passes") n.passes = uint32_t(value);
+          else if (key == "preset") n.preset = int(value);
+          else if (key == "split") n.split = int(value);
+        }
+        gpu::native::SetNeuralSettings(n);
+        std::this_thread::sleep_for(std::chrono::seconds(step ? atoi(step) : 6));
+        const double fps = gpu::FrameTimings().Snapshot().fps;
+        xe::ui::RawImage image;
+        auto* presenter = g_nativePresenter ? g_nativePresenter.get() : g_graphics->presenter();
+        const std::string path = (folder / (label + ".png")).string();
+        const bool saved = presenter->CaptureGuestOutput(image) && !image.data.empty() &&
+                           stbi_write_png(path.c_str(), image.width, image.height, 4, image.data.data(), int(image.stride)) != 0;
+        kernel::Log("nr sweep: %s %.1f fps (%s)", label.c_str(), fps, saved ? "captured" : "no capture");
+        fprintf(stderr, "nr sweep: %s %.1f fps (%s)\n", label.c_str(), fps, saved ? "captured" : "no capture");
+      }
+    }).detach();
+  }
+#endif
   return true;
 }
 bool Active() { return g_graphics != nullptr; }

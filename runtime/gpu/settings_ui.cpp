@@ -85,6 +85,16 @@ void ApplyLive() {
     gpu::native::SetAnisotropySetting(d.anisotropy > 0 ? 1u << (d.anisotropy - 1) : 1u);
     gpu::native::SetShadowScaleSetting(uint32_t(d.shadowScale));
     gpu::native::SetHdrLevels(float(d.hdrPaperWhite), float(d.hdrPeak));
+    {
+        gpu::native::NeuralSettings neural;
+        neural.enabled = d.neural;
+        neural.model = uint32_t(d.neuralModel);
+        neural.intensity = d.neuralIntensity / 100.0f;
+        neural.structure = d.neuralStructure / 100.0f;
+        neural.tone = d.neuralTone / 100.0f;
+        neural.passes = uint32_t(d.neuralPasses);
+        gpu::native::SetNeuralSettings(neural);
+    }
     xe::ui::d3d12::fd_present_hooks.hdr_capture_scale = 80.0f / float(d.hdrPaperWhite);
     if (gpu::native::fg::Loaded()) gpu::native::fg::SetFrames(gpu::native::fg::ConfiguredFrames(d.frameGeneration));
     gameloop::SetFrameGenerationActive(gpu::native::fg::Loaded() && gpu::native::fg::ConfiguredFrames(d.frameGeneration) > 0);
@@ -350,6 +360,42 @@ private:
                     Help("The sun's shadows use four 512×512 shadow maps, blocky next to a high internal resolution. "
                          "2× and 4× render them at 1024 or 2048 pixels: sharper shadow edges and fewer jagged steps. "
                          "Applies immediately.");
+                } else ImGui::TextDisabled("Available with the native renderer.");
+                Section("DLSS 5 NEURAL RENDERING");
+                if (nativeBackend_) {
+#ifdef FD_NATIVE_RENDERER
+                    const auto neural = gpu::native::GetNeuralStatus();
+                    ImGui::Checkbox("Neural rendering", &d.neural);
+                    Help("NVIDIA DLSS 5 Neural Rendering: an AI model reworks the lighting and fine detail of the 3D scene "
+                         "(guided by its depth and motion), before the HUD is drawn. Needs an RTX 50 series GPU and a recent "
+                         "driver. It runs at the internal resolution and is heavy: on an RTX 5060 Ti about 99 -> 55 FPS at 2.5×, "
+                         "72 FPS at 2× and 83 FPS at 1.5× (first level, DLAA); Frame Generation 2× doubles what is shown. "
+                         "Applies immediately.");
+                    ImGui::BeginDisabled(!d.neural);
+                    ImGui::Combo("Model", &d.neuralModel, "Model A (Default)\0Model B (Natural)\0Model C (Cinematic)\0");
+                    Help("Three looks trained by NVIDIA (the names in brackets are the ones the modding community uses): "
+                         "C is the softest and most muted; A and B add more detail. "
+                         "Applies immediately.");
+                    ImGui::SliderInt("Strength", &d.neuralIntensity, 0, 200, "%d%%");
+                    Help("How much of the neural image replaces the game's own image. Applies immediately.");
+                    ImGui::SliderInt("Structure", &d.neuralStructure, 0, 200, "%d%%");
+                    Help("Strength of the added fine detail (surfaces, rocks, foliage). Applies immediately.");
+                    ImGui::SliderInt("Tone", &d.neuralTone, 0, 200, "%d%%");
+                    Help("Strength of the local lighting changes (contrast, shading). Applies immediately.");
+                    ImGui::SliderInt("Passes", &d.neuralPasses, 1, 3);
+                    Help("Runs neural rendering again on its own result for a stronger effect. Each pass costs about as much "
+                         "GPU time as the first. Applies immediately.");
+                    ImGui::EndDisabled();
+                    if (d.neural)
+                    {
+                        if (neural.available == 0)
+                            ImGui::TextColored(ImVec4(1, .5f, .4f, 1), "Unavailable: %s", neural.reason[0] ? neural.reason : "needs an RTX 50 GPU, a recent driver and nvngx_dlssnr.dll");
+                        else if (neural.active)
+                            ImGui::TextColored(ImVec4(.55f, .85f, .55f, 1), "Neural rendering active  |  %u×%u  |  %llu frames",
+                                               neural.width, neural.height, (unsigned long long)neural.frames);
+                        else ImGui::TextDisabled("Active once a 3D scene is shown (menus and videos are unchanged).");
+                    }
+#endif
                 } else ImGui::TextDisabled("Available with the native renderer.");
                 Section("HDR");
                 if (nativeBackend_) {

@@ -38,6 +38,12 @@ struct Data {
     bool hdr = false;       // native renderer: HDR output (scRGB; on restart)
     int hdrPaperWhite = 200; // nits of SDR white in HDR (live)
     int hdrPeak = 800;       // nits of the brightest highlights in HDR (live)
+    bool neural = false;     // native renderer: DLSS 5 Neural Rendering on the graded scene (live)
+    int neuralModel = 2;     // Model A / B / C (C by default)
+    int neuralIntensity = 100; // percent (0-200): overall strength; community default 100
+    int neuralStructure = 100; // percent (0-200): local structure (detail); community default 100
+    int neuralTone = 100;      // percent (0-200): local tone (lighting); community default 100
+    int neuralPasses = 1;      // 1..3 sequential passes (stronger, each costs as much again)
     int presentation = 0; // bilinear, FSR, CAS
     int sharpness = 20;
     int upscaler = 0; // native renderer: off, DLAA, DLSS quality / balanced / performance / ultra (live)

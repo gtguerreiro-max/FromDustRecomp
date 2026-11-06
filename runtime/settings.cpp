@@ -25,6 +25,11 @@ void Normalize(Data& d) {
     if (d.shadowScale != 1 && d.shadowScale != 2 && d.shadowScale != 4) d.shadowScale = 1;
     d.hdrPaperWhite = std::clamp(d.hdrPaperWhite, 80, 500);
     d.hdrPeak = std::clamp(d.hdrPeak, std::max(d.hdrPaperWhite, 400), 4000);
+    d.neuralModel = std::clamp(d.neuralModel, 0, 2);
+    d.neuralIntensity = std::clamp(d.neuralIntensity, 0, 200);
+    d.neuralStructure = std::clamp(d.neuralStructure, 0, 200);
+    d.neuralTone = std::clamp(d.neuralTone, 0, 200);
+    d.neuralPasses = std::clamp(d.neuralPasses, 1, 3);
     d.presentation = std::clamp(d.presentation, 0, 2);
     d.sharpness = std::clamp(d.sharpness, 0, 100);
     d.upscaler = std::clamp(d.upscaler, 0, 5);
@@ -70,6 +75,12 @@ void Load(const std::filesystem::path& path) {
     d.hdr = read(L"Graphics", L"HDR", d.hdr) != 0;
     d.hdrPaperWhite = read(L"Graphics", L"HdrPaperWhite", d.hdrPaperWhite);
     d.hdrPeak = read(L"Graphics", L"HdrPeak", d.hdrPeak);
+    d.neural = read(L"Graphics", L"NeuralRendering", d.neural) != 0;
+    d.neuralModel = read(L"Graphics", L"NeuralModel", d.neuralModel);
+    d.neuralIntensity = read(L"Graphics", L"NeuralIntensity", d.neuralIntensity);
+    d.neuralStructure = read(L"Graphics", L"NeuralStructure", d.neuralStructure);
+    d.neuralTone = read(L"Graphics", L"NeuralTone", d.neuralTone);
+    d.neuralPasses = read(L"Graphics", L"NeuralPasses", d.neuralPasses);
     d.presentation = read(L"Graphics", L"Presentation", d.presentation);
     d.sharpness = read(L"Graphics", L"Sharpness", d.sharpness);
     d.upscaler = read(L"Graphics", L"Upscaler", d.upscaler);
@@ -134,6 +145,12 @@ bool Save() {
     write(L"Graphics", L"HDR", d.hdr);
     write(L"Graphics", L"HdrPaperWhite", d.hdrPaperWhite);
     write(L"Graphics", L"HdrPeak", d.hdrPeak);
+    write(L"Graphics", L"NeuralRendering", d.neural);
+    write(L"Graphics", L"NeuralModel", d.neuralModel);
+    write(L"Graphics", L"NeuralIntensity", d.neuralIntensity);
+    write(L"Graphics", L"NeuralStructure", d.neuralStructure);
+    write(L"Graphics", L"NeuralTone", d.neuralTone);
+    write(L"Graphics", L"NeuralPasses", d.neuralPasses);
     write(L"Graphics", L"Presentation", d.presentation);
     write(L"Graphics", L"Sharpness", d.sharpness);
     write(L"Graphics", L"Upscaler", d.upscaler);
