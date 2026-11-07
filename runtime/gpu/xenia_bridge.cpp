@@ -435,9 +435,15 @@ bool Initialize() {
           else if (key == "passes") n.passes = uint32_t(value);
           else if (key == "preset") n.preset = int(value);
           else if (key == "split") n.split = int(value);
+          else if (key == "waterfix" || key == "watergain") {
+            bool scale; float gain;
+            gpu::native::WaterStepDiagnostic(scale, gain);
+            if (key == "waterfix") scale = value != 0; else gain = float(value);
+            gpu::native::SetWaterStepDiagnostic(scale, gain);
+          }
         }
         gpu::native::SetNeuralSettings(n);
-        std::this_thread::sleep_for(std::chrono::seconds(step ? atoi(step) : 6));
+        std::this_thread::sleep_for(std::chrono::duration<double>(step ? atof(step) : 6.0));
         const double fps = gpu::FrameTimings().Snapshot().fps;
         xe::ui::RawImage image;
         auto* presenter = g_nativePresenter ? g_nativePresenter.get() : g_graphics->presenter();

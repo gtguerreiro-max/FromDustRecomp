@@ -1909,3 +1909,26 @@ NR alone (no DLAA, the game's 2x MSAA, motion pass for NR only), switched
 on and off every 15 s under the D3D12 debug layer: the feature was created
 six times, no errors. With G-Sync, turn "Even frame pacing" off to keep the
 ~72 FPS at 2x instead of the 60 it holds.
+
+## Water texture speed with the fixed-rate world — 2026-11-07
+
+User report: with "Fixed-rate world simulation" on, the water looked sped
+up. Measured at ~100-120 FPS: the world component (dustai sub_8A237C20) runs
+30 times per second and the 512x512 height field (terrain and water, erosion
+included) updates ~30 times per second, as in the original game; the two
+components that run every frame do no simulation (sub_823285E8 is empty,
+sub_825715B8 is a state machine). The one effect with a fixed step per
+rendered frame is the water UV advection pass, the pixel shader that samples
+`g_SamplerPreviousUV` (099 in the catalog): every draw moves the water's
+texture coordinates along the flow by `PS_f4_WaterTime.x` (c36, 0.0032) and
+`PS_f4_UVScrollParams.y` (c38, 0.0029), made for one draw per 30 Hz frame
+(`WaterTime.y` is a real-time phase and is fine). At 100 FPS the water
+texture flowed 3-4x faster. With the fixed-rate world on, live frames now
+scale those two constants on that draw by the frame's share of a world step
+(frame time x world rate, at most 2: x0.25 at 118 FPS, x0.99 at 30). The
+world steps every frame without it, and replays are untouched. Diagnostics:
+`FD_NO_WATER_STEP_SCALE=1` (off), `FD_TRACE_WATER_STEP=1`,
+`FD_WATER_STEP_GAIN=<k>`, sweep keys `waterfix=` / `watergain=`, and
+`FD_TRACE_PS_CONST=<ps>:<register>[,...]` (a pixel shader constant per frame).
+At the distance of the first level the depth of field and the wave animation
+hide that motion in captures; the check is in game.

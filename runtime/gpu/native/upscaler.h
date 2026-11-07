@@ -74,6 +74,13 @@ void SetHdrDisplay(int state, float maxNits);
 void SetWorldRateSource(double (*rate)());
 void SetWorldInterpolationSetting(bool on);
 double WorldInterpolationRate();
+// The fixed-rate world's step rate whatever the interpolation setting (0: the
+// world steps every frame).
+double WorldRate();
+// Water UV advection step (diagnostic, FD_DLSS_NR_SWEEP "waterfix=" / "watergain="):
+// scaling to the frame rate on or off, and a gain on the step.
+void SetWaterStepDiagnostic(bool scale, float gain);
+void WaterStepDiagnostic(bool& scale, float& gain);
 void HdrDisplay(int& state, float& maxNits);
 const char* UpscalerModeName(UpscalerMode mode);
 

@@ -109,6 +109,18 @@ double WorldInterpolationRate()
     const auto rate = g_worldRate.load();
     return off || !g_worldInterpolation.load() || !rate ? 0.0 : rate();
 }
+namespace
+{
+std::atomic<bool> g_waterStepScale{true};
+std::atomic<float> g_waterStepGain{1.0f};
+}
+void SetWaterStepDiagnostic(bool scale, float gain) { g_waterStepScale = scale; g_waterStepGain = gain; }
+void WaterStepDiagnostic(bool& scale, float& gain) { scale = g_waterStepScale.load(); gain = g_waterStepGain.load(); }
+double WorldRate()
+{
+    const auto rate = g_worldRate.load();
+    return rate ? rate() : 0.0;
+}
 void HdrDisplay(int& state, float& maxNits) { state = g_hdrDisplay.load(); maxNits = g_hdrDisplayNits.load(); }
 void SetUpscalerSetting(UpscalerMode mode) { g_setting = uint32_t(mode); }
 UpscalerMode UpscalerSetting() { return UpscalerMode(g_setting.load()); }

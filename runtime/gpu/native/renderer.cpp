@@ -545,6 +545,10 @@ struct gpu::native::Renderer::Impl
         std::chrono::steady_clock::time_point changed, lastFrame;
         double frameInterval = 0; // seconds, eased
         uint64_t blends = 0, steps = 0;
+        // Water UV advection pass (see waterStepScale): PS -> samples g_SamplerPreviousUV.
+        std::map<std::string, bool> advection;
+        std::chrono::steady_clock::time_point lastRender;
+        uint64_t scaledDraws = 0;
     } worldInterp;
     // The last submitted frame's fence value: the presenter's copy waits for
     // it on the GPU.
@@ -2043,6 +2047,35 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     int32_t interpDescriptor = -1, interpSource = -1;
     std::map<uint32_t, uint32_t> interpViews; // swizzle -> descriptor of a view of the blend
     const double worldRate = frame.continuous && liveResources && shaderCatalog && packVs ? WorldInterpolationRate() : 0.0;
+    // Fixed-rate world: the water's UV advection pass (the pixel shader that
+    // samples g_SamplerPreviousUV) moves the water texture along the flow by a
+    // fixed step per draw (PS_f4_WaterTime.x, c36, 0.0032, and
+    // PS_f4_UVScrollParams.y, c38, 0.0029), made for one draw per world step.
+    // Above 30 FPS it is drawn every frame, so the water flowed 2-4x faster;
+    // the steps are scaled by this frame's share of a world step instead.
+    double waterStepScale = 1.0;
+    {
+        bool scaleStep = true; float stepGain = 1.0f;
+        WaterStepDiagnostic(scaleStep, stepGain);
+        const double rate = frame.continuous && shaderCatalog && scaleStep && !CachedEnv("FD_NO_WATER_STEP_SCALE") ? WorldRate() : 0.0;
+        const auto now = std::chrono::steady_clock::now();
+        if (rate > 0 && worldInterp.lastRender.time_since_epoch().count())
+            waterStepScale = (std::clamp)(std::chrono::duration<double>(now - worldInterp.lastRender).count() * rate, 0.0, 2.0);
+        worldInterp.lastRender = now;
+        // FD_WATER_STEP_GAIN=<k> (diagnostic): multiplies the step (shows what the pass moves).
+        if (frame.continuous && CachedEnv("FD_WATER_STEP_GAIN")) waterStepScale *= atof(CachedEnv("FD_WATER_STEP_GAIN"));
+        if (frame.continuous) waterStepScale *= stepGain;
+    }
+    auto isAdvection = [&](const std::string& ps) {
+        auto found = worldInterp.advection.find(ps);
+        if (found != worldInterp.advection.end()) return found->second;
+        const auto* shader = shaderCatalog ? shaderCatalog->Find(ps, ShaderStage::Pixel) : nullptr;
+        const std::string text = shader ? std::string(shader->source.begin(), shader->source.end()) : std::string();
+        const bool advection = text.find("g_SamplerPreviousUV") != std::string::npos && text.find("PS_f4_WaterTime") != std::string::npos &&
+                               text.find("PS_f4_UVScrollParams") != std::string::npos;
+        if (advection) fprintf(stderr, "native renderer: water UV advection pass %s, steps scaled to the frame rate\n", ps.c_str());
+        return worldInterp.advection.emplace(ps, advection).first->second;
+    };
     auto isHeightConsumer = [&](const std::string& ps) {
         if (ps.empty()) return false;
         auto found = worldInterp.consumers.find(ps);
@@ -2155,9 +2188,35 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     }
     // FD_STOP_AFTER=<record>: debug, replay only up to that record.
     const size_t stopAfter = getenv("FD_STOP_AFTER") ? size_t(atoi(getenv("FD_STOP_AFTER"))) : draws.size();
+    // FD_TRACE_PS_CONST=<ps>:<register>[,...] (diagnostic): that pixel shader
+    // constant of the first draw with that shader, each frame, with the time
+    // and the number of draws using the shader this frame.
+    static const char* traceConstOption = getenv("FD_TRACE_PS_CONST");
+    std::map<std::string, std::pair<int, int>> traceConst; // ps -> register, draws
+    if (traceConstOption && frame.continuous)
+    {
+        std::string list = traceConstOption;
+        for (size_t at = 0; at < list.size();)
+        {
+            const size_t end = (std::min)(list.find(',', at), list.size());
+            const std::string item = list.substr(at, end - at);
+            const size_t colon = item.find(':');
+            if (colon != std::string::npos) traceConst[item.substr(0, colon)] = {atoi(item.c_str() + colon + 1), 0};
+            at = end + 1;
+        }
+    }
     for (size_t i = 0; i < draws.size() && i <= stopAfter; ++i)
     {
         const Draw& d = draws[i];
+        if (!traceConst.empty() && !d.ps.empty() && d.psConstants)
+            if (auto found = traceConst.find(d.ps); found != traceConst.end() && found->second.second++ == 0)
+            {
+                static const auto start = std::chrono::steady_clock::now();
+                float v[4];
+                memcpy(v, d.psConstants + found->second.first * 16, 16);
+                fprintf(stderr, "ps const %s c%d t=%.4f: %.6f %.6f %.6f %.6f\n", d.ps.c_str(), found->second.first,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), v[0], v[1], v[2], v[3]);
+            }
         const auto profileDrawStart=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         struct RecordTimer
         {
@@ -2542,6 +2601,15 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         }
         if (d.psConstEnd > d.psConstFirst && d.psConstants)
             memcpy(drawConstants + 4096 + d.psConstFirst * 16, d.psConstants + d.psConstFirst * 16, size_t(d.psConstEnd - d.psConstFirst) * 16);
+        if (waterStepScale != 1.0 && d.psConstants && d.psConstFirst <= 36 && d.psConstEnd > 38 && !d.ps.empty() && isAdvection(d.ps))
+        {
+            float* waterTime = reinterpret_cast<float*>(drawConstants + 4096 + 36 * 16);
+            float* uvScroll = reinterpret_cast<float*>(drawConstants + 4096 + 38 * 16);
+            waterTime[0] *= float(waterStepScale);
+            uvScroll[1] *= float(waterStepScale);
+            if (++worldInterp.scaledDraws % 1800 == 1 && CachedEnv("FD_TRACE_WATER_STEP"))
+                fprintf(stderr, "water step: x%.3f (%llu draws)\n", waterStepScale, (unsigned long long)worldInterp.scaledDraws);
+        }
         uint8_t* shared = drawConstants + 8192;
         memset(shared, 0, kSharedSize);
         if(profile)
