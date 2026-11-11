@@ -1875,8 +1875,14 @@ Diagnostics: `FD_DLSS_NR_BYPASS=1` evaluates without using the result;
 `FD_DLSS_NR_SPLIT=1` shows the result on the right half only, `=2` the middle
 of the scene twice (before | after, the same pixels of the same frame);
 `FD_DLSS_NR_TOGGLE=<s>` switches it on / off every s seconds;
-`FD_DLSS_NR_PRESET=<n>` picks the network preset; `FD_DLSS_NR_NO_AUTOMASK=1`
-uses the control mask alone; `FD_DLSS_NR_DEPTH_NORMAL=1` flags the depth as
+`FD_DLSS_NR_PRESET=<n>` picks the network preset; `FD_DLSS_NR_AUTOMASK=1`
+turns on the model's skin auto mask, combined with the control mask by "min"
+(`=2`: the control mask taking precedence). It is off by default, as in the
+PGR4 port, where by "min" it kept the model to faces and skin. Here it made
+little difference: in the first level (model C, split view) the model changes
+the whole terrain and water either way, mean 6.1 of 255 without the auto mask,
+6.0 with it, 6.7 % / 6.3 % of pixels by more than 10. The effect on the scene
+is real but mild; `FD_DLSS_NR_DEPTH_NORMAL=1` flags the depth as
 not inverted. `FD_DLSS_NR_SWEEP=<file>` changes the settings live in one
 session: one step per line (`label enabled=1 model=2 intensity=1 structure=1
 tone=1 passes=1 preset=2 split=2`), each held `FD_DLSS_NR_SWEEP_STEP` seconds

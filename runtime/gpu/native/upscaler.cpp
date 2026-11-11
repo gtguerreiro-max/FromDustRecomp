@@ -322,12 +322,16 @@ bool Upscaler::EvaluateNeural(ID3D12GraphicsCommandList* list, const NeuralFrame
     NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, f.settings.tone);
     NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength, f.settings.structure);
     NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSSNR_Style, f.settings.model);
-    // The skin auto mask, combined with the (white) control mask by "min", as
-    // RTX Remix does; FD_DLSS_NR_NO_AUTOMASK=1 (diagnostic) uses the control mask alone.
-    static const bool autoMask = getenv("FD_DLSS_NR_NO_AUTOMASK") == nullptr;
+    // The skin auto mask is off, as in the PGR4 port (where, combined with the white
+    // control mask by "min", it kept the model to faces and skin): the white control
+    // mask alone applies it to the whole scene. In From Dust the scene changed about
+    // as much either way (first level: mean 6.1 / 6.0 of 255).
+    // FD_DLSS_NR_AUTOMASK (diagnostic): 1 the auto mask by "min", 2 the auto mask
+    // with the control mask taking precedence.
+    static const int autoMask = [] { const char* v = getenv("FD_DLSS_NR_AUTOMASK"); return v && *v ? std::clamp(atoi(v), 0, 2) : 0; }();
     NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, autoMask ? 1 : 0);
     NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_MaskBlendMode,
-                             int(autoMask ? NVSDK_NGX_DLSSNR_Mask_Blend_Mode_Min : NVSDK_NGX_DLSSNR_Mask_Blend_Mode_None));
+                             int(autoMask == 1 ? NVSDK_NGX_DLSSNR_Mask_Blend_Mode_Min : NVSDK_NGX_DLSSNR_Mask_Blend_Mode_None));
     // -1: skin follows the local structure strength (the model's own default).
     NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, -1.0f);
     NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_Reset, f.reset ? 1 : 0);
