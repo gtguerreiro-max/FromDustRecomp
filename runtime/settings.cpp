@@ -49,7 +49,7 @@ void Normalize(Data& d) {
     d.deadzone = std::clamp(d.deadzone, 0, 30);
     d.volume = std::clamp(d.volume, 0, 100);
     for (size_t i = 0; i < d.keys.size(); ++i) {
-        if (!d.keys[i] || d.keys[i] > 0xFE || d.keys[i] == VK_F1 || d.keys[i] == VK_F11 || d.keys[i] == VK_ESCAPE)
+        if (!d.keys[i] || d.keys[i] > 0xFE || d.keys[i] == VK_F1 || d.keys[i] == VK_F8 || d.keys[i] == VK_F11 || d.keys[i] == VK_ESCAPE)
             d.keys[i] = kDefaultKeys[i];
     }
 }
@@ -188,7 +188,7 @@ bool Save() {
 }
 bool Bind(Action action, uint16_t key) {
     if (action < 0 || action >= ActionCount || !key || key > 0xFE ||
-        key == VK_F1 || key == VK_F11 || key == VK_ESCAPE) return false;
+        key == VK_F1 || key == VK_F8 || key == VK_F11 || key == VK_ESCAPE) return false;
     std::lock_guard lock(g_mutex);
     const auto old = g_data.keys[action];
     for (int i = 0; i < ActionCount; ++i)

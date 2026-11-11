@@ -1854,10 +1854,38 @@ application (the RTX SDKs licence forbids working around technical
 limitations); on a GPU or driver that says no, the option reports
 "unavailable" and the frame is unchanged.
 
-**Pipeline.** NR runs after the game's colour grading draw (the pixel shader
-that samples `samp_ColoremapR`, the same detection as the HDR hudless copy),
-on the tonemapped, sRGB-encoded SDR scene at the output size and before the
-HUD, subtitles and menus are drawn, as RTX Remix does. `neural_io.hlsl`
+**Stage (2026-11-11).** NR now runs on the scene before the game's colour
+grading, as the PGR4 port does (there, too, the effect was barely visible on
+the finished image). The grading shader (PS 130, `samp_ColoremapR`) reads the
+scene from fetch slot 1 (`samp_SourceSceneBilinear`), adds depth of field and
+bloom, then saturation and the colour tables. That slot is the scene resolve
+DLAA / DLSS already works on (R8G8B8A8_UNORM, copy bias 0, fetch scale 1: SDR
+in [0, 1], so it goes to the model as it is). `runUpscale` runs NR on it right
+after DLAA / DLSS (or after the motion pass without them): the result is drawn
+into a scratch render target (the scene copy is a plain texture; the scene is
+copied in first so its alpha stays) and copied back. The game's depth of
+field, bloom, saturation and colour tables then work on the model's image,
+and the HUD stays untouched. Measured, first level, split view, above the
+subtitles (mean change of 255 / pixels changed by more than 10):
+
+| Setting | Final image | Scene |
+|---|---|---|
+| Model C, 100 % | 3.6 / 1.5 % | 4.5 / 5.1 % |
+| Model A, 200 % structure and tone | 3.0 / 0.4 % | 6.1 / 10.5 % |
+
+`FD_DLSS_NR_STAGE=final` runs it on the graded image as before (3.6 / 1.4 %,
+the same as the old code).
+
+**F8** turns NR on and off in play (the F1 checkbox, saved), with a notice at
+the top for 2 s ("DLSS 5 on / off / unavailable"); F8 cannot be bound to a
+game action. Checked with posted key presses: off -> on -> off, the feature
+released and created again, ~55 FPS on and ~96 off (model A at 200 %, 2.5x,
+DLAA, RTX 5060 Ti).
+
+**Pipeline (the final stage).** NR runs after the game's colour grading draw
+(the pixel shader that samples `samp_ColoremapR`, the same detection as the
+HDR hudless copy), on the tonemapped, sRGB-encoded SDR scene at the output
+size and before the HUD, subtitles and menus are drawn, as RTX Remix does. `neural_io.hlsl`
 copies the scene into an FP16 texture with alpha 1 (Remix's input format;
 the game's grading shader leaves its blue channel in alpha) and writes the
 FP16 result back into the scene's RGB, keeping the game's alpha. Other
@@ -1882,7 +1910,7 @@ PGR4 port, where by "min" it kept the model to faces and skin. Here it made
 little difference: in the first level (model C, split view) the model changes
 the whole terrain and water either way, mean 6.1 of 255 without the auto mask,
 6.0 with it, 6.7 % / 6.3 % of pixels by more than 10. The effect on the scene
-is real but mild; `FD_DLSS_NR_DEPTH_NORMAL=1` flags the depth as
+is real but mild. Compared with the PGR4 port's working DLSS 5 (2026-11-11): the tuning (style, strengths, intensity, masks) is now also set before the feature is created and the feature created again when it changes, as PGR4 does (the model latches it; `FD_DLSS_NR_NO_LATCH=1` the old way). Measured: no difference here (model C defaults 3.64 of 255 either way above the subtitles; model A at 200 % 3.04 / 3.09), nor with preset 0 (the DLL's default, as PGR4) instead of B (3.64). The input (the graded sRGB scene, alpha 1) and the 4-channel white mask match RTX Remix and PGR4. What PGR4 does differently by design: it runs the model on its linear HDR scene before the game's tone mapping (metered white point, soft knee, sRGB proxy), composes the change back in linear light with a MaxRatio clamp, and stabilises the change over time; `FD_DLSS_NR_DEPTH_NORMAL=1` flags the depth as
 not inverted. `FD_DLSS_NR_SWEEP=<file>` changes the settings live in one
 session: one step per line (`label enabled=1 model=2 intensity=1 structure=1
 tone=1 passes=1 preset=2 split=2`), each held `FD_DLSS_NR_SWEEP_STEP` seconds

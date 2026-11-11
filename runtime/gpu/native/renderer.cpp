@@ -583,6 +583,11 @@ struct gpu::native::Renderer::Impl
         // DLSS 5 Neural Rendering: a copy of the graded scene (input), the
         // UAV output and a white control mask at render size.
         std::unique_ptr<RenderTexture> neuralInput, neuralOutput, neuralOutput2, neuralMask;
+        // The scene stage: the scene copy is a plain texture, so the result is drawn
+        // here (a render target of its format and size) and copied into it.
+        std::unique_ptr<RenderTexture> neuralScratch;
+        uint32_t neuralScratchWidth = 0, neuralScratchHeight = 0;
+        RenderFormat neuralScratchFormat = RenderFormat::UNKNOWN;
         std::unique_ptr<RenderFramebuffer> neuralMaskFramebuffer, neuralInputFramebuffer, neuralWriteFramebuffer;
         std::unique_ptr<RenderShader> neuralToPs, neuralFromPs;
         std::unique_ptr<RenderPipeline> neuralToPipeline;
@@ -1305,7 +1310,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
         upscale.ngx.ReleaseNeural();
         upscale.neuralInput.reset();upscale.neuralOutput.reset();upscale.neuralOutput2.reset();
         upscale.neuralMaskFramebuffer.reset();upscale.neuralMask.reset();
-        upscale.neuralInputFramebuffer.reset();upscale.neuralWriteFramebuffer.reset();
+        upscale.neuralInputFramebuffer.reset();upscale.neuralWriteFramebuffer.reset();upscale.neuralScratch.reset();upscale.neuralScratchWidth=upscale.neuralScratchHeight=0;
         upscale.neuralWidth=upscale.neuralHeight=upscale.neuralMaskWidth=upscale.neuralMaskHeight=0;
         NeuralStatus status;status.available=upscale.ngx.NeuralAvailable()?1:0;
         PublishNeuralStatus(status);
@@ -1842,6 +1847,190 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
     };
     // DLAA / DLSS on the scene copy: camera motion + linear depth pass, NGX
     // evaluation, then the result replaces the copy the post-processing reads.
+    // DLSS 5 Neural Rendering on a colour surface (width x height; its depth and
+    // motion at the render size). viaCopy: the surface is a plain texture (the scene
+    // copy), written through a scratch render target.
+    // FD_DLSS_NR_STAGE: where it runs. "scene" (default): on the scene copy right
+    // after DLAA / DLSS, before the game's depth of field, bloom, saturation and
+    // colour grading (samp_SourceSceneBilinear of the grading shader), as the PGR4
+    // port does on its scene: the model's change then goes through the game's own
+    // look. "final": on the graded image before the HUD, as RTX Remix does (the
+    // effect on the scene was mild there).
+    static const bool neuralFinalStage=[]{const char* v=getenv("FD_DLSS_NR_STAGE");return v&&std::string(v)=="final";}();
+    bool neuralDone=false;
+    auto applyNeural=[&](Surface& rt,const uint32_t width,const uint32_t height,const bool viaCopy){
+        auto& up=upscale;
+                // As RTX Remix: NR reads and writes FP16 (the sRGB-encoded SDR scene,
+                // alpha 1); neural_io.hlsl converts in and out of the scene target.
+                constexpr RenderFormat neuralFormat=RenderFormat::R16G16B16A16_FLOAT;
+                if(!up.neuralToPs)
+                {
+                    up.neuralToPs=device->createShader(fd_native_neural_to_neural_ps,sizeof(fd_native_neural_to_neural_ps),"ps_to_neural",RenderShaderFormat::DXIL);
+                    up.neuralFromPs=device->createShader(fd_native_neural_from_neural_ps,sizeof(fd_native_neural_from_neural_ps),"ps_from_neural",RenderShaderFormat::DXIL);
+                    RenderGraphicsPipelineDesc desc;
+                    desc.pipelineLayout=layout.get();desc.vertexShader=packVs.get();desc.pixelShader=up.neuralToPs.get();
+                    desc.renderTargetFormat[0]=neuralFormat;desc.renderTargetBlend[0]=RenderBlendDesc::Copy();
+                    desc.renderTargetCount=1;desc.primitiveTopology=RenderPrimitiveTopology::TRIANGLE_LIST;
+                    up.neuralToPipeline=device->createGraphicsPipeline(desc);
+                }
+                auto& fromPipeline=up.neuralFromPipelines[rt.format];
+                if(!fromPipeline)
+                {
+                    RenderGraphicsPipelineDesc desc;
+                    desc.pipelineLayout=layout.get();desc.vertexShader=packVs.get();desc.pixelShader=up.neuralFromPs.get();
+                    desc.renderTargetFormat[0]=rt.format;desc.renderTargetBlend[0]=RenderBlendDesc::Copy();
+                    // The game's alpha (its grading shader leaves blue there) stays.
+                    desc.renderTargetBlend[0].renderTargetWriteMask=uint8_t(RenderColorWriteEnable::RED)|uint8_t(RenderColorWriteEnable::GREEN)|uint8_t(RenderColorWriteEnable::BLUE);
+                    desc.renderTargetCount=1;desc.primitiveTopology=RenderPrimitiveTopology::TRIANGLE_LIST;
+                    fromPipeline=device->createGraphicsPipeline(desc);
+                }
+                if(!up.neuralInput||up.neuralWidth!=width||up.neuralHeight!=height||up.neuralFormat!=rt.format)
+                {
+                    up.neuralInput=CreateTexture(device.get(),RenderTextureDesc::ColorTarget(width,height,neuralFormat));
+                    up.neuralOutput=CreateTexture(device.get(),RenderTextureDesc::Texture2D(width,height,1,neuralFormat,RenderTextureFlag::UNORDERED_ACCESS));
+                    up.neuralOutput2=CreateTexture(device.get(),RenderTextureDesc::Texture2D(width,height,1,neuralFormat,RenderTextureFlag::UNORDERED_ACCESS));
+                    const RenderTexture* color=up.neuralInput.get();
+                    RenderFramebufferDesc fb;fb.colorAttachments=&color;fb.colorAttachmentsCount=1;
+                    up.neuralInputFramebuffer=device->createFramebuffer(fb);
+                    up.neuralWidth=width;up.neuralHeight=height;up.neuralFormat=rt.format;up.neuralReset=true;
+                }
+                if(!up.neuralMask||up.neuralMaskWidth!=neuralRenderWidth||up.neuralMaskHeight!=neuralRenderHeight)
+                {
+                    up.neuralMask=CreateTexture(device.get(),RenderTextureDesc::ColorTarget(neuralRenderWidth,neuralRenderHeight,RenderFormat::R8G8B8A8_UNORM));
+                    const RenderTexture* color=up.neuralMask.get();
+                    RenderFramebufferDesc fb;fb.colorAttachments=&color;fb.colorAttachmentsCount=1;
+                    up.neuralMaskFramebuffer=device->createFramebuffer(fb);
+                    list->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(up.neuralMask.get(),RenderTextureLayout::COLOR_WRITE));
+                    list->setFramebuffer(up.neuralMaskFramebuffer.get());
+                    list->clearColor(0,RenderColor(1,1,1,1));
+                    up.neuralMaskWidth=neuralRenderWidth;up.neuralMaskHeight=neuralRenderHeight;
+                }
+                // The scene target's own framebuffer, made each frame (the previous
+                // one is released after RenderFrame waited for that frame). Through a
+                // copy: a scratch target, the scene first copied into it so its alpha
+                // stays (the result writes RGB only).
+                if(viaCopy&&(!up.neuralScratch||up.neuralScratchWidth!=width||up.neuralScratchHeight!=height||up.neuralScratchFormat!=rt.format))
+                {
+                    up.neuralScratch=CreateTexture(device.get(),RenderTextureDesc::ColorTarget(width,height,rt.format));
+                    up.neuralScratchWidth=width;up.neuralScratchHeight=height;up.neuralScratchFormat=rt.format;
+                }
+                RenderTexture* writeTexture=viaCopy?up.neuralScratch.get():rt.texture.get();
+                {
+                    const RenderTexture* color=writeTexture;
+                    RenderFramebufferDesc fb;fb.colorAttachments=&color;fb.colorAttachmentsCount=1;
+                    up.neuralWriteFramebuffer=device->createFramebuffer(fb);
+                }
+                const bool passes=up.neuralToPipeline&&static_cast<D3D12GraphicsPipeline*>(up.neuralToPipeline.get())->d3d&&
+                    fromPipeline&&static_cast<D3D12GraphicsPipeline*>(fromPipeline.get())->d3d&&
+                    packAt+2<=kMaxPacks&&nextView+3<=descriptorBase+kMaxTargets;
+                const int split=neuralSettings.split;
+                auto fullScreen=[&](RenderFramebuffer* framebuffer,RenderPipeline* pipeline,const uint32_t (&constants)[4]){
+                    memcpy(packMap+256*packAt,constants,sizeof(constants));
+                    list->setFramebuffer(framebuffer);
+                    list->setGraphicsPipelineLayout(layout.get());
+                    for(uint32_t set=0;set<5;++set)list->setGraphicsDescriptorSet(sets[set].get(),set);
+                    list->setPipeline(pipeline);
+                    list->setGraphicsRootDescriptor(RenderBufferReference(packConstants.get(),256*packAt++),2);
+                    list->setViewports(RenderViewport(0,0,float(width),float(height)));
+                    list->setScissors(RenderRect(0,0,width,height));
+                    list->drawInstanced(3,1,0,0);
+                };
+                bool evaluated=false;
+                if(passes)
+                {
+                    const uint32_t sceneIndex=nextView++,inputIndex=nextView++,outputIndex=nextView++;
+                    list->barriers(RenderBarrierStage::GRAPHICS,{
+                        RenderTextureBarrier(rt.texture.get(),RenderTextureLayout::SHADER_READ),
+                        RenderTextureBarrier(up.neuralInput.get(),RenderTextureLayout::COLOR_WRITE)});
+                    sets[0]->setTexture(sceneIndex,rt.texture.get(),RenderTextureLayout::SHADER_READ);
+                    fullScreen(up.neuralInputFramebuffer.get(),up.neuralToPipeline.get(),{sceneIndex,0,0,width});
+                    list->barriers(RenderBarrierStage::COMPUTE,{
+                        RenderTextureBarrier(up.neuralInput.get(),RenderTextureLayout::SHADER_READ),
+                        RenderTextureBarrier(up.motion.get(),RenderTextureLayout::SHADER_READ),
+                        RenderTextureBarrier(up.depth.get(),RenderTextureLayout::SHADER_READ),
+                        RenderTextureBarrier(up.neuralMask.get(),RenderTextureLayout::SHADER_READ)});
+                    NeuralFrame nf;
+                    nf.depth=static_cast<D3D12Texture*>(up.depth.get())->d3d;
+                    nf.motion=static_cast<D3D12Texture*>(up.motion.get())->d3d;
+                    nf.mask=static_cast<D3D12Texture*>(up.neuralMask.get())->d3d;
+                    nf.width=width;nf.height=height;nf.renderWidth=neuralRenderWidth;nf.renderHeight=neuralRenderHeight;
+                    nf.jitterX=jitterX;nf.jitterY=jitterY;
+                    nf.reset=up.neuralReset||!up.hasPrevious;
+                    // Reverse-Z device depth (FD_DLSS_NR_DEPTH_NORMAL=1, diagnostic: flag it as not inverted).
+                    nf.depthInverted=!CachedEnv("FD_DLSS_NR_DEPTH_NORMAL");
+                    nf.settings=neuralSettings;
+                    auto* commandList=static_cast<D3D12CommandList*>(list.get());
+                    // Pass k reads pass k-1's output (ping-pong between two UAV textures).
+                    RenderTexture* passInput=up.neuralInput.get();
+                    RenderTexture* passOutput=up.neuralOutput.get();
+                    evaluated=true;
+                    for(uint32_t pass=0;pass<neuralSettings.passes&&evaluated;++pass)
+                    {
+                        list->barriers(RenderBarrierStage::COMPUTE,{
+                            RenderTextureBarrier(passInput,RenderTextureLayout::SHADER_READ),
+                            RenderTextureBarrier(passOutput,RenderTextureLayout::GENERAL)});
+                        nf.color=static_cast<D3D12Texture*>(passInput)->d3d;
+                        nf.output=static_cast<D3D12Texture*>(passOutput)->d3d;
+                        evaluated=up.ngx.EvaluateNeural(commandList->d3d,nf,pass);
+                        commandList->notifyDescriptorHeapWasChangedExternally();
+                        if(pass+1<neuralSettings.passes)
+                        {
+                            passInput=passOutput;
+                            passOutput=passOutput==up.neuralOutput.get()?up.neuralOutput2.get():up.neuralOutput.get();
+                        }
+                    }
+                    RenderTexture* finalOutput=passOutput;
+                    // NGX changes the descriptor heaps, root signature, pipeline and topology.
+                    commandList->notifyDescriptorHeapWasChangedExternally();
+                    commandList->activeTopology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+                    commandList->activeGraphicsPipeline=nullptr;
+                    commandList->activeGraphicsPipelineLayout=nullptr;
+                    commandList->activeComputePipelineLayout=nullptr;
+                    commandList->targetFramebuffer=nullptr;
+                    if(evaluated&&!CachedEnv("FD_DLSS_NR_BYPASS"))
+                    {
+                        // FD_DLSS_NR_SPLIT (comparison): 1 = the result on the right half
+                        // only; 2 = the middle of the scene twice, before | after.
+                        if(viaCopy)
+                        {
+                            list->barriers(RenderBarrierStage::COPY,{
+                                RenderTextureBarrier(rt.texture.get(),RenderTextureLayout::COPY_SOURCE),
+                                RenderTextureBarrier(writeTexture,RenderTextureLayout::COPY_DEST)});
+                            list->copyTextureRegion(RenderTextureCopyLocation::Subresource(writeTexture,0),
+                                RenderTextureCopyLocation::Subresource(rt.texture.get(),0));
+                        }
+                        list->barriers(RenderBarrierStage::GRAPHICS,{
+                            RenderTextureBarrier(finalOutput,RenderTextureLayout::SHADER_READ),
+                            RenderTextureBarrier(writeTexture,RenderTextureLayout::COLOR_WRITE)});
+                        sets[0]->setTexture(inputIndex,up.neuralInput.get(),RenderTextureLayout::SHADER_READ);
+                        sets[0]->setTexture(outputIndex,finalOutput,RenderTextureLayout::SHADER_READ);
+                        fullScreen(up.neuralWriteFramebuffer.get(),fromPipeline.get(),{inputIndex,outputIndex,uint32_t(split),width});
+                        if(viaCopy)
+                        {
+                            list->barriers(RenderBarrierStage::COPY,{
+                                RenderTextureBarrier(writeTexture,RenderTextureLayout::COPY_SOURCE),
+                                RenderTextureBarrier(rt.texture.get(),RenderTextureLayout::COPY_DEST)});
+                            list->copyTextureRegion(RenderTextureCopyLocation::Subresource(rt.texture.get(),0),
+                                RenderTextureCopyLocation::Subresource(writeTexture,0));
+                        }
+                        up.neuralReset=false;
+                        if(++up.neuralFrames%600==1)fprintf(stderr,"native upscaler: DLSS neural rendering applied (%llu frames, %ux%u, model %u, %u pass%s)\n",
+                            (unsigned long long)up.neuralFrames,width,height,neuralSettings.model,neuralSettings.passes,neuralSettings.passes>1?"es":"");
+                    }
+                }
+                // The scene copy goes back to being read (the grading draw); the final
+                // target to being drawn into (the HUD).
+                list->barriers(RenderBarrierStage::GRAPHICS,{
+                    RenderTextureBarrier(rt.texture.get(),viaCopy?RenderTextureLayout::SHADER_READ:RenderTextureLayout::COLOR_WRITE),
+                    RenderTextureBarrier(up.motion.get(),RenderTextureLayout::COLOR_WRITE),
+                    RenderTextureBarrier(up.depth.get(),RenderTextureLayout::COLOR_WRITE)});
+                rt.shaderRead=viaCopy;
+                current=nullptr;
+                NeuralStatus status;
+                status.available=1;status.active=evaluated;status.frames=up.neuralFrames;status.width=width;status.height=height;
+                PublishNeuralStatus(status);
+        neuralDone=true;
+    };
     auto runUpscale=[&](const Draw& d,Target& t){
         auto snapIt=snapshots.find(d.copyDest);
         if(snapIt==snapshots.end()||!t.ds||!t.ds->texture)return;
@@ -1963,8 +2152,19 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             current=nullptr;
             if(!dlaa)up.reset=false;
         }
+        // DLSS 5 on the scene the grading draw reads (the scene copy, or DLSS Super
+        // Resolution's output in its place).
+        auto sceneNeural=[&]{
+            if(neuralFinalStage||!neuralReady||!up.motion||!up.depth)return;
+            Surface* scene=resolved.count(d.copyDest)?resolved[d.copyDest]:nullptr;
+            if(!scene||!scene->texture)return;
+            const bool upscaled=scene==&up.upscaled;
+            if(!upscaled&&scene!=&snap.surface)return;
+            applyNeural(*scene,upscaled?outW:w,upscaled?outH:h,true);
+        };
         if(!dlaa)
         {
+            sceneNeural();
             if(sceneCamera)
             {
                 std::copy(sceneVP,sceneVP+16,up.previousVP);
@@ -2030,6 +2230,7 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
             RenderTextureBarrier(up.depth.get(),RenderTextureLayout::COLOR_WRITE)});
         snap.surface.shaderRead=true;
         dumpTexture(snap.surface.texture.get(),snap.format,w,h,0xD1550001,RenderTextureLayout::SHADER_READ);
+        sceneNeural();
         if(sceneCamera)
         {
             std::copy(sceneVP,sceneVP+16,up.previousVP);
@@ -2920,154 +3121,12 @@ int gpu::native::Renderer::Impl::RenderFrame(const FrameInput& frame, const std:
                 Surface& rt=*target.rt[0];
                 resolveColor(rt);
                 auto& up=upscale;
-                if(neuralReady&&up.motion&&up.depth)
-                {
-                    const uint32_t width=target.width,height=target.height;
-                    // As RTX Remix: NR reads and writes FP16 (the sRGB-encoded SDR scene,
-                    // alpha 1); neural_io.hlsl converts in and out of the scene target.
-                    constexpr RenderFormat neuralFormat=RenderFormat::R16G16B16A16_FLOAT;
-                    if(!up.neuralToPs)
-                    {
-                        up.neuralToPs=device->createShader(fd_native_neural_to_neural_ps,sizeof(fd_native_neural_to_neural_ps),"ps_to_neural",RenderShaderFormat::DXIL);
-                        up.neuralFromPs=device->createShader(fd_native_neural_from_neural_ps,sizeof(fd_native_neural_from_neural_ps),"ps_from_neural",RenderShaderFormat::DXIL);
-                        RenderGraphicsPipelineDesc desc;
-                        desc.pipelineLayout=layout.get();desc.vertexShader=packVs.get();desc.pixelShader=up.neuralToPs.get();
-                        desc.renderTargetFormat[0]=neuralFormat;desc.renderTargetBlend[0]=RenderBlendDesc::Copy();
-                        desc.renderTargetCount=1;desc.primitiveTopology=RenderPrimitiveTopology::TRIANGLE_LIST;
-                        up.neuralToPipeline=device->createGraphicsPipeline(desc);
-                    }
-                    auto& fromPipeline=up.neuralFromPipelines[rt.format];
-                    if(!fromPipeline)
-                    {
-                        RenderGraphicsPipelineDesc desc;
-                        desc.pipelineLayout=layout.get();desc.vertexShader=packVs.get();desc.pixelShader=up.neuralFromPs.get();
-                        desc.renderTargetFormat[0]=rt.format;desc.renderTargetBlend[0]=RenderBlendDesc::Copy();
-                        // The game's alpha (its grading shader leaves blue there) stays.
-                        desc.renderTargetBlend[0].renderTargetWriteMask=uint8_t(RenderColorWriteEnable::RED)|uint8_t(RenderColorWriteEnable::GREEN)|uint8_t(RenderColorWriteEnable::BLUE);
-                        desc.renderTargetCount=1;desc.primitiveTopology=RenderPrimitiveTopology::TRIANGLE_LIST;
-                        fromPipeline=device->createGraphicsPipeline(desc);
-                    }
-                    if(!up.neuralInput||up.neuralWidth!=width||up.neuralHeight!=height||up.neuralFormat!=rt.format)
-                    {
-                        up.neuralInput=CreateTexture(device.get(),RenderTextureDesc::ColorTarget(width,height,neuralFormat));
-                        up.neuralOutput=CreateTexture(device.get(),RenderTextureDesc::Texture2D(width,height,1,neuralFormat,RenderTextureFlag::UNORDERED_ACCESS));
-                        up.neuralOutput2=CreateTexture(device.get(),RenderTextureDesc::Texture2D(width,height,1,neuralFormat,RenderTextureFlag::UNORDERED_ACCESS));
-                        const RenderTexture* color=up.neuralInput.get();
-                        RenderFramebufferDesc fb;fb.colorAttachments=&color;fb.colorAttachmentsCount=1;
-                        up.neuralInputFramebuffer=device->createFramebuffer(fb);
-                        up.neuralWidth=width;up.neuralHeight=height;up.neuralFormat=rt.format;up.neuralReset=true;
-                    }
-                    if(!up.neuralMask||up.neuralMaskWidth!=neuralRenderWidth||up.neuralMaskHeight!=neuralRenderHeight)
-                    {
-                        up.neuralMask=CreateTexture(device.get(),RenderTextureDesc::ColorTarget(neuralRenderWidth,neuralRenderHeight,RenderFormat::R8G8B8A8_UNORM));
-                        const RenderTexture* color=up.neuralMask.get();
-                        RenderFramebufferDesc fb;fb.colorAttachments=&color;fb.colorAttachmentsCount=1;
-                        up.neuralMaskFramebuffer=device->createFramebuffer(fb);
-                        list->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(up.neuralMask.get(),RenderTextureLayout::COLOR_WRITE));
-                        list->setFramebuffer(up.neuralMaskFramebuffer.get());
-                        list->clearColor(0,RenderColor(1,1,1,1));
-                        up.neuralMaskWidth=neuralRenderWidth;up.neuralMaskHeight=neuralRenderHeight;
-                    }
-                    // The scene target's own framebuffer, made each frame (the previous
-                    // one is released after RenderFrame waited for that frame).
-                    {
-                        const RenderTexture* color=rt.texture.get();
-                        RenderFramebufferDesc fb;fb.colorAttachments=&color;fb.colorAttachmentsCount=1;
-                        up.neuralWriteFramebuffer=device->createFramebuffer(fb);
-                    }
-                    const bool passes=up.neuralToPipeline&&static_cast<D3D12GraphicsPipeline*>(up.neuralToPipeline.get())->d3d&&
-                        fromPipeline&&static_cast<D3D12GraphicsPipeline*>(fromPipeline.get())->d3d&&
-                        packAt+2<=kMaxPacks&&nextView+3<=descriptorBase+kMaxTargets;
-                    const int split=neuralSettings.split;
-                    auto fullScreen=[&](RenderFramebuffer* framebuffer,RenderPipeline* pipeline,const uint32_t (&constants)[4]){
-                        memcpy(packMap+256*packAt,constants,sizeof(constants));
-                        list->setFramebuffer(framebuffer);
-                        list->setGraphicsPipelineLayout(layout.get());
-                        for(uint32_t set=0;set<5;++set)list->setGraphicsDescriptorSet(sets[set].get(),set);
-                        list->setPipeline(pipeline);
-                        list->setGraphicsRootDescriptor(RenderBufferReference(packConstants.get(),256*packAt++),2);
-                        list->setViewports(RenderViewport(0,0,float(width),float(height)));
-                        list->setScissors(RenderRect(0,0,width,height));
-                        list->drawInstanced(3,1,0,0);
-                    };
-                    bool evaluated=false;
-                    if(passes)
-                    {
-                        const uint32_t sceneIndex=nextView++,inputIndex=nextView++,outputIndex=nextView++;
-                        list->barriers(RenderBarrierStage::GRAPHICS,{
-                            RenderTextureBarrier(rt.texture.get(),RenderTextureLayout::SHADER_READ),
-                            RenderTextureBarrier(up.neuralInput.get(),RenderTextureLayout::COLOR_WRITE)});
-                        sets[0]->setTexture(sceneIndex,rt.texture.get(),RenderTextureLayout::SHADER_READ);
-                        fullScreen(up.neuralInputFramebuffer.get(),up.neuralToPipeline.get(),{sceneIndex,0,0,width});
-                        list->barriers(RenderBarrierStage::COMPUTE,{
-                            RenderTextureBarrier(up.neuralInput.get(),RenderTextureLayout::SHADER_READ),
-                            RenderTextureBarrier(up.motion.get(),RenderTextureLayout::SHADER_READ),
-                            RenderTextureBarrier(up.depth.get(),RenderTextureLayout::SHADER_READ),
-                            RenderTextureBarrier(up.neuralMask.get(),RenderTextureLayout::SHADER_READ)});
-                        NeuralFrame nf;
-                        nf.depth=static_cast<D3D12Texture*>(up.depth.get())->d3d;
-                        nf.motion=static_cast<D3D12Texture*>(up.motion.get())->d3d;
-                        nf.mask=static_cast<D3D12Texture*>(up.neuralMask.get())->d3d;
-                        nf.width=width;nf.height=height;nf.renderWidth=neuralRenderWidth;nf.renderHeight=neuralRenderHeight;
-                        nf.jitterX=jitterX;nf.jitterY=jitterY;
-                        nf.reset=up.neuralReset||!up.hasPrevious;
-                        // Reverse-Z device depth (FD_DLSS_NR_DEPTH_NORMAL=1, diagnostic: flag it as not inverted).
-                        nf.depthInverted=!CachedEnv("FD_DLSS_NR_DEPTH_NORMAL");
-                        nf.settings=neuralSettings;
-                        auto* commandList=static_cast<D3D12CommandList*>(list.get());
-                        // Pass k reads pass k-1's output (ping-pong between two UAV textures).
-                        RenderTexture* passInput=up.neuralInput.get();
-                        RenderTexture* passOutput=up.neuralOutput.get();
-                        evaluated=true;
-                        for(uint32_t pass=0;pass<neuralSettings.passes&&evaluated;++pass)
-                        {
-                            list->barriers(RenderBarrierStage::COMPUTE,{
-                                RenderTextureBarrier(passInput,RenderTextureLayout::SHADER_READ),
-                                RenderTextureBarrier(passOutput,RenderTextureLayout::GENERAL)});
-                            nf.color=static_cast<D3D12Texture*>(passInput)->d3d;
-                            nf.output=static_cast<D3D12Texture*>(passOutput)->d3d;
-                            evaluated=up.ngx.EvaluateNeural(commandList->d3d,nf,pass);
-                            commandList->notifyDescriptorHeapWasChangedExternally();
-                            if(pass+1<neuralSettings.passes)
-                            {
-                                passInput=passOutput;
-                                passOutput=passOutput==up.neuralOutput.get()?up.neuralOutput2.get():up.neuralOutput.get();
-                            }
-                        }
-                        RenderTexture* finalOutput=passOutput;
-                        // NGX changes the descriptor heaps, root signature, pipeline and topology.
-                        commandList->notifyDescriptorHeapWasChangedExternally();
-                        commandList->activeTopology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
-                        commandList->activeGraphicsPipeline=nullptr;
-                        commandList->activeGraphicsPipelineLayout=nullptr;
-                        commandList->activeComputePipelineLayout=nullptr;
-                        commandList->targetFramebuffer=nullptr;
-                        if(evaluated&&!CachedEnv("FD_DLSS_NR_BYPASS"))
-                        {
-                            // FD_DLSS_NR_SPLIT (comparison): 1 = the result on the right half
-                            // only; 2 = the middle of the scene twice, before | after.
-                            list->barriers(RenderBarrierStage::GRAPHICS,{
-                                RenderTextureBarrier(finalOutput,RenderTextureLayout::SHADER_READ),
-                                RenderTextureBarrier(rt.texture.get(),RenderTextureLayout::COLOR_WRITE)});
-                            sets[0]->setTexture(inputIndex,up.neuralInput.get(),RenderTextureLayout::SHADER_READ);
-                            sets[0]->setTexture(outputIndex,finalOutput,RenderTextureLayout::SHADER_READ);
-                            fullScreen(up.neuralWriteFramebuffer.get(),fromPipeline.get(),{inputIndex,outputIndex,uint32_t(split),width});
-                            up.neuralReset=false;
-                            if(++up.neuralFrames%600==1)fprintf(stderr,"native upscaler: DLSS neural rendering applied (%llu frames, %ux%u, model %u, %u pass%s)\n",
-                                (unsigned long long)up.neuralFrames,width,height,neuralSettings.model,neuralSettings.passes,neuralSettings.passes>1?"es":"");
-                        }
-                    }
-                    list->barriers(RenderBarrierStage::GRAPHICS,{
-                        RenderTextureBarrier(rt.texture.get(),RenderTextureLayout::COLOR_WRITE),
-                        RenderTextureBarrier(up.motion.get(),RenderTextureLayout::COLOR_WRITE),
-                        RenderTextureBarrier(up.depth.get(),RenderTextureLayout::COLOR_WRITE)});
-                    rt.shaderRead=false;
-                    current=nullptr;
-                    NeuralStatus status;
-                    status.available=1;status.active=evaluated;status.frames=up.neuralFrames;status.width=width;status.height=height;
-                    PublishNeuralStatus(status);
-                }
-                else if(neuralWanted&&up.ngx.Tried())
+                // DLSS 5 here only at the final stage (FD_DLSS_NR_STAGE=final): on the
+                // graded image, as RTX Remix does. By default it ran on the scene before
+                // the grading (runUpscale).
+                if(neuralFinalStage&&neuralReady&&up.motion&&up.depth)
+                    applyNeural(rt,target.width,target.height,false);
+                else if(!neuralDone&&neuralWanted&&up.ngx.Tried())
                 {
                     NeuralStatus status;
                     status.available=up.ngx.NeuralAvailable()?1:0;

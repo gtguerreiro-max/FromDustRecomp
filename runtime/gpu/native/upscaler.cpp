@@ -291,10 +291,35 @@ bool Upscaler::EvaluateNeural(ID3D12GraphicsCommandList* list, const NeuralFrame
     if (!available || !neuralAvailable || neuralFailed || pass >= kMaxNeuralPasses || !f.color || !f.output || !f.depth || !f.motion) return false;
     NeuralPass& state = neural[pass];
     ::NVSDK_NGX_Handle*& neuralFeature = state.feature;
-    if (!neuralFeature || state.width != f.width || state.height != f.height || state.preset != f.settings.preset)
+    // The model's tuning (style, strengths, intensity, masks). It is latched when the
+    // feature is created (the OptiScaler DLSS 5 forks' finding, used by the PGR4 port):
+    // set before the creation too, and the feature created again when it changes.
+    // Before, the feature was created without it, so the model kept NGX's defaults
+    // whatever F1 said.
+    // FD_DLSS_NR_AUTOMASK (diagnostic): 1 the skin auto mask by "min", 2 the auto
+    // mask with the control mask taking precedence. Off by default, as in the PGR4
+    // port, where by "min" it kept the model to faces and skin.
+    static const int autoMask = [] { const char* v = getenv("FD_DLSS_NR_AUTOMASK"); return v && *v ? std::clamp(atoi(v), 0, 2) : 0; }();
+    auto tune = [&]() {
+        NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, f.settings.tone);
+        NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength, f.settings.structure);
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSSNR_Style, f.settings.model);
+        NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_Intensity, f.settings.intensity);
+        NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, autoMask ? 1 : 0);
+        NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_MaskBlendMode,
+                                 int(autoMask == 1 ? NVSDK_NGX_DLSSNR_Mask_Blend_Mode_Min : NVSDK_NGX_DLSSNR_Mask_Blend_Mode_None));
+        // -1: skin follows the local structure strength (the model's own default).
+        NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, -1.0f);
+    };
+    // FD_DLSS_NR_NO_LATCH=1 (diagnostic): the old way, tuning only at evaluation.
+    static const bool latch = getenv("FD_DLSS_NR_NO_LATCH") == nullptr;
+    const bool tuningChanged = latch && (state.model != f.settings.model || state.intensity != f.settings.intensity ||
+                                         state.structure != f.settings.structure || state.tone != f.settings.tone);
+    if (!neuralFeature || state.width != f.width || state.height != f.height || state.preset != f.settings.preset || tuningChanged)
     {
         if (neuralFeature) NVSDK_NGX_D3D12_ReleaseFeature(neuralFeature);
         neuralFeature = nullptr;
+        if (latch) tune();
         NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSSNR_Width, f.width);
         NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSSNR_Height, f.height);
         NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset, f.settings.preset);
@@ -307,8 +332,12 @@ bool Upscaler::EvaluateNeural(ID3D12GraphicsCommandList* list, const NeuralFrame
             return false;
         }
         state.width = f.width; state.height = f.height; state.preset = f.settings.preset;
-        fprintf(stderr, "native upscaler: DLSS neural rendering %ux%u (render %ux%u, preset %d, pass %u)\n", f.width, f.height,
-                f.renderWidth, f.renderHeight, f.settings.preset, pass + 1);
+        state.model = f.settings.model; state.intensity = f.settings.intensity;
+        state.structure = f.settings.structure; state.tone = f.settings.tone;
+        fprintf(stderr, "native upscaler: DLSS neural rendering %ux%u (render %ux%u, preset %d, pass %u, model %u, "
+                "intensity %.2f, structure %.2f, tone %.2f, auto mask %d%s)\n", f.width, f.height, f.renderWidth, f.renderHeight,
+                f.settings.preset, pass + 1, f.settings.model, f.settings.intensity, f.settings.structure, f.settings.tone,
+                autoMask, latch ? "" : ", not latched");
     }
     NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_Color, f.color);
     NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_Output, f.output);
@@ -319,26 +348,11 @@ bool Upscaler::EvaluateNeural(ID3D12GraphicsCommandList* list, const NeuralFrame
     NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_ControlMask, f.mask);
     NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_UI, nullptr);
     NVSDK_NGX_Parameter_SetD3d12Resource(params, NVSDK_NGX_Parameter_DLSSNR_UIAlpha, nullptr);
-    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, f.settings.tone);
-    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength, f.settings.structure);
-    NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSSNR_Style, f.settings.model);
-    // The skin auto mask is off, as in the PGR4 port (where, combined with the white
-    // control mask by "min", it kept the model to faces and skin): the white control
-    // mask alone applies it to the whole scene. In From Dust the scene changed about
-    // as much either way (first level: mean 6.1 / 6.0 of 255).
-    // FD_DLSS_NR_AUTOMASK (diagnostic): 1 the auto mask by "min", 2 the auto mask
-    // with the control mask taking precedence.
-    static const int autoMask = [] { const char* v = getenv("FD_DLSS_NR_AUTOMASK"); return v && *v ? std::clamp(atoi(v), 0, 2) : 0; }();
-    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, autoMask ? 1 : 0);
-    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_MaskBlendMode,
-                             int(autoMask == 1 ? NVSDK_NGX_DLSSNR_Mask_Blend_Mode_Min : NVSDK_NGX_DLSSNR_Mask_Blend_Mode_None));
-    // -1: skin follows the local structure strength (the model's own default).
-    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, -1.0f);
+    tune();
     NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_Reset, f.reset ? 1 : 0);
     NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_DepthInverted, f.depthInverted ? 1 : 0);
     NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_Enabled, 1);
     NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_DLSSNR_UICorrection, 0);
-    NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_Intensity, f.settings.intensity);
     NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_MVecScaleX, 1.0f);
     NVSDK_NGX_Parameter_SetF(params, NVSDK_NGX_Parameter_DLSSNR_MVecScaleY, 1.0f);
     auto rect = [&](const char* x, const char* y, const char* w, const char* h, uint32_t width, uint32_t height) {

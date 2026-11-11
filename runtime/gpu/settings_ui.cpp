@@ -174,6 +174,8 @@ private:
     bool memoryAvailable_=false;
     std::string selectTab_;
     bool nativeBackend_=false;
+    // F8: DLSS 5 on / off in play (as the PGR4 port), shown for 2 s.
+    std::chrono::steady_clock::time_point neuralToggled_{};
     std::string adapterName_;
     Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter_;
     DXGI_QUERY_VIDEO_MEMORY_INFO memory_{};
@@ -208,6 +210,11 @@ private:
             e.set_handled(true);
         } else if (key == VK_F1 || (key == VK_ESCAPE && visible_)) {
             Toggle();
+            e.set_handled(true);
+        } else if (key == VK_F8 && nativeBackend_) {
+            // DLSS 5 on / off, to compare in play (saved like the F1 checkbox).
+            auto d = settings::Get(); d.neural = !d.neural; Changed(d);
+            neuralToggled_ = std::chrono::steady_clock::now();
             e.set_handled(true);
         } else if (key == VK_F11 || (key == VK_RETURN && e.is_alt_pressed())) {
             auto d = settings::Get(); d.fullscreen = !d.fullscreen; Changed(d);
@@ -250,11 +257,32 @@ private:
                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove;
         // A short hint at start-up; afterwards only the enabled counters.
         const bool hint = now - started_ < std::chrono::seconds(15) && !visible_;
+        const bool neuralNotice = nativeBackend_ && neuralToggled_.time_since_epoch().count() &&
+                                  now - neuralToggled_ < std::chrono::seconds(2) && !visible_;
+        // The F8 notice: its own window at the top centre, sized from its text (an
+        // auto-sized window takes its size from the previous frame, so a new text
+        // could show cut off).
+#ifdef FD_NATIVE_RENDERER
+        if (neuralNotice) {
+            const auto status = gpu::native::GetNeuralStatus();
+            const char* text = !d.neural ? "DLSS 5 off" : status.available == 0 ? "DLSS 5 unavailable" : "DLSS 5 on";
+            const ImVec4 colour = !d.neural ? ImVec4(1, 1, 1, 1) : status.available == 0 ? ImVec4(1, .5f, .4f, 1) : ImVec4(.55f, .85f, .55f, 1);
+            const ImVec2 pad = ImGui::GetStyle().WindowPadding;
+            const ImVec2 textSize = ImGui::CalcTextSize(text);
+            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * .5f, 18), ImGuiCond_Always, ImVec2(.5f, 0));
+            ImGui::SetNextWindowSize(ImVec2(textSize.x + pad.x * 2, textSize.y + pad.y * 2), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.88f);
+            ImGui::Begin("##dlss5_notice", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                                                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs);
+            ImGui::TextColored(colour, "%s", text);
+            ImGui::End();
+        }
+#endif
         if (hint || d.showFps || d.showFrameTime) {
         ImGui::Begin("##pc_hud", nullptr, hudFlags);
         bool first = true;
         auto item = [&] { if (!first) ImGui::SameLine(); first = false; };
-        if (hint) { item(); ImGui::TextDisabled("F1  Settings"); }
+        if (hint) { item(); ImGui::TextDisabled(nativeBackend_ ? "F1  Settings    F8  DLSS 5 on / off" : "F1  Settings"); }
         if (d.showFps) {
             item();
 #ifdef FD_NATIVE_RENDERER
@@ -367,7 +395,7 @@ private:
                     const auto neural = gpu::native::GetNeuralStatus();
                     ImGui::Checkbox("Neural rendering", &d.neural);
                     Help("NVIDIA DLSS 5 Neural Rendering: an AI model reworks the lighting and fine detail of the 3D scene "
-                         "(guided by its depth and motion), before the HUD is drawn. Needs an RTX 50 series GPU and a recent "
+                         "(guided by its depth and motion), before the game's colour grading and the HUD. F8 turns it on and off in play. Needs an RTX 50 series GPU and a recent "
                          "driver. It runs at the internal resolution and is heavy: on an RTX 5060 Ti about 99 -> 55 FPS at 2.5×, "
                          "72 FPS at 2× and 83 FPS at 1.5× (first level, DLAA); Frame Generation 2× doubles what is shown. "
                          "Applies immediately.");

@@ -99,11 +99,13 @@ an experimental native renderer that draws the game's Direct3D calls directly.
 Work in progress. The game reaches and plays the first levels; complete progression has not
 been checked.
 
-- **DLSS 5 Neural Rendering works on the whole scene, but its effect there is mild.** In the
-  first level it changes all the terrain and water: on a side-by-side view of one frame, a mean
-  of about 6 out of 255 per pixel. The model's skin auto mask is now off by default, as in the
-  PGR4 port, where it had limited the effect to skin; here it made little difference. Stronger
-  settings (structure and tone up to 200 %, model A, 2-3 passes) are in F1 > Graphics.
+- **DLSS 5 Neural Rendering now works on the whole scene.** As in the PGR4 port, it runs on
+  the scene right after DLAA / DLSS, before the game's depth of field, bloom and colour grading,
+  so the model's change goes through the game's own look and the HUD stays untouched. On the
+  finished image, where it ran before, the effect was barely visible. In the first level, model A
+  at 200 % now changes 10.5 % of the pixels by more than 10/255 (0.4 % before). Its skin auto
+  mask is off. **F8** turns it on and off in play; strength settings (model, structure, tone,
+  passes) are in F1 > Graphics.
 - The native renderer runs the game at its 30 FPS, or higher with the fixed-rate world (60-120 on
   screen with Frame Generation).
 - A physical controller and an in-game save point still need a full test.
@@ -139,7 +141,8 @@ executable in `build\` finds the sibling `game\` folder by itself.
 
 Press **F1** for the settings panel (Escape or F1 closes it). An Xbox controller works through
 XInput. With the mouse: the pointer moves the Breath, the left button absorbs, the right button
-releases, the wheel zooms and the middle button turns the camera. Default keyboard:
+releases, the wheel zooms and the middle button turns the camera. In the native renderer
+**F8** turns DLSS 5 on and off, to compare in play. Default keyboard:
 
 | Action | Keys |
 | --- | --- |

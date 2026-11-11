@@ -173,6 +173,9 @@ private:
         ::NVSDK_NGX_Handle* feature = nullptr;
         uint32_t width = 0, height = 0;
         int preset = -1;
+        // The tuning the feature was created with (the model latches it at creation).
+        uint32_t model = ~0u;
+        float intensity = -1, structure = -1, tone = -1;
     } neural[kMaxNeuralPasses];
     bool neuralFailed = false;
     UpscalerSetup current{};
