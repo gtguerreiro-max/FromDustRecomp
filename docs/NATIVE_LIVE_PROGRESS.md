@@ -224,7 +224,7 @@ Do not declare completion on the basis of another isolated-frame milestone.
 - The live input can be saved with `ReplayFrame::Save` for repeatable debugging.
 - Final whole-path title validation PASSED using
   `tools/validate_native_textures.ps1 -NativeFrame -RunSeconds 100 -CaptureAt 60
-   -OutputDirectory F:\FromDustRecomp\build\native-cpu-frame-bound-textures -Screenshot`
+   -OutputDirectory build\native-cpu-frame-bound-textures -Screenshot`
   with `FD_REPLAY_DEBUG=1`. 136 CPU geometry draws, 192 ordered commands, 8,080
   converted vertex bytes, 148,544 raw stream bytes, equal CPU/GPU serial 853,
   zero errors. The image compares at 51.805658 dB with zero pixels >32 error.
@@ -280,7 +280,7 @@ Do not declare completion on the basis of another isolated-frame milestone.
 
 ## Build and relevant files
 
-Workspace `F:\FromDustRecomp`, game `F:\FromDustRecomp\game`.
+Workspace: the repository root, game in `game\`.
 No applicable AGENTS found. Do not spawn agents (developer forbids unless user
 or AGENTS explicitly requests delegation). Git worktree contains many earlier
 uncommitted changes; preserve them. No commits or destructive cleanup requested.

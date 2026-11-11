@@ -7,7 +7,7 @@
 import os
 import traceback
 
-ROOT = r"F:\FromDustRecomp\build\rdoc"
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "rdoc")
 LOG = os.path.join(ROOT, "script.log")
 
 

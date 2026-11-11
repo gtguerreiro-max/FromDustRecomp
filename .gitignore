@@ -24,3 +24,6 @@ third_party/streamline_dl/
 third_party/dlss_sdk/
 # NVIDIA DLSS 5 Neural Rendering SDK (RTX Remix external package, see docs).
 third_party/dlss_nr/
+
+# Frame and memory dumps written in the working folder (game-derived).
+/*.bin
